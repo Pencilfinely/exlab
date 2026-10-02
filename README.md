@@ -1,4 +1,4 @@
-# Experiment Manager
+# ExLab
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -7,17 +7,19 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Current version: 0.4.5.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
-Adds mobile monitoring and limited remote controls with separate, revocable device credentials. Update the controller before connecting the mobile client. Includes experiment matrices, resource budgets, optional AI-assisted import, result reports, and local GPU settings. See the [release notes](docs/RELEASE-0.4.5.md). Updates start when you request them.
+**Current version: 0.5.0.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+Adds Docker startup prompts, deactivation and resource release, synchronized Centers with explicit handover, clipboard connections, editable login startup preferences and device names. The applications and release assets now use the ExLab brand. See the [release notes and multi-Center setup](docs/RELEASE-0.5.0.md).
 
 ## Download and install
 
-Get application installers or complete ZIPs from the [latest release](https://github.com/Pencilfinely/experiment-manager/releases/latest). GitHub's automatically generated Source code archives are not installers.
+Get application installers or complete ZIPs from the [latest release](https://github.com/Pencilfinely/exlab/releases/latest). GitHub's automatically generated Source code archives are not installers.
+
+Existing desktop clients can upgrade to ExLab using their built-in updater. The original repository remains a migration download channel; upgraded clients automatically use the ExLab repository. Update Center and Worker separately.
 
 | Computer | Recommended asset suffix | Application | Prerequisites |
 |---|---|---|---|
-| Windows 11 controller | windows-controller-x64-Setup.exe | **Experiment Center**, ExperimentCenter.exe | Microsoft Edge; no WSL, Docker or separate Python installation |
-| Windows 11 NVIDIA worker | windows-worker-x64-Setup.exe | **Experiment Worker**, ExperimentWorker.exe | WSL2, Ubuntu 22.04+, Docker Desktop with integration enabled for that Ubuntu, NVIDIA Windows driver |
+| Windows 11 controller | windows-controller-x64-Setup.exe | **ExLab Center**, ExLabCenter.exe | Microsoft Edge; no WSL, Docker or separate Python installation |
+| Windows 11 NVIDIA worker | windows-worker-x64-Setup.exe | **ExLab Worker**, ExLabWorker.exe | WSL2, Ubuntu 22.04+, Docker Desktop with integration enabled for that Ubuntu, NVIDIA Windows driver |
 | Native Ubuntu 22.04+ NVIDIA server | ubuntu-worker-x64.zip | Background worker after installation | Docker Engine, NVIDIA Linux driver and NVIDIA Container Toolkit; normal-user access to Docker |
 
 Windows installers install for the current user without administrator privileges. Firewall or system dependency changes may still require elevation.
@@ -26,9 +28,9 @@ First worker setup downloads large images; allow at least 8 GiB plus space for c
 
 ## First use: three steps
 
-### 1. Open Experiment Center
+### 1. Open ExLab Center
 
-Start **Experiment Center**. Its sidebar contains Overview, Experiments, Experiment Matrices, Compute, Algorithm Projects and Settings.
+Start **ExLab Center**. Its sidebar contains Overview, Experiments, Experiment Matrices, Compute, Algorithm Projects and Settings.
 The controller service runs in the background; closing the page window does not stop it. Reopen it through the application or tray.
 Local application launch signs you in automatically. You do not need to copy an administrator token or keep a terminal open.
 
@@ -40,7 +42,7 @@ Do not use the replaceable application directory as your data directory.
 In **Compute**, add a computer, give it a unique name and select a controller address **that the worker can reach**. Download its pairing file.
 Copy the worker installer/package and **NAME.pairing.json** to that computer.
 
-- **Windows:** install and open Experiment Worker, choose the pairing file and Ubuntu distribution, then start setup. The application checks prerequisites, verifies GPUs, creates configuration and accepts work in the background. Progress and logs stay available in its window.
+- **Windows:** install and open ExLab Worker, choose the pairing file and Ubuntu distribution, then start setup. The application checks prerequisites, verifies GPUs, creates configuration and accepts work in the background. Progress and logs stay available in its window.
 - **Ubuntu:** extract the worker ZIP and run this command as your normal user from that directory, replacing the pairing-file path:
 
     bash Install-Worker.sh --pairing /path/to/node.pairing.json
@@ -120,6 +122,6 @@ Release builds select explicit application files. Credentials, user algorithms a
     python -m unittest discover -s tests -t . -v
     python scripts/build_release.py --download-python
 
-[Protocol](CONTRACT.md) · [Issues](https://github.com/Pencilfinely/experiment-manager/issues) · [Legacy SDK reference for developers](docs/ALGORITHM-INTEGRATION.md).
+[Protocol](CONTRACT.md) · [Issues](https://github.com/Pencilfinely/exlab/issues) · [Legacy SDK reference for developers](docs/ALGORITHM-INTEGRATION.md).
 
 MIT — see [LICENSE](LICENSE). CPython and separately downloaded components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).

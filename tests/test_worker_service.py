@@ -216,7 +216,8 @@ class WorkerServiceTests(unittest.TestCase):
         with patch.object(service, '_require_linux'), patch.object(service.Path, 'home', return_value=self.home), \
              patch.object(service, '_spawn_supervisor') as spawn, \
              patch.object(service, 'private_connection') as connection, \
-             patch.object(service, '_run_agent') as run_agent:
+             patch.object(service, '_run_agent') as run_agent, \
+             patch('expman.runtime.docker_status', return_value={'docker_ready': True, 'docker_endpoint': 'unix:///var/run/docker.sock'}):
             result = service.install(self.root, backend='detached', start_now=False)
             self.assertFalse(result['running'])
             self.assertEqual(result['status'], 'stopped')
@@ -332,6 +333,7 @@ class WorkerServiceTests(unittest.TestCase):
         with patch.object(service, '_require_linux'), patch.object(service, '_process_identity', return_value='100'), \
              patch.object(service.signal, 'signal'), \
              patch.object(service, '_run_agent', side_effect=KeyboardInterrupt) as run, \
+             patch('expman.runtime.docker_status', return_value={'docker_ready': True, 'docker_endpoint': 'unix:///var/run/docker.sock'}), \
              patch('expman.worker_setup.start', side_effect=AssertionError('must reuse existing config')):
             self.assertEqual(service.serve(self.root), 0)
         run.assert_called_once_with(self.root, str(self.config_path))
@@ -354,9 +356,19 @@ class WorkerServiceTests(unittest.TestCase):
                 patch.object(service, '_require_linux'), patch.object(service, '_process_identity', return_value='100'), \
                 patch.object(service.signal, 'signal'), patch.object(service, 'private_connection'), \
                 patch.object(service, '_run_agent', side_effect=run) as run_agent, \
+                patch('expman.runtime.docker_status', return_value={'docker_ready': True, 'docker_endpoint': 'unix:///run/expman-docker.sock'}), \
                 patch('expman.worker_setup.start', side_effect=AssertionError('must reuse prepared config')):
             self.assertEqual(service.serve(self.root), 0)
         run_agent.assert_called_once_with(self.root, str(self.config_path))
+
+    def test_unavailable_docker_never_starts_an_execution_agent(self):
+        self.select()
+        with patch.object(service, '_require_linux'), patch.object(service, '_process_identity', return_value='100'), \
+                patch.object(service.signal, 'signal'), patch.object(service, '_run_agent') as run_agent, \
+                patch('expman.runtime.docker_status', return_value={'docker_ready': False, 'detail': 'Docker is offline'}):
+            self.assertEqual(service.serve(self.root), 1)
+        run_agent.assert_not_called()
+        self.assertEqual(common.read_json(self.root / 'status.json')['status'], 'failed')
 
     def test_worker_cli_refuses_controller_release_before_any_lifecycle_action(self):
         output = io.StringIO()

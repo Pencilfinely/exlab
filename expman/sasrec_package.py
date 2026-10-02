@@ -6,11 +6,13 @@ history, old results or Docker image. Installation uses the recipient's config.
 import argparse
 import io
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import shutil
 import sys
-import tempfile
+import uuid
 import zipfile
 
 from .common import read_json
@@ -96,7 +98,12 @@ def read_payload(bundle_path):
 def install_package(bundle_path, node_config, profile=None):
     manifest, payload = read_payload(bundle_path)
     node_config = local_path(node_config).resolve()
-    with tempfile.TemporaryDirectory(prefix='expman-project-') as folder:
+    # Stage beside the recipient config, with its inherited Windows ACLs.
+    # Python 3.13's private global temp ACL can be inaccessible to a packaged
+    # Windows/managed process, even when the parent temp directory is writable.
+    folder = node_config.parent / ('.expman-project-' + uuid.uuid4().hex)
+    folder.mkdir(mode=0o700 if os.name != 'nt' else 0o777)
+    try:
         for name, value in payload.items():
             path = Path(folder) / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +111,10 @@ def install_package(bundle_path, node_config, profile=None):
         return import_project(node_config.parent, Path(folder) / 'project/SASRec_Original',
                               'config/research.json', manifest['name'], profile,
                               node_config=node_config)
+    finally:
+        if folder.resolve().parent != node_config.parent or not folder.name.startswith('.expman-project-'):
+            raise ValueError('Refusing cleanup outside the recipient staging directory')
+        shutil.rmtree(folder)
 
 
 def choose_config(value=None):

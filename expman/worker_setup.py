@@ -268,7 +268,24 @@ class WorkerSetup:
             raise ValueError('Use this machine\'s local Docker socket; remote Docker contexts are not supported.')
         self.endpoint = endpoint
         self.state['docker_endpoint'] = endpoint
-        self.command(['docker', 'info', '--format', '{{.ServerVersion}}'], timeout=20)
+        try:
+            self.command(['docker', 'info', '--format', '{{.ServerVersion}}'], timeout=20)
+        except RuntimeError:
+            # A saved socket may have changed after Docker Desktop/WSL restarts.
+            # Respect an explicitly selected host or context; repair only the
+            # endpoint remembered by this installation.
+            if context or os.environ.get('DOCKER_HOST') or not self.state.get('docker_endpoint'):
+                raise
+            self.endpoint = None
+            _, current = self.command(['docker', 'context', 'inspect', '--format',
+                                       '{{.Endpoints.docker.Host}}'], timeout=10)
+            current = current.strip()
+            if not current.startswith('unix:///') or any(c.isspace() for c in current) or current == endpoint:
+                raise
+            self.endpoint = current
+            self.command(['docker', 'info', '--format', '{{.ServerVersion}}'], timeout=20)
+            self.state['docker_endpoint'] = current
+            self.save()
         self.command(['git', '--version'], timeout=10)
         _, data = self.command(['nvidia-smi', '--query-gpu=uuid,name,memory.total,memory.free',
                                 '--format=csv,noheader,nounits'], timeout=20)
@@ -418,6 +435,8 @@ class WorkerSetup:
         from .__main__ import node_config
         print('[5/5] Saving configuration and task template / 保存配置与验收任务', flush=True)
         config = node_config(self.pairing['node_id'], self.pairing['hub_url'], self.pairing['token'], self.root / 'runtime')
+        if self.pairing.get('hub_urls'):
+            config['hub_urls'] = self.pairing['hub_urls']
         profile = 'pytorch-' + self.pairing['node_id']
         available_ram = _free_ram_mb()
         if available_ram is None or available_ram < 2048:

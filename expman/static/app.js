@@ -9,7 +9,7 @@ const projectSelections = new Map(), projectUploads = new Map();
 let projectPresets = [];
 let nodeResourceEditor=null,nodeResourceBusy=false;
 let currentView='overview', localImportAvailable=null, importJob=null, importDraft=null, importExperimentIndex=0, importJsonDirty=false, importPolling=false;
-const viewLabels={overview:['总览','实验、算力和算法项目，都在这里管理。'],experiments:['实验记录','查看进度、指标和结果，管理每一次运行。'],matrices:['实验矩阵','组合数据集与参数，自动分配算力，统一整理结果。'],compute:['算力管理','连接 Windows 与 Ubuntu 算力机，查看资源和接单状态。'],projects:['算法项目','从原始目录导入，检查配置，再分发到算力机。'],settings:['设置与帮助','管理连接与可选的 AI 辅助服务。']};
+const viewLabels={overview:['总览','实验、算力和算法项目，都在这里管理。'],experiments:['实验记录','查看进度、指标和结果，管理每一次运行。'],matrices:['实验矩阵','组合数据集与参数，自动分配算力，统一整理结果。'],compute:['算力管理','连接 Windows 与 Ubuntu 算力机，查看资源和接单状态。'],projects:['算法项目','从原始目录导入，检查配置，再分发到算力机。'],settings:['设置','连接你的工作空间与设备。']};
 const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
 function node(tag, text, cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=String(text); if(cls)e.className=cls;return e; }
 function notify(message) { $('notice').textContent=message; $('notice').hidden=!message; }
@@ -86,7 +86,7 @@ function showView(view){
   history.replaceState(null,'',location.pathname+location.search+'#'+view);
   if(view==='projects'&&token)void loadImportHistory();
   if(view==='matrices'&&token)void loadMatrices();
-  if(view==='settings'&&token)void loadAISettings();
+  if(view==='settings'&&token){void loadAISettings();if(typeof loadCenterSettings==='function')void loadCenterSettings();}
   if(view==='experiments')requestAnimationFrame(drawChart);
 }
 document.querySelectorAll('[data-view]').forEach(button=>{button.onclick=()=>showView(button.dataset.view);button.title=viewLabels[button.dataset.view][0];button.setAttribute('aria-label',button.title);});
@@ -203,7 +203,7 @@ function openProjectRun(project){
   const seen=new Set();projectPresets=projectPresets.filter(item=>{const key=JSON.stringify([item.template.project_id,item.template.project_bundle_id,item.template.experiment_id||item.template.name,item.template.params]);if(seen.has(key))return false;seen.add(key);return true;});
   $('project-preset').replaceChildren(...projectPresets.map((item,i)=>{const option=node('option',item.template.name);option.value=String(i);return option;}));
   renderScheduling('project-scheduling',{mode:'auto'},0);
-  $('project-run-title').textContent='创建实验 / New experiment · '+project.name;$('project-run-form').hidden=false;fillProjectPreset();$('project-run-form').scrollIntoView({behavior:'smooth'});
+  $('project-run-title').textContent='创建实验 · '+project.name;$('project-run-form').hidden=false;fillProjectPreset();$('project-run-form').scrollIntoView({behavior:'smooth'});
 }
 function fillProjectPreset(){const selectedPreset=projectPresets[Number($('project-preset').value)];if(!selectedPreset)return;$('project-run-name').value=selectedPreset.template.name;$('project-params').value=JSON.stringify(selectedPreset.template.params,null,2);renderProjectParameters();renderTaskResources('project-resources',selectedPreset.template.resources,()=>{});}
 $('project-preset').onchange=fillProjectPreset;
@@ -266,7 +266,7 @@ function openNodeResources(id){
   for(const gpu of nodeResourceEditor.gpus){
     const section=node('div',undefined,'resource-gpu'),fields=node('div',undefined,'form-grid'),settings={...gpu,...desired.gpu_policy?.[gpu.uuid]};
     section.append(node('h4',gpu.name),node('p',gpu.uuid,'resource-uuid'));
-    if(gpu.local_enabled!==true)section.append(node('p','此卡未在算力端启用或缺少匹配的已验证环境。请在该机器打开 Experiment Worker → 显卡设置 → 检查并启用所选显卡；没有此入口时先更新算力端。','muted'));
+    if(gpu.local_enabled!==true)section.append(node('p','此卡未在算力端启用或缺少匹配的已验证环境。请在该机器打开 ExLab Worker → 显卡设置 → 检查并启用所选显卡；没有此入口时先更新算力端。','muted'));
     else{nodeResourceEditor.inputs.gpu_policy[gpu.uuid]=objectFields(fields,{max_jobs:settings.max_jobs??1,reserve_mb:settings.reserve_mb??2048},()=>{},
       {max_jobs:{type:'integer',min:0,max:256,description:'允许同卡运行多个实验时填 2 或更高；0 暂停在此卡启动新实验。'},reserve_mb:{type:'integer',min:0,max:gpu.total_mb,description:'从实时空闲显存中额外扣除，给波动留出余量。'}},
       {max_jobs:'此卡并发上限',reserve_mb:'显存预留 (MiB)'});section.append(fields);}
@@ -311,7 +311,8 @@ $('node-resource-form').onsubmit=event=>{event.preventDefault();void saveNodeRes
 $('node-resource-close').onclick=()=>{$('node-resource-form').hidden=true;nodeResourceEditor=null;};
 $('node-resource-reload').onclick=()=>nodeResourceEditor&&openNodeResources(nodeResourceEditor.id);
 function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
-  $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',n.mode==='drain'?'已暂停接单和启动新任务':online(n)?'允许运行 · 本地策略仍需满足':'已有任务保持归属，等待重新连接'));
+  $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.display_name||n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',n.mode==='drain'?'已暂停接单':online(n)?'可以接单':'等待连接'));
+    const rename=node('button','改名','text-button');rename.onclick=async()=>{const name=prompt('算力端显示名称',n.display_name||n.id);if(!name?.trim())return;try{await api('/api/node-rename',{node_id:n.id,name:name.trim()});await refresh();}catch(error){notify(error.message);}};box.append(rename);
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
     for(const g of snap.gpus||[]){const gpu=node('div',`${g.name} · 空闲 ${Number.isFinite(g.free_mb)?(g.free_mb/1024).toFixed(1):'?'} / ${(g.total_mb/1024).toFixed(1)} GiB`,'gpu'),bar=node('div',undefined,'bar'),fill=node('i');fill.style.width=Math.max(0,Math.min(100,100*(1-g.free_mb/g.total_mb)))+'%';bar.append(fill);gpu.append(bar);box.append(gpu);}
     if(Number.isFinite(snap.pending_uploads))box.append(node('p',`待回传文件：${snap.pending_uploads}`));
@@ -319,7 +320,7 @@ function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n
     const resourceButton=node('button','资源设置','subtle');resourceButton.onclick=()=>openNodeResources(n.id);box.append(resourceButton);
     const templateDetails=node('details',undefined,'worker-templates');templateDetails.append(node('summary','高级：节点任务模板'));
     for(const template of (Array.isArray(snap.task_templates)?snap.task_templates:[])){
-      const use=node('button','填入任务 / Use: '+String(template.name||'template'),'subtle');
+      const use=node('button','使用模板 · '+String(template.name||'template'),'subtle');
       use.onclick=()=>{$('spec').value=JSON.stringify(template,null,2);$('grid').value='{}';showView('experiments');$('advanced-submit').open=true;notify('已填入节点任务，核对后点击“提交到队列”。');$('submit-form').scrollIntoView({behavior:'smooth'});};templateDetails.append(use);
     }
     if(templateDetails.children.length>1)box.append(templateDetails);const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
@@ -364,7 +365,7 @@ $('metric-select').onchange=drawChart;$('close-detail').onclick=()=>{selected=nu
 function renderOverview(){
   $('overview-workers').replaceChildren();
   for(const worker of (state.nodes||[]).slice(0,5)){
-    const row=node('div',undefined,'list-row'),label=node('div');label.append(node('strong',worker.id));
+    const row=node('div',undefined,'list-row'),label=node('div');label.append(node('strong',worker.display_name||worker.id));
     const gpus=worker.snapshot?.gpus||[];label.append(node('small',gpus.length?gpus.map(g=>g.name.replace(/^NVIDIA (GeForce )?/, '')).join(' / '):'等待设备信息'));
     const online=Date.now()/1000-worker.last_seen<45;row.append(label,node('span',online?(worker.mode==='drain'?'暂停接单':'在线'):'离线','badge '+(online?'succeeded':'')));$('overview-workers').append(row);
   }

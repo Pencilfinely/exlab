@@ -20,6 +20,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import urllib.error
 from urllib.parse import parse_qs, urlsplit
 import uuid
 import zipfile
@@ -29,6 +30,7 @@ from .common import atomic_json, expand_grid, now, read_json, safe_child, sha256
 from .scheduler import choose_assignment
 from .matrix import MatrixHubMixin, initialize as initialize_matrices
 from .mobile import MobileHubMixin, initialize as initialize_mobile
+from .centers import CenterHubMixin, initialize as initialize_centers, open_remote
 from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_policies,
                           validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
 
@@ -190,7 +192,7 @@ def inspect_update_state(db):
                 "管理端当前无未完成实验或已登记的文件传输，可以安装更新；离线节点恢复后继续同步", **counts)
 
 
-class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
+class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -267,10 +269,17 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
         initialize_matrices(self.db)
         initialize_node_policies(self.db)
         initialize_mobile(self.db)
+        with self.lock:
+            if 'display_name' not in {row['name'] for row in self.db.execute('PRAGMA table_info(nodes)')}:
+                self.db.execute("ALTER TABLE nodes ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+        initialize_centers(self)
+        self.center_start_sync()
 
     @contextmanager
     def transaction(self):
         with self.lock:
+            if hasattr(self, 'center_state'):
+                self.center_assert_writable()
             if self.updating:
                 raise APIError(503, "Controller is stopping for an update; retry after it restarts")
             self.db.execute("BEGIN IMMEDIATE")
@@ -319,10 +328,14 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
             return result
 
     def close(self):
+        self.center_stop.set()
+        if self.center_thread is not None:
+            self.center_thread.join(timeout=35)
         if self.local_imports is not None:
             self.local_imports.close()
-        with self.lock:
-            self.db.close()
+        with self.center_sync_lock:
+            with self.lock:
+                self.db.close()
 
     def project_imports(self):
         with self.lock:
@@ -356,6 +369,9 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
             for node_id, configured in self.config["nodes"].items():
                 if secrets.compare_digest(token, configured):
                     return "node", node_id
+            center_id = self.center_authenticate(token)
+            if center_id:
+                return 'center', center_id
         raise APIError(401, "Invalid bearer token")
 
     def enroll(self, payload):
@@ -363,7 +379,24 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
         # Validate all fields before changing the durable enrollment registry.
         pairing = validate_pairing(dict(payload, schema=1, token='validation-placeholder-only'))
         pairing['token'] = self.add_node(pairing['node_id'])
+        addresses = self.center_addresses()
+        if addresses:
+            pairing['hub_urls'] = list(dict.fromkeys([pairing['hub_url'], *addresses]))
         return pairing
+
+    def center_addresses(self):
+        return list(dict.fromkeys(value['hub_url'] for value in self.config.get('centers', {}).values()
+                                 if value.get('hub_url') and not value.get('revoked')))
+
+    def rename_node(self, payload):
+        name = payload.get('name')
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80:
+            raise APIError(400, '名称应为 1–80 字')
+        with self.transaction():
+            if not self.db.execute('SELECT 1 FROM nodes WHERE id=?', (payload.get('node_id'),)).fetchone():
+                raise APIError(404, '未知算力端')
+            self.db.execute('UPDATE nodes SET display_name=? WHERE id=?', (name.strip(), payload['node_id']))
+        return {'saved': True}
 
     def _event(self, job_id, kind, data):
         self.db.execute("INSERT INTO events(job_id,time,kind,data) VALUES (?,?,?,?)", (job_id, now(), kind, _json(data)))
@@ -414,7 +447,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
                 node["snapshot"]["task_templates"] = [item for item in node["snapshot"].get("task_templates", [])
                     if item.get("project_bundle_id") not in deleted_bundles]
             return {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
-                    "time": timestamp, "version": __version__}
+                    "time": timestamp, "version": __version__, 'center': self.center_info()}
 
     def submit(self, payload):
         _object(payload, "request")
@@ -615,7 +648,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin):
             deployments = [item for item in deployments if
                 ("project-delete-v1" if item["action"] == "delete" else "project-bundle-v1") in capabilities]
             response = {"jobs": jobs, "mode": mode, "ack": ack,
-                        "project_deployments": deployments}
+                        "project_deployments": deployments, 'hub_urls': self.center_addresses()}
             if NODE_POLICY_CAPABILITY in capabilities:
                 response["resource_policy"] = self._node_resource_policy(node_id)
             return response
@@ -1002,16 +1035,47 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".css": "text/css; charset=utf-8"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/app.js", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/app.js": "app.js", "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/app.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/app.js": "app.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
-                content_type = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "timing.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8", "favicon.ico": "image/vnd.microsoft.icon"}[filename]
+                content_type = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".ico": "image/vnd.microsoft.icon"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
             if not path.startswith("/api/"):
                 raise APIError(404, "Not found")
+            local_center = path.startswith('/api/local/centers/')
+            if hub.center_state['mode'] == 'replica' and not local_center and path != '/api/centers/identity':
+                if path.startswith('/api/local/'):
+                    raise APIError(403, '同步 Center 可上传项目包；文件夹导入请在调度主控操作')
+                link = hub.center_state['upstream']
+                authorization = self.headers.get('Authorization', '')
+                remote_token = authorization[7:] if authorization.startswith('Bearer ') else ''
+                if secrets.compare_digest(remote_token, hub.config['admin_token']):
+                    remote_token = link['token']
+                data = _json(self._body()).encode() if self.command == 'POST' else None
+                try:
+                    response = open_remote(link['hub_url'] + self.path, remote_token, data=data, method=self.command)
+                except urllib.error.HTTPError as error:
+                    self._bytes(error.read(MAX_BODY), status=error.code)
+                    return
+                except OSError:
+                    if self.command != 'GET' or path not in ('/api/state', '/api/job', '/api/matrices',
+                            '/api/matrices/item', '/api/results.csv', '/api/matrices/report.md', '/api/artifact'):
+                        raise APIError(503, '调度主控暂时离线，本地副本可查看；恢复连接后再操作')
+                else:
+                    with response:
+                        self.send_response(response.status)
+                        for name in ('Content-Type', 'Content-Length', 'Content-Disposition'):
+                            if response.headers.get(name):
+                                self.send_header(name, response.headers[name])
+                        self.send_header('Cache-Control', 'no-store')
+                        self.send_header('X-Content-Type-Options', 'nosniff')
+                        self.end_headers()
+                        for block in iter(lambda: response.read(512 * 1024), b''):
+                            self.wfile.write(block)
+                    return
             if path.startswith("/api/mobile/") and path not in ("/api/mobile/devices", "/api/mobile/revoke"):
                 query = parse_qs(url.query)
                 identities = query.get("id", [])
@@ -1024,7 +1088,14 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
             required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download") else "admin"
-            if role != required_role:
+            center_routes = ('/api/centers/identity', '/api/centers/snapshot', '/api/centers/file',
+                             '/api/centers/handoff', '/api/centers/register')
+            if role == 'center' and (path.startswith('/api/local/') or path in
+                    ('/api/centers/enroll', '/api/centers/revoke', '/api/update-status')):
+                raise APIError(403, '请在主控本机管理连接凭证或软件生命周期')
+            if path in center_routes and role not in ('admin', 'center'):
+                raise APIError(403, '需要主控凭证')
+            if path not in center_routes and role != required_role and not (role == 'center' and required_role == 'admin'):
                 raise APIError(403, "Token does not have permission for this endpoint")
             if path.startswith("/api/local/"):
                 from .project_import import is_loopback
@@ -1037,7 +1108,17 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     raise APIError(400, f"Exactly one {name} query parameter is required")
                 return values[0]
             if self.command == "GET":
-                if path == "/api/mobile/devices":
+                if path in ('/api/centers/identity', '/api/local/centers/status'):
+                    info = hub.center_info()
+                    if path.startswith('/api/local/'):
+                        from .pairing import address_candidates
+                        info['addresses'] = address_candidates(self.server.server_address[1])
+                    self._send(info)
+                elif path == '/api/centers/snapshot':
+                    self._send(hub.center_snapshot())
+                elif path == '/api/centers/file':
+                    self._send(hub.center_file(parameter('key'), int(parameter('offset'))))
+                elif path == "/api/mobile/devices":
                     self._send(hub.mobile_devices())
                 elif path == "/api/local/imports":
                     self._send(hub.project_imports().listing())
@@ -1089,6 +1170,14 @@ def make_server(hub, host="127.0.0.1", port=8765):
             elif self.command == "POST":
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
+                          '/api/node-rename': hub.rename_node,
+                          '/api/centers/enroll': hub.center_enroll, '/api/centers/revoke': hub.center_revoke,
+                          '/api/centers/register': lambda p: hub.center_register(node_id, p),
+                          '/api/centers/handoff': lambda p: hub.center_handoff(node_id, p),
+                          '/api/local/centers/connect': hub.center_connect,
+                          '/api/local/centers/rename': hub.center_rename,
+                          '/api/local/centers/sync': hub.center_sync,
+                          '/api/local/centers/promote': hub.center_promote,
                           "/api/mobile/devices": hub.mobile_enroll, "/api/mobile/revoke": hub.mobile_revoke,
                           "/api/node-policy": hub.set_node_policy,
                           "/api/scheduling/preview": hub.scheduling_preview,

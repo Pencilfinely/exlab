@@ -164,7 +164,8 @@ def status(service_root=None):
     state = common.read_json(root / 'status.json', {})
     running = _owned_process(state)
     result = {key: state[key] for key in ('status', 'detail', 'pid', 'node_id', 'updated_at',
-               'online', 'jobs', 'shutdown') if key in state}
+               'online', 'jobs', 'shutdown', 'runtime') if key in state}
+    result['deactivated'] = settings.get('deactivated', False)
     result.update(running=running, backend=settings.get('backend', 'detached'),
                   node_id=settings.get('node_id'), config=settings.get('config'),
                   installed_version=settings.get('version'), last_run_version=state.get('version'),
@@ -204,8 +205,7 @@ def status(service_root=None):
         result.update(status=state['status'])
     else:
         result.update(status='stopped', pid=None,
-            detail='Agent stopped. Existing Docker experiments can continue. '
-                   '/ 代理已停止，已启动的 Docker 实验可继续运行。')
+            detail=state.get('detail') or '算力端已停止')
     return result
 
 
@@ -246,6 +246,8 @@ def start(service_root=None, *, config=None, pairing=None, worker_root=None):
         settings = select_configuration(root, config, pairing, worker_root)
         if settings.get('status') in ('selection_required', 'pairing_required'):
             return {**previous, **settings}
+        settings['deactivated'] = False
+        _save_settings(root, settings)
         previous = status(root)
         if previous['running']:
             return previous
@@ -288,6 +290,34 @@ def _shutdown_requested(root):
     return bool(request.get('request_id') and request.get('pid') == owner.get('pid')
                 and request.get('process_identity')
                 and request['process_identity'] == owner.get('process_identity'))
+
+
+def deactivate(service_root=None):
+    """Save local experiments and stop compute while keeping the desktop open."""
+    root = _root(service_root)
+    result = shutdown(root)
+    if result.get('status') != 'exit_failed':
+        settings = _settings(root)
+        settings['deactivated'] = True
+        _save_settings(root, settings)
+    return dict(result, deactivated=_settings(root).get('deactivated', False))
+
+
+def runtime_status(service_root=None, release=False):
+    from .runtime import docker_status, release_runtime
+    root = _root(service_root)
+    settings = _settings(root)
+    if release:
+        current = status(root)
+        if current['running'] or current['status'] in ('starting', 'preparing', 'stopping', 'shutting_down', 'exit_failed'):
+            return dict(docker_ready=False, can_stop_docker=False, can_terminate_wsl=False,
+                        detail='请先保存并停止算力端')
+        return release_runtime(settings.get('worker_root'), settings.get('node_id'))
+    return docker_status(settings.get('worker_root'), prefer_saved=True)
+
+
+def runtime_release(service_root=None):
+    return runtime_status(service_root, release=True)
 
 
 def shutdown(service_root=None):
@@ -697,7 +727,21 @@ def serve(service_root=None, *, shutdown_only=False):
                       cancel_requested=lambda: _shutdown_requested(root))
             config = common.read_json(config_path)
             private_connection(config)
-            endpoint = common.read_json(config_path.parent / 'setup-state.json', {}).get('docker_endpoint')
+            saved_setup = common.read_json(config_path.parent / 'setup-state.json', {})
+            endpoint = saved_setup.get('docker_endpoint')
+            if isinstance(endpoint, str) and endpoint.startswith('unix://'):
+                os.environ.pop('DOCKER_CONTEXT', None)
+                os.environ['DOCKER_HOST'] = endpoint
+            if not config.get('allow_demo', False) and not shutdown_only:
+                from .runtime import docker_status
+                checked = docker_status(config_path.parent, prefer_saved=True)
+                if not checked['docker_ready']:
+                    raise RuntimeError(checked['detail'])
+                endpoint = checked['docker_endpoint']
+                if endpoint != saved_setup.get('docker_endpoint') or checked.get('docker_id') != saved_setup.get('docker_id'):
+                    saved_setup['docker_endpoint'] = endpoint
+                    saved_setup['docker_id'] = checked.get('docker_id')
+                    private_write(config_path.parent / 'setup-state.json', saved_setup)
             if isinstance(endpoint, str) and endpoint.startswith('unix://'):
                 os.environ.pop('DOCKER_CONTEXT', None)
                 os.environ['DOCKER_HOST'] = endpoint
@@ -705,6 +749,12 @@ def serve(service_root=None, *, shutdown_only=False):
             detail = ('实验已保存或记录为中断，代理已退出；待回传数据保留在本机，下次启动继续同步。'
                       if _shutdown_requested(root) else '代理已安全停止，可以安装更新')
             _write_status(root, status='stopped', online=False, detail=detail)
+            if _shutdown_requested(root):
+                # Agent.close() has released the execution lock. Only auxiliary
+                # resources owned by ExLab may be stopped on native Linux.
+                from .runtime import release_runtime
+                released = release_runtime(settings.get('worker_root'), settings.get('node_id'))
+                _write_status(root, runtime=released)
         except KeyboardInterrupt:
             if _shutdown_requested(root):
                 _write_status(root, status='exit_failed', online=False,
@@ -862,7 +912,8 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
-                                         'update-status', 'stop-for-update', 'install-status', 'shutdown',
+                                         'update-status', 'stop-for-update', 'install-status', 'shutdown', 'deactivate',
+                                         'runtime-status', 'runtime-release',
                                          'gpu-status', 'gpu-enable'))
     parser.add_argument('--shutdown-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--service-root')
@@ -894,7 +945,7 @@ def main(argv=None):
         else:
             value = globals()[args.action.replace('-', '_')](args.service_root)
         print(json.dumps(value, ensure_ascii=False))
-        return 2 if value['status'] in ('failed', 'selection_required', 'pairing_required') else 0
+        return 2 if value.get('status') in ('failed', 'selection_required', 'pairing_required') else 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(json.dumps({'running': False, 'status': 'failed',
                           'detail': _redact(_root(args.service_root), str(error))}, ensure_ascii=False))

@@ -12,6 +12,9 @@ dist/
 node.ready.json
 setup-state.json
 pairing.json
+center.json
+*.center-credential.json
+.center-sync/
 local-app/
 # Local deployment diary: contains machine addresses and private project paths.
 docs/多机GPU实验新手操作手册.md

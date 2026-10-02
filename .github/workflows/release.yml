@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.4.5
+        default: v0.5.0
 permissions:
   contents: write
 env:
@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.tag }}
+          fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.13'
@@ -39,7 +40,10 @@ jobs:
           ./scripts/test_icons.ps1
           ./scripts/test_browser_icons.ps1
           ./scripts/test_updates.ps1
-      - run: python scripts/build_release.py --download-python
+      - run: python scripts/build_release.py --download-python --legacy-updater
+      - name: Verify migration through the unchanged 0.4.5 updater
+        shell: pwsh
+        run: ./scripts/test_legacy_updates.ps1
       - name: Create draft with application ZIPs and native Windows installers
         env:
           GH_TOKEN: ${{ github.token }}
@@ -49,7 +53,7 @@ jobs:
           $version = $env:RELEASE_TAG.TrimStart('v')
           $assets = Get-ChildItem ('dist/' + $version + '/*') -File | ForEach-Object { $_.FullName }
           $notes = 'docs/RELEASE-' + $env:RELEASE_TAG.TrimStart('v') + '.md'
-          $releaseOptions = @('--verify-tag', '--draft', '--title', "Experiment Manager $env:RELEASE_TAG", '--notes-file', $notes)
+          $releaseOptions = @('--verify-tag', '--draft', '--title', "ExLab $env:RELEASE_TAG", '--notes-file', $notes)
           if ($version.Contains('-')) { $releaseOptions += '--prerelease' }
           gh release create $env:RELEASE_TAG @assets @releaseOptions
           if ($LASTEXITCODE -ne 0) { throw 'Could not create the release draft.' }

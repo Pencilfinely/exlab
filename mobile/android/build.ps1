@@ -2,7 +2,8 @@ param(
     [string]$Gradle = (Join-Path $PSScriptRoot 'gradlew.bat'),
     [string]$JavaHome,
     [string]$AndroidSdk,
-    [string]$CacheDirectory
+    [string]$CacheDirectory,
+    [switch]$Offline
 )
 $ErrorActionPreference = 'Stop'
 $savedEnvironment = @{}
@@ -27,7 +28,9 @@ try {
     if (Test-Path -LiteralPath $Gradle) { $Gradle = (Resolve-Path -LiteralPath $Gradle).Path }
     & $Gradle --version
     if ($LASTEXITCODE -ne 0) { throw 'Gradle unavailable; see ../README.md' }
-    & $Gradle --project-dir $PSScriptRoot --no-daemon --console=plain :app:assembleDebug :app:lintDebug
+    $buildArguments = @('--project-dir', $PSScriptRoot, '--no-daemon', '--console=plain', ':app:assembleDebug', ':app:lintDebug')
+    if ($Offline) { $buildArguments += '--offline' }
+    & $Gradle @buildArguments
     if ($LASTEXITCODE -ne 0) { throw 'Android build or lint failed' }
     $apk = Join-Path $PSScriptRoot 'app/build/outputs/apk/debug/app-debug.apk'
     Get-FileHash -LiteralPath $apk -Algorithm SHA256

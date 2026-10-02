@@ -295,7 +295,8 @@ class Agent:
 
     def _exec(self, argv, timeout=20, check=True):
         kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                      stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", shell=False)
+                      stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", shell=False,
+                      env=self._docker_environment() if argv[0] == 'docker' else None)
         if self.preparation and threading.current_thread() is self.preparation["thread"]:
             with self.prep_mutex:
                 if self.closed:
@@ -318,6 +319,35 @@ class Agent:
             # Tokens are never command-line arguments; limit logs returned to Hub.
             raise RuntimeError(f"{argv[0]} failed ({result.returncode}): {result.stderr[-1500:]}")
         return result
+
+    def _docker_environment(self):
+        environment = dict(os.environ)
+        endpoint = common.read_json(self.config_path.parent / 'setup-state.json', {}).get('docker_endpoint')
+        if isinstance(endpoint, str) and endpoint.startswith('unix:///'):
+            environment.pop('DOCKER_CONTEXT', None)
+            environment['DOCKER_HOST'] = endpoint
+        return environment
+
+    def _sync_request(self, payload):
+        from .pairing import validate_origin
+        candidates = list(dict.fromkeys([self.config['hub_url'].rstrip('/'),
+            *self._meta('hub_urls', self.config.get('hub_urls', []))]))
+        failure = None
+        for origin in candidates:
+            try:
+                origin = validate_origin(origin)
+                response = common.api_request(origin + '/api/sync', self.config['token'], payload,
+                                              timeout=min(10, self.config.get('sync_timeout', 10)))
+                endpoints = response.get('hub_urls', [])
+                if not isinstance(endpoints, list) or len(endpoints) > 8:
+                    raise ValueError('Invalid Center address list')
+                endpoints = list(dict.fromkeys([origin, *map(validate_origin, endpoints), *candidates]))[:8]
+                self.config['hub_url'] = origin
+                self._set_meta('hub_urls', endpoints)
+                return response
+            except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+                failure = error
+        raise failure or RuntimeError('No Center address available')
 
     def snapshot(self):
         policy = copy.deepcopy(self.config.get("policy", {}))
@@ -454,8 +484,7 @@ class Agent:
             payload["reports"].append(report)
             body_bytes += report_bytes
         try:
-            response = common.api_request(self.config["hub_url"].rstrip("/") + "/api/sync",
-                self.config["token"], payload, timeout=min(10, self.config.get("sync_timeout", 10)))
+            response = self._sync_request(payload)
             self.online = True
             self.last_error = None
             self.mode = response.get("mode", self.mode)
@@ -839,7 +868,7 @@ class Agent:
             # Docker retains logs; snapshot them only once the container is closed.
             with open(self._output(record) / f"attempt-{record['attempt']}.log", "wb") as log:
                 subprocess.run(["docker", "logs", record["container_name"]], stdout=log, stderr=subprocess.STDOUT,
-                               stdin=subprocess.DEVNULL, timeout=30, shell=False)
+                               stdin=subprocess.DEVNULL, timeout=30, shell=False, env=self._docker_environment())
             if finished_at is None and "_timing" in record:
                 record["_timing"]["complete"] = False
             self._finish(record, state.get("ExitCode", 1), finished_at=finished_at)

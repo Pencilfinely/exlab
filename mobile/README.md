@@ -1,4 +1,4 @@
-# 实验台移动监控
+# ExLab Monitor
 
 目标平台：Android 9+、原生 HarmonyOS 6.0（API 20）。主要鸿蒙验收机型为 **华为 Mate 70 Pro / HarmonyOS 6**。
 
@@ -47,11 +47,11 @@ cd mobile/android
   -CacheDirectory './.runtime/gradle-cache'
 ```
 
-脚本依次执行 APK 编译和 Android Lint，成功后输出 APK 的 SHA-256；退出时还原调用进程的环境变量。它不自动安装 SDK 或接受许可。
+脚本依次执行 APK 编译和 Android Lint，成功后输出 APK 的 SHA-256；退出时还原调用进程的环境变量。缓存依赖齐全时可加 `-Offline` 离线构建。它不自动安装 SDK 或接受许可。
 
 测试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`；用 `adb install -r app/build/outputs/apk/debug/app-debug.apk` 安装。正式分发须另行配置发布签名，仓库不含签名密钥。
 
-本次已生成的交付副本：`dist/mobile/ExperimentMonitor-0.1.0-debug.apk`（相对仓库根目录），同目录有 `.sha256` 校验文件。它是 Android 调试签名测试包，尚未在 Android 真机上验收。
+0.5.0 测试包的交付名称为 `ExLabMonitor-0.5.0-android-debug.apk`，与桌面安装包一同放在 `dist/0.5.0/`（相对仓库根目录），校验值写入 `SHA256SUMS.txt`。它使用 Android 调试签名，尚未在 Android 真机上验收；应用标识保留以便覆盖升级。
 
 Mate 70 Pro / HarmonyOS 6 也可以先尝试通过卓易通安装此 APK。[华为官方说明](https://consumer.huawei.com/cn/support/content/zh-cn16061787/)支持 HarmonyOS 5 及以上接收并安装 APK，但明确要求以卓易通实际支持为准。本项目尚未验证卓易通中的安装、WebView、私网连接和前后台恢复，不能保证当前 APK 可用。如果希望不依赖兼容工具，使用下方的原生 HAP 工程；直接通过手机浏览器访问 `/mobile/` 也是独立的使用方式。
 

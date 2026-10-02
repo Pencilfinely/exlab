@@ -23,7 +23,7 @@ Windows 管理端下载 `windows-controller-x64-Setup.exe`，Windows 算力端�
 
 公开资产包括三个应用 ZIP、两个 Windows 安装程序和校验信息，不包含用户算法、研究数据或凭证。安装程序尚未代码签名；请使用本项目 Release 资产。升级前建议备份数据目录。
 
-[中文安装说明](https://github.com/Pencilfinely/experiment-manager/blob/v0.3.0-rc.2/README.zh-CN.md) · [更新与日常操作](https://github.com/Pencilfinely/experiment-manager/blob/v0.3.0-rc.2/docs/OPERATIONS.zh-CN.md)
+[中文安装说明](https://github.com/Pencilfinely/exlab/blob/v0.3.0-rc.2/README.zh-CN.md) · [更新与日常操作](https://github.com/Pencilfinely/exlab/blob/v0.3.0-rc.2/docs/OPERATIONS.zh-CN.md)
 
 ## English
 
@@ -48,4 +48,4 @@ Native Ubuntu workers use `ubuntu-worker-x64.zip` and the existing script/manual
 
 Public assets include three application ZIPs, two Windows installers and checksums. User algorithms, research datasets and credentials are excluded. Installers are not code-signed; use this project's release assets. Back up your data directories before upgrading.
 
-[English installation guide](https://github.com/Pencilfinely/experiment-manager/blob/v0.3.0-rc.2/README.md) · [Updates and everyday operations](https://github.com/Pencilfinely/experiment-manager/blob/v0.3.0-rc.2/docs/OPERATIONS.md)
+[English installation guide](https://github.com/Pencilfinely/exlab/blob/v0.3.0-rc.2/README.md) · [Updates and everyday operations](https://github.com/Pencilfinely/exlab/blob/v0.3.0-rc.2/docs/OPERATIONS.md)

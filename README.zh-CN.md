@@ -1,21 +1,23 @@
-# 实验台 · Experiment Manager
+# 实验台 · ExLab
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 把自己的电脑和服务器接到一起，在一个应用窗口中管理实验、算力和算法项目。
 选择算法原来的根目录，检查自动提取的参数，在页面内导入、分发和运行；不用修改算法源码，也不用去每台机器重复做适配。
 
-**当前版本为 0.4.5。** 管理端与算力端独立安装。同一台电脑要同时管理实验并提供显卡，就安装两个版本。
-新增手机监控和有限远程操作，以及独立、可撤销的设备凭证。连接手机前需先更新管理端。保留实验矩阵、资源预算、可选 AI 辅助导入、结果导出和算力端显卡设置。详见[发布说明](docs/RELEASE-0.4.5.md)。更新由你主动操作。
+**当前版本为 0.5.0。** 管理端与算力端独立安装。同一台电脑要同时管理实验并提供显卡，就安装两个版本。
+新增 Docker 启动提示、停用与资源释放、多主控同步和交接、剪贴板连接、安装后的登录自启设置及设备改名。界面和发布名称统一为 ExLab。详见[发布说明与双主控使用方法](docs/RELEASE-0.5.0.md)。
 
 ## 下载与安装
 
-从[最新正式版本](https://github.com/Pencilfinely/experiment-manager/releases/latest)下载应用安装包或完整 ZIP。GitHub 自动生成的 Source code 不是安装包。
+从[最新正式版本](https://github.com/Pencilfinely/exlab/releases/latest)下载应用安装包或完整 ZIP。GitHub 自动生成的 Source code 不是安装包。
+
+已安装旧版可直接使用软件内更新升级到 ExLab。旧仓库保留兼容升级入口，升级后自动使用新仓库；主控与算力端分别更新。
 
 | 使用位置 | 建议下载的文件名后缀 | 安装后打开 | 提前准备 |
 |---|---|---|---|
-| Windows 11 管理电脑 | windows-controller-x64-Setup.exe | **Experiment Center / 实验台**，程序为 ExperimentCenter.exe | Microsoft Edge；不需要 WSL、Docker 或另装 Python |
-| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **Experiment Worker / 算力端**，程序为 ExperimentWorker.exe | WSL2、Ubuntu 22.04+、启用该 Ubuntu 集成的 Docker Desktop、NVIDIA Windows 驱动 |
+| Windows 11 管理电脑 | windows-controller-x64-Setup.exe | **ExLab Center / 实验台**，程序为 ExLabCenter.exe | Microsoft Edge；不需要 WSL、Docker 或另装 Python |
+| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **ExLab Worker / 算力端**，程序为 ExLabWorker.exe | WSL2、Ubuntu 22.04+、启用该 Ubuntu 集成的 Docker Desktop、NVIDIA Windows 驱动 |
 | 原生 Ubuntu 22.04+ NVIDIA 服务器 | ubuntu-worker-x64.zip | 一次安装后在后台运行 | Docker Engine、NVIDIA Linux 驱动、NVIDIA Container Toolkit；普通用户可以运行 Docker |
 
 安装程序按当前 Windows 用户安装，不要求管理员权限；修改防火墙或系统依赖仍可能需要管理员权限。
@@ -26,7 +28,7 @@
 
 ### 1. 打开实验台
 
-运行 **Experiment Center**，打开实验台窗口。侧栏包含总览、实验、实验矩阵、算力、算法项目和设置。
+运行 **ExLab Center**，打开实验台窗口。侧栏包含总览、实验、实验矩阵、算力、算法项目和设置。
 管理服务在后台运行，关闭页面窗口不等于停止管理服务；以后从应用入口或托盘重新打开。
 本机打开时自动完成管理员登录，不需要复制令牌或保留命令行窗口。
 
@@ -35,10 +37,9 @@
 
 ### 2. 接入一台算力机
 
-在实验台的**算力**页面添加机器，填写一个独立名称，选择**那台机器能够访问的管理端地址**，下载配对文件。
-把算力安装包和这个 **名称.pairing.json** 文件传到目标电脑。
+在实验台的**算力**页面添加机器，填写一个独立节点标识，选择**那台机器能够访问的管理端地址**。点击**复制连接凭证**，在 Windows Worker 点击**粘贴连接凭证**。也可以下载 **名称.pairing.json**，把安装包和文件传到目标电脑。
 
-- **Windows：**安装并打开 Experiment Worker，选择配对文件和要使用的 Ubuntu，启动准备。软件检查依赖、验证 GPU、生成配置并在后台接单；窗口显示进度和日志入口。
+- **Windows：**安装并打开 ExLab Worker，选择配对文件和要使用的 Ubuntu，启动准备。软件检查依赖、验证 GPU、生成配置并在后台接单；窗口显示进度和日志入口。
 - **Ubuntu：**解压算力 ZIP，在该目录用普通用户运行下面这一条命令。配对文件路径换成实际文件。
 
     bash Install-Worker.sh --pairing /path/to/node.pairing.json
@@ -123,6 +124,6 @@ Windows 算力端关闭窗口后可以继续后台运行，但仍依赖当前用
     python -m unittest discover -s tests -t . -v
     python scripts/build_release.py --download-python
 
-协议：[CONTRACT.md](CONTRACT.md) · 问题反馈：[GitHub Issues](https://github.com/Pencilfinely/experiment-manager/issues) · 开发者旧 SDK 接口：[接入参考](docs/ALGORITHM-INTEGRATION.zh-CN.md)。
+协议：[CONTRACT.md](CONTRACT.md) · 问题反馈：[GitHub Issues](https://github.com/Pencilfinely/exlab/issues) · 开发者旧 SDK 接口：[接入参考](docs/ALGORITHM-INTEGRATION.zh-CN.md)。
 
 本项目使用 [MIT](LICENSE)。CPython 和另外下载的组件保留各自许可证，见[第三方说明](THIRD_PARTY_NOTICES.md)。

@@ -12,14 +12,14 @@
 - **删除算法项目：**从管理界面移除项目，持久记录各节点的清理任务，清理管理端发布包及算力端受管理的部署副本、已停止容器、缓存和可确认独占的派生镜像。离线节点上线后继续，失败原因可查看并重试。导入前的原始源码和数据、归档实验结果保留。
 - **界面：**重新设计侧栏收起按钮；“应用 JSON”的成功/失败提示放到按钮旁；监控图表适配高 DPI 和容器尺寸变化，修复模糊与拉伸。
 
-详细操作见[实验矩阵与导入指南](https://github.com/Pencilfinely/experiment-manager/blob/v0.4.0/docs/EXPERIMENT-MATRICES.zh-CN.md)。继续包含此前的累计实验计时、后台退出和更新诊断修复。
+详细操作见[实验矩阵与导入指南](https://github.com/Pencilfinely/exlab/blob/v0.4.0/docs/EXPERIMENT-MATRICES.zh-CN.md)。继续包含此前的累计实验计时、后台退出和更新诊断修复。
 
 ## 更新现有安装
 
 1. 暂停接单，等待实验和待回传完成。**先更新所有 Worker，再更新 Center。** 指定 GPU 和项目清理需要新版算力端支持；旧节点不会被当成已完成清理。
 2. 在客户端停止对应后台服务，然后从托盘退出。确认旧版已停止，再安装相同角色的 0.4.0 安装包。Windows rc.2 及以后也可使用“检查更新”。如果界面已更新但后台仍是 rc.1，需要手动停止旧后台并安装一次。
 3. 保留原管理数据目录、Ubuntu、算力节点配置和身份，启动后核对客户端与后台都为 0.4.0。不要将程序安装目录设为实验数据目录，也不要同时运行使用同一节点目录的新旧代理。
-4. Ubuntu 算力端按[日常维护说明](https://github.com/Pencilfinely/experiment-manager/blob/v0.4.0/docs/OPERATIONS.zh-CN.md)使用新版 ZIP 更新，保留原配置和数据目录。
+4. Ubuntu 算力端按[日常维护说明](https://github.com/Pencilfinely/exlab/blob/v0.4.0/docs/OPERATIONS.zh-CN.md)使用新版 ZIP 更新，保留原配置和数据目录。
 
 ## 下载
 

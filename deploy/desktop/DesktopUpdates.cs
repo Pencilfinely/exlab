@@ -68,8 +68,9 @@ namespace ExperimentManagerDesktop {
     // GitHub public Releases API: https://docs.github.com/en/rest/releases/releases#list-releases
     // No account token or application credentials are sent by this client.
     internal static class UpdateService {
-        internal const string Repository = "https://github.com/Pencilfinely/experiment-manager";
-        internal const string ReleasesApi = "https://api.github.com/repos/Pencilfinely/experiment-manager/releases?per_page=100";
+        internal const string Repository = "https://github.com/Pencilfinely/exlab";
+        internal const string LegacyRepository = "https://github.com/Pencilfinely/experiment-manager";
+        internal const string ReleasesApi = "https://api.github.com/repos/Pencilfinely/exlab/releases?per_page=100";
         internal const long MaxInstallerBytes = 1024L * 1024L * 1024L;
         const int MaxApiBytes = 8 * 1024 * 1024;
         const int MaxChecksumBytes = 256 * 1024;
@@ -134,14 +135,14 @@ namespace ExperimentManagerDesktop {
                 try { version = ParseVersion(tag); } catch(FormatException) { continue; }
                 if(current.Prerelease.Length == 0 && (version.Prerelease.Length != 0 || Flag(data, "prerelease"))) continue;
                 if(Compare(version, current) <= 0 || (selected != null && CompareVersions(version.Value, selected.Version) <= 0)) continue;
-                string name = "ExperimentManager-" + version.Value + "-windows-" + (worker ? "worker" : "controller") + "-x64-Setup.exe";
+                string name = "ExLab-" + version.Value + "-windows-" + (worker ? "worker" : "controller") + "-x64-Setup.exe";
                 var assets = data.ContainsKey("assets") ? data["assets"] as object[] : null;
                 if(assets == null) continue;
                 Dictionary<string,object> installer = null, checksums = null;
                 foreach(object asset in assets) {
                     var fields = asset as Dictionary<string,object>;
                     if(fields == null || Text(fields, "state") != "uploaded") continue;
-                    if(Text(fields, "name") == name) {
+                    if(Text(fields, "name") == name || Text(fields, "name") == name.Replace("ExLab-","ExperimentManager-")) {
                         if(installer != null) throw new InvalidDataException("发布包含重复安装包，请联系维护者。");
                         installer = fields;
                     }
@@ -156,7 +157,7 @@ namespace ExperimentManagerDesktop {
                     throw new InvalidDataException("安装包大小无效，请联系维护者。");
                 var release = new UpdateRelease { Version = version.Value, Tag = tag,
                     ReleaseUrl = Repository + "/releases/tag/" + Uri.EscapeDataString(tag),
-                    Notes = Text(data, "body"), AssetName = name, AssetUrl = Text(installer, "browser_download_url"),
+                    Notes = Text(data, "body"), AssetName = Text(installer,"name"), AssetUrl = Text(installer, "browser_download_url"),
                     ChecksumUrl = Text(checksums, "browser_download_url"), Size = size };
                 ValidateRelease(release, false);
                 selected = release;
@@ -256,8 +257,10 @@ namespace ExperimentManagerDesktop {
             if(release == null) throw new InvalidDataException("没有可下载的更新，请先检查更新。");
             var version = ParseVersion(release.Tag);
             if(version.Value != release.Version) throw new InvalidDataException("更新版本与发布标签不一致。");
-            string prefix = "ExperimentManager-" + version.Value + "-windows-";
-            if(release.AssetName != prefix + "controller-x64-Setup.exe" && release.AssetName != prefix + "worker-x64-Setup.exe")
+            string prefix = "ExLab-" + version.Value + "-windows-";
+            string legacy = "ExperimentManager-" + version.Value + "-windows-";
+            if(release.AssetName != prefix + "controller-x64-Setup.exe" && release.AssetName != prefix + "worker-x64-Setup.exe" &&
+                    release.AssetName != legacy + "controller-x64-Setup.exe" && release.AssetName != legacy + "worker-x64-Setup.exe")
                 throw new InvalidDataException("更新安装包名称不正确。");
             ValidateAssetUri(release.AssetUrl, release.Tag, release.AssetName);
             ValidateAssetUri(release.ChecksumUrl, release.Tag, "SHA256SUMS.txt");
@@ -267,9 +270,10 @@ namespace ExperimentManagerDesktop {
 
         internal static void ValidateAssetUri(string url, string tag, string name) {
             string expected = Repository + "/releases/download/" + Uri.EscapeDataString(tag) + "/" + Uri.EscapeDataString(name);
+            string old = LegacyRepository + "/releases/download/" + Uri.EscapeDataString(tag) + "/" + Uri.EscapeDataString(name);
             Uri actual;
             if(!Uri.TryCreate(url, UriKind.Absolute, out actual) || actual.Scheme != "https" || !actual.IsDefaultPort ||
-                actual.UserInfo.Length != 0 || !String.Equals(actual.AbsoluteUri, expected, StringComparison.Ordinal))
+                actual.UserInfo.Length != 0 || (!String.Equals(actual.AbsoluteUri, expected, StringComparison.Ordinal) && !String.Equals(actual.AbsoluteUri, old, StringComparison.Ordinal)))
                 throw new InvalidDataException("更新下载地址不属于项目的 GitHub 发布，已停止操作。");
         }
 
@@ -306,7 +310,7 @@ namespace ExperimentManagerDesktop {
                 if(!AllowedRequestUri(uri, api, hop == 0)) throw new InvalidDataException("更新下载重定向到不受信任的地址，已停止操作。");
                 var request = (HttpWebRequest)WebRequest.Create(uri);
                 request.Method = "GET";
-                request.UserAgent = "ExperimentManager-Desktop-Updater";
+                request.UserAgent = "ExLab-Desktop-Updater";
                 request.Accept = api ? "application/vnd.github+json" : "application/octet-stream";
                 request.Headers["X-GitHub-Api-Version"] = "2022-11-28";
                 request.AllowAutoRedirect = false;
@@ -341,7 +345,9 @@ namespace ExperimentManagerDesktop {
         internal static bool AllowedRequestUri(Uri uri, bool api, bool initial) {
             if(uri.Scheme != "https" || !uri.IsDefaultPort || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0) return false;
             if(api) return uri.AbsoluteUri == ReleasesApi;
-            if(uri.Host == "github.com") return uri.AbsolutePath.StartsWith("/Pencilfinely/experiment-manager/releases/download/", StringComparison.Ordinal) && uri.Query.Length == 0;
+            if(uri.Host == "github.com") return uri.Query.Length == 0 &&
+                (uri.AbsoluteUri.StartsWith(Repository + "/releases/download/", StringComparison.Ordinal) ||
+                 uri.AbsoluteUri.StartsWith(LegacyRepository + "/releases/download/", StringComparison.Ordinal));
             return !initial && (uri.Host == "release-assets.githubusercontent.com" || uri.Host == "objects.githubusercontent.com");
         }
 

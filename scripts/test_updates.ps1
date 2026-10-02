@@ -155,6 +155,14 @@ static class UpdateTests {
         string tag = "v0.3.0-rc.2", name = "ExperimentManager-0.3.0-rc.2-windows-controller-x64-Setup.exe";
         string url = UpdateService.Repository + "/releases/download/" + tag + "/" + name;
         UpdateService.ValidateAssetUri(url, tag, name);
+        Assert(UpdateService.AllowedRequestUri(new Uri(url), false, true), "Renamed repository initial download rejected.");
+        Assert(UpdateService.AllowedRequestUri(new Uri(UpdateService.LegacyRepository + "/releases/download/" + tag + "/" + name), false, false), "Legacy repository download rejected.");
+        Assert(!UpdateService.AllowedRequestUri(new Uri(url + "?redirect=1"), false, true), "Query accepted at repository download origin.");
+        var renamed = Release("0.5.0", false, false);
+        var renamedAsset = (Dictionary<string,object>)((object[])renamed["assets"])[0];
+        renamedAsset["name"] = "ExLab-0.5.0-windows-controller-x64-Setup.exe";
+        renamedAsset["browser_download_url"] = UpdateService.Repository + "/releases/download/v0.5.0/" + renamedAsset["name"];
+        Assert(UpdateService.SelectRelease(Json(renamed), "0.4.5", false).AssetName == (string)renamedAsset["name"], "Renamed installer not selected.");
         Fails<InvalidDataException>(() => UpdateService.ValidateAssetUri(url.Replace("https:", "http:"), tag, name), "HTTP accepted.");
         Fails<InvalidDataException>(() => UpdateService.ValidateAssetUri(url + "?redirect=1", tag, name), "Query accepted in initial download.");
         Fails<InvalidDataException>(() => UpdateService.ValidateAssetUri(url.Replace("github.com", "github.com.evil.invalid"), tag, name), "Lookalike domain accepted.");
@@ -388,6 +396,9 @@ static class InstallProbeTests {
     static int Main(string[] args) {
         try {
             WorkerCompletion();InstallerWiring();
+            Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
+            Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
+            Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
             App.Worker=false;
             string data=Path.Combine(args[0],"legacy data");Directory.CreateDirectory(data);
             string status=Path.Combine(data,"status.json");
@@ -434,7 +445,7 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

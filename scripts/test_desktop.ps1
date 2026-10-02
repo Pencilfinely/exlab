@@ -121,7 +121,7 @@ function Invoke-AppMethod($Method, [object[]]$Values) {
 
 try {
     foreach ($role in @('controller', 'worker')) {
-        $executableName = if ($role -eq 'controller') { 'ExperimentCenter.exe' } else { 'ExperimentWorker.exe' }
+        $executableName = if ($role -eq 'controller') { 'ExLabCenter.exe' } else { 'ExLabWorker.exe' }
         $executable = Join-Path $testRoot $executableName
         & $Python (Join-Path $PSScriptRoot 'build_desktop.py') --role $role --output $executable
         if ($LASTEXITCODE -ne 0) { throw "Failed to compile desktop role: $role" }

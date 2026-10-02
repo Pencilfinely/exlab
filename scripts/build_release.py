@@ -1,4 +1,4 @@
-"""Build three public ZIP assets and two native Windows installers.
+"""Build three public ZIP assets, two Windows installers and an optional Android APK.
 
 No node credentials, databases, datasets, checkpoints or local deployment diaries
 are inputs. The controller includes the official Windows embeddable CPython.
@@ -29,8 +29,8 @@ ROLES = {
     'ubuntu-worker-x64': ('Install-Worker.sh', 'Client-Worker.sh', 'Start-Background-Worker.sh', 'Stop-Worker.sh', 'Worker-Status.sh', 'Start-Worker.sh', 'Configure-Project.sh', 'Import-Algorithm.sh', 'Update-Worker.sh'),
 }
 
-NATIVE_ENTRIES = {'windows-controller-x64': 'ExperimentCenter.exe',
-                  'windows-worker-x64': 'ExperimentWorker.exe'}
+NATIVE_ENTRIES = {'windows-controller-x64': 'ExLabCenter.exe',
+                  'windows-worker-x64': 'ExLabWorker.exe'}
 
 
 def application_files(root=ROOT):
@@ -81,7 +81,28 @@ def write_zip(path, files):
             archive.writestr(item, data)
 
 
-def build(output, python_zip, compiler=None):
+def legacy_update_assets(output, version=VERSION):
+    """Byte-identical migration installers for the original updater origin.
+
+    Publish this directory only to Pencilfinely/experiment-manager. Old clients
+    reject repository redirects, even when the installer names still match.
+    """
+    output = Path(output)
+    legacy = output / 'legacy-updater'
+    legacy.mkdir(exist_ok=False)
+    hashes = []
+    for role in ('controller', 'worker'):
+        suffix = f'{version}-windows-{role}-x64-Setup.exe'
+        source = output / ('ExLab-' + suffix)
+        target = legacy / ('ExperimentManager-' + suffix)
+        with source.open('rb') as source_stream, target.open('xb') as target_stream:
+            shutil.copyfileobj(source_stream, target_stream)
+        hashes.append(f'{hashlib.sha256(target.read_bytes()).hexdigest()}  {target.name}')
+    (legacy / 'SHA256SUMS.txt').write_text('\n'.join(hashes) + '\n', encoding='utf-8')
+    return legacy
+
+
+def build(output, python_zip, compiler=None, android_apk=None, legacy_updater=False):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     common = application_files()
@@ -105,12 +126,14 @@ def build(output, python_zip, compiler=None):
                 native = compile_desktop(temporary / entry,
                                          'controller' if 'controller' in role else 'worker', compiler=compiler)
                 files[entry] = native.read_bytes()
+                # Existing shortcuts keep working across the product rename.
+                files[entry.replace('ExLab', 'Experiment')] = files[entry]
             finally:
                 if temporary.parent.resolve() != output.resolve() or not temporary.name.startswith('.release-desktop-'):
                     raise ValueError('Unsafe release build cleanup path')
                 shutil.rmtree(temporary)
         files['START-HERE.txt'] = (
-            f'Experiment Manager {VERSION} / {role}\n\n'
+            f'ExLab {VERSION} / {role}\n\n'
             f'Extract the whole ZIP. Entry point: {entry}\n'
             f'请先完整解压。启动入口：{entry}\n\n'
             'Windows controller: Python is included; no Docker/WSL required.\n'
@@ -132,21 +155,34 @@ def build(output, python_zip, compiler=None):
         ).encode('utf-8')
         manifest = {name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)} for name, data in files.items()}
         files['manifest.json'] = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()
-        target = output / f'ExperimentManager-{VERSION}-{role}.zip'
+        target = output / f'ExLab-{VERSION}-{role}.zip'
         write_zip(target, files)
         hashes.append(f'{hashlib.sha256(target.read_bytes()).hexdigest()}  {target.name}')
         print(f'Built: {target.name} ({target.stat().st_size:,} bytes)')
         if role in NATIVE_ENTRIES:
-            installer = output / f'ExperimentManager-{VERSION}-{role}-Setup.exe'
+            installer = output / f'ExLab-{VERSION}-{role}-Setup.exe'
             compile_desktop(installer, 'controller' if 'controller' in role else 'worker',
                             payload=target, compiler=compiler)
             hashes.append(f'{hashlib.sha256(installer.read_bytes()).hexdigest()}  {installer.name}')
             print(f'Built: {installer.name} ({installer.stat().st_size:,} bytes)')
+    if android_apk:
+        raw = Path(android_apk).read_bytes()
+        with zipfile.ZipFile(android_apk) as archive:
+            if 'AndroidManifest.xml' not in archive.namelist():
+                raise ValueError('Android input is not an APK')
+        target = output / f'ExLabMonitor-{VERSION}-android-debug.apk'
+        with target.open('xb') as stream:
+            stream.write(raw)
+        hashes.append(f'{hashlib.sha256(raw).hexdigest()}  {target.name}')
+        print(f'Built: {target.name} ({target.stat().st_size:,} bytes)')
     (output / 'SHA256SUMS.txt').write_text('\n'.join(hashes) + '\n', encoding='utf-8')
+    if legacy_updater:
+        legacy_update_assets(output)
     (output / 'build-info.json').write_text(json.dumps({'version': VERSION, 'python_version': PYTHON_VERSION,
         'python_source': PYTHON_URL, 'python_archive_sha256': PYTHON_SHA256,
         'native_windows_apps': True, 'windows_architecture': 'x64',
-        'windows_code_signed': False, 'artifact_count': len(hashes)}, indent=2) + '\n', encoding='utf-8')
+        'windows_code_signed': False, 'android_debug_apk': bool(android_apk),
+        'artifact_count': len(hashes), 'legacy_updater': bool(legacy_updater)}, indent=2) + '\n', encoding='utf-8')
 
 
 def main():
@@ -155,6 +191,9 @@ def main():
     parser.add_argument('--python-zip', default='.runtime/build-cache/python-embed.zip')
     parser.add_argument('--download-python', action='store_true')
     parser.add_argument('--compiler', help='Path to the Windows .NET Framework C# compiler')
+    parser.add_argument('--android-apk', help='Debug APK built with mobile/android/build.ps1')
+    parser.add_argument('--legacy-updater', action='store_true',
+                        help='Also build migration assets for the original experiment-manager repository')
     args = parser.parse_args()
     runtime = Path(args.python_zip)
     if not runtime.exists() and args.download_python:
@@ -164,7 +203,7 @@ def main():
         if hashlib.sha256(data).hexdigest() != PYTHON_SHA256:
             raise ValueError('Official Python download failed checksum validation')
         runtime.write_bytes(data)
-    build(args.output, runtime, args.compiler)
+    build(args.output, runtime, args.compiler, android_apk=args.android_apk, legacy_updater=args.legacy_updater)
 
 
 if __name__ == '__main__':

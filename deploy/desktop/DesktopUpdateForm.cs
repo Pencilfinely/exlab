@@ -45,7 +45,7 @@ namespace ExperimentManagerDesktop {
             install.Click+=async(s,e)=>await Install();
             cancel.Click+=(s,e)=>{if(cancellation!=null)cancellation.Cancel();};
             releaseLink.LinkClicked+=(s,e)=>System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-                available==null?"https://github.com/Pencilfinely/experiment-manager/releases":available.ReleaseUrl){UseShellExecute=true});
+                available==null?UpdateService.Repository+"/releases":available.ReleaseUrl){UseShellExecute=true});
             Shown+=async(s,e)=>await Check();
             FormClosing+=(s,e)=>{if(working){e.Cancel=true;closeWhenIdle=true;if(cancellation!=null)cancellation.Cancel();}};
             ResumeLayout(true);

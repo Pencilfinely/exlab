@@ -292,6 +292,25 @@ class NativeDesktopBuildTests(unittest.TestCase):
 
 
 class ReleaseArchiveTests(unittest.TestCase):
+    def test_legacy_update_installers_match_exlab_payloads_and_have_separate_checksums(self):
+        with temporary_directory() as path:
+            root = Path(path)
+            originals = {}
+            for role in ('controller', 'worker'):
+                data = b'MZ-installer-' + role.encode()
+                originals[role] = data
+                (root / f'ExLab-0.5.0-windows-{role}-x64-Setup.exe').write_bytes(data)
+            legacy = build_release.legacy_update_assets(root, '0.5.0')
+            checksums = legacy.joinpath('SHA256SUMS.txt').read_text().splitlines()
+            self.assertEqual(len(checksums), 2)
+            for role, data in originals.items():
+                name = f'ExperimentManager-0.5.0-windows-{role}-x64-Setup.exe'
+                self.assertEqual((legacy / name).read_bytes(), data)
+                self.assertIn(f'{hashlib.sha256(data).hexdigest()}  {name}', checksums)
+                self.assertFalse((root / name).exists())
+            with self.assertRaises(FileExistsError):
+                build_release.legacy_update_assets(root, '0.5.0')
+
     def test_public_inputs_exclude_runtime_and_private_documents(self):
         files = build_release.application_files()
         self.assertIn('README.zh-CN.md', files)
@@ -341,7 +360,8 @@ class ReleaseArchiveTests(unittest.TestCase):
                     self.assertIn('LICENSE', names)
                     if 'controller' in path.name:
                         self.assertIn('ExperimentCenter.exe', names)
-                        self.assertIn(b'Entry point: ExperimentCenter.exe', archive.read('START-HERE.txt'))
+                        self.assertIn('ExLabCenter.exe', names)
+                        self.assertIn(b'Entry point: ExLabCenter.exe', archive.read('START-HERE.txt'))
                         self.assertIn('runtime/LICENSE.txt', names)
                         self.assertIn('Start-Controller.cmd', names)
                         self.assertNotIn('Start-Worker.cmd', names)
@@ -349,7 +369,8 @@ class ReleaseArchiveTests(unittest.TestCase):
                     elif 'windows' in path.name:
                         self.assertIn('ExperimentWorker.exe', names)
                         self.assertIn('Client-Worker.sh', names)
-                        self.assertIn(b'Entry point: ExperimentWorker.exe', archive.read('START-HERE.txt'))
+                        self.assertIn('ExLabWorker.exe', names)
+                        self.assertIn(b'Entry point: ExLabWorker.exe', archive.read('START-HERE.txt'))
                         self.assertIn('Start-Worker.cmd', names)
                         self.assertNotIn('runtime/python.exe', names)
                     else:

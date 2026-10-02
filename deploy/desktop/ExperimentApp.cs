@@ -26,8 +26,8 @@ namespace ExperimentManagerDesktop {
             } }
         }
         internal static string Role { get { return Worker ? "Worker" : "Controller"; } }
-        internal static string Title { get { return Worker ? "实验算力 · Experiment Worker" : "实验台 · Experiment Center"; } }
-        internal static string Executable { get { return Worker ? "ExperimentWorker.exe" : "ExperimentCenter.exe"; } }
+        internal static string Title { get { return Worker ? "ExLab Worker · 算力端" : "ExLab Center · 实验台"; } }
+        internal static string Executable { get { return Worker ? "ExLabWorker.exe" : "ExLabCenter.exe"; } }
         internal static string SettingsRoot { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ExperimentManager", "desktop", Role); } }
         internal static string SettingsFile { get { return Path.Combine(SettingsRoot, "settings.json"); } }
         internal static string InstanceKey {get{return "Local\\ExperimentManager-"+Role+"-"+(Environment.UserDomainName+"-"+Environment.UserName).Replace('\\','-');}}
@@ -158,7 +158,7 @@ namespace ExperimentManagerDesktop {
                     if(Has(args,"--install")) {
                         string dataRoot=Arg(args,"--data-root")??Text(Read(SettingsFile),"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller"));
                         bool startup=Has(args,"--startup");
-                        using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")) startup=startup||(run!=null&&run.GetValue("ExperimentManager-"+Role)!=null);
+                        startup=startup||DesktopRuntime.AutoStart;
                         string installed=InstallerForm.Install(dataRoot,Arg(args,"--pairing"),Has(args,"--desktop"),startup);
                         Write(Arg(args,"--report")??Path.Combine(SettingsRoot,"install-report.json"),new {status="installed",role=Role,path=installed});
                     } else using(var form=new InstallerForm(args)) Application.Run(form);
@@ -173,7 +173,7 @@ namespace ExperimentManagerDesktop {
                         monitor.IsBackground=true; monitor.Start(); Application.Run(form); show.Set();
                     }
                 }
-            } catch(Exception ex) { if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,"Experiment Manager",MessageBoxButtons.OK,MessageBoxIcon.Error); }
+            } catch(Exception ex) { if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,Title,MessageBoxButtons.OK,MessageBoxIcon.Error); }
         }
     }
 
@@ -187,7 +187,7 @@ namespace ExperimentManagerDesktop {
         Label status=new Label { AutoSize=true,MaximumSize=new Size(530,0) };
         internal InstallerForm(string[] args) {
             Text="安装 "+App.Title; Size=new Size(610,460); MinimumSize=Size; StartPosition=FormStartPosition.CenterScreen;
-            using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run")) startup.Checked=run!=null&&run.GetValue("ExperimentManager-"+App.Role)!=null;
+            startup.Checked=DesktopRuntime.AutoStart;
             var saved=App.Read(App.SettingsFile);
             if(App.Has(args,"--apply-update"))desktop.Checked=saved.ContainsKey("desktop_shortcut")?App.Flag(saved,"desktop_shortcut"):
                 File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.Worker?"实验算力.lnk":"实验台.lnk"));
@@ -268,12 +268,13 @@ namespace ExperimentManagerDesktop {
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
                 settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.Write(App.SettingsFile,settings);
                 string target=Path.Combine(destination,App.Executable);
-                string menu=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs","Experiment Manager",App.Role+".lnk");
+                string menu=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs","ExLab",(App.Worker?"Worker":"Center")+".lnk");
                 App.Shortcut(menu,target,"");
                 if(makeDesktop) App.Shortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.Worker?"实验算力.lnk":"实验台.lnk"),target,"");
                 using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run",true)) {
-                    if(autoStart) run.SetValue("ExperimentManager-"+App.Role,App.Quote(target)+" --background");
-                    else run.DeleteValue("ExperimentManager-"+App.Role,false);
+                    run.DeleteValue("ExperimentManager-"+App.Role,false);
+                    if(autoStart) run.SetValue("ExLab-"+App.Role,App.Quote(target)+" --background");
+                    else run.DeleteValue("ExLab-"+App.Role,false);
                 }
                 return destination;
             }
@@ -321,6 +322,9 @@ namespace ExperimentManagerDesktop {
         BrowserAppWindow browserWindowIcons;
         bool resumeWorkerAfterUpdate;
         bool startingAfterUpdate;
+        bool deactivated;
+        CheckBox startup=new CheckBox { Text="登录 Windows 后启动",AutoSize=true };
+        CheckBox releaseResources=new CheckBox { Text="停用 / 退出时释放 Docker 与 WSL",AutoSize=true };
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
         TextBox data=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
@@ -331,11 +335,12 @@ namespace ExperimentManagerDesktop {
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=5000 };
         internal ClientForm(string[] args) {
             settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
+            deactivated=App.Flag(settings,"deactivated");
             startingAfterUpdate=App.Has(args,"--after-update");
             string supplied=App.Arg(args,"--data-root"); if(supplied!=null) { settings["data_root"]=Path.GetFullPath(supplied); App.Write(App.SettingsFile,settings); }
             Text=App.Title; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
-            Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
-            var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
+            Font=new Font("Microsoft YaHei UI",10); BackColor=Color.FromArgb(246,248,251);
+            var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=6 };
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.Controls.Add(new Label { Text=App.Title,Font=new Font(Font.FontFamily,21,FontStyle.Bold),AutoSize=true });
             layout.Controls.Add(summary);
@@ -344,11 +349,12 @@ namespace ExperimentManagerDesktop {
             if(App.Worker) {
                 controls.Controls.Add(new Label {Text="Ubuntu",AutoSize=true},0,0); controls.Controls.Add(distro,1,0);
                 controls.Controls.Add(new Label {Text="节点凭证",AutoSize=true},0,1); controls.Controls.Add(pairing,1,1);
-                pairing.Text=App.Text(settings,"pairing_file"); var choose=new Button {Text="导入凭证…",AutoSize=true};
+                pairing.Text=App.Text(settings,"pairing_file"); var choose=new Button {Text="选择文件…",AutoSize=true};
                 choose.Click+=(s,e)=>{ using(var picker=new OpenFileDialog {Filter="主控配对凭证 (*.json)|*.json"}) if(picker.ShowDialog()==DialogResult.OK) { pairing.Text=picker.FileName; settings["pairing_file"]=pairing.Text; App.Write(App.SettingsFile,settings); } }; controls.Controls.Add(choose,2,1);
                 controls.Controls.Add(new Label {Text="已有配置",AutoSize=true},0,2); controls.Controls.Add(existing,1,2);
                 configs.Add(""); existing.Items.Add("自动选择 / 新节点使用凭证"); existing.SelectedIndex=0;
                 distro.SelectedIndexChanged+=(s,e)=>{settings["distribution"]=Convert.ToString(distro.SelectedItem);App.Write(App.SettingsFile,settings);};
+                var paste=new Button {Text="粘贴连接凭证",AutoSize=true};paste.Click+=(s,e)=>ImportClipboard();controls.Controls.Add(paste,2,2);
             } else {
                 data.Text=App.Text(settings,"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller"));
                 controls.Controls.Add(new Label {Text="数据目录",AutoSize=true},0,0); controls.Controls.Add(data,1,0);
@@ -356,17 +362,23 @@ namespace ExperimentManagerDesktop {
             }
             layout.Controls.Add(controls);
             var actions=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
-            AddButton(actions,App.Worker?"启动后台代理":"打开实验台",()=> { if(App.Worker) StartWorker(); else OpenController(); });
-            AddButton(actions,App.Worker?"停止代理":"停止主控",()=>Stop());
+            AddButton(actions,App.Worker?"启用算力":"打开工作空间",()=> { if(App.Worker) StartWorker(); else OpenController(); });
+            AddButton(actions,"停用并释放资源",()=>Stop());
             if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
-            layout.Controls.Add(new Label {AutoSize=true,MaximumSize=new Size(810,0),Text=App.Worker?"首次导入凭证后自动检查 GPU 和准备环境。关闭此窗口会保留后台运行；停止代理不会终止已有 Docker 训练容器。":"实验、算力和算法项目在同一应用窗口中管理。关闭实验台窗口后，主控继续后台运行。"});
+            var preferences=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
+            startup.Checked=DesktopRuntime.AutoStart;startup.CheckedChanged+=(s,e)=>{try{DesktopRuntime.AutoStart=startup.Checked;}catch(Exception ex){summary.Text=ex.Message;}};
+            releaseResources.Checked=!settings.ContainsKey("release_resources")||App.Flag(settings,"release_resources");
+            releaseResources.CheckedChanged+=(s,e)=>{settings["release_resources"]=releaseResources.Checked;App.Write(App.SettingsFile,settings);};
+            preferences.Controls.Add(startup);if(App.Worker)preferences.Controls.Add(releaseResources);
+            layout.Controls.Add(preferences);
             layout.Controls.Add(log); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
             Controls.Add(layout);
             tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
+            menu.Items.Add("停用并释放资源",null,(s,e)=>Stop());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
@@ -380,8 +392,8 @@ namespace ExperimentManagerDesktop {
                         if(distro.Items.Count==0) throw new Exception("请先安装 WSL2 和 Ubuntu，并在 Ubuntu 中创建普通用户。");
                         string chosen=App.Text(settings,"distribution"); distro.SelectedItem=chosen; if(distro.SelectedIndex<0) distro.SelectedIndex=0;
                     });
-                    if(background) { StartWorker(); Hide(); } else RefreshState();
-                } else if(background) { await Execute(async()=>{await Controller("controller-start");Hide();}); } else OpenController();
+                    if(background&&!deactivated) { StartWorker(); Hide(); } else RefreshState();
+                } else if(deactivated)DisplayInactive();else if(background) { await Execute(async()=>{await Controller("controller-start");Hide();}); } else OpenController();
                 timer.Start();
             };
             ResumeLayout(true);
@@ -404,6 +416,7 @@ namespace ExperimentManagerDesktop {
             Show();WindowState=FormWindowState.Normal;
             summary.Text=App.Worker?"正在保存并停止实验，完成后退出算力客户端…":"正在停止管理服务并退出实验台…";
             try {
+                if(deactivated){exiting=true;Close();return;}
                 if(App.Worker&&distro.SelectedItem==null&&String.IsNullOrWhiteSpace(App.Text(settings,"distribution"))&&
                         DesktopLifecycle.CanExitUnconfiguredWorker(App.Text(settings,"distribution"),App.RegisteredDistributions())) {
                     exiting=true;Close();return;
@@ -415,6 +428,8 @@ namespace ExperimentManagerDesktop {
                     ()=>App.Worker?WorkerCommand("status"):Controller("controller-status"),Display,
                     App.Worker?(TimeSpan?)null:TimeSpan.FromSeconds(30),finalStatus:App.Worker?"stopped":null);
                 if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
+                deactivated=true;settings["deactivated"]=true;App.Write(App.SettingsFile,settings);
+                if(App.Worker)await ReleaseWorkerResources();
                 exiting=true;Close();
             } catch(Exception ex) {
                 summary.Text="退出未完成："+ex.Message+"\n客户端已保留，可从托盘重试退出。";
@@ -514,17 +529,50 @@ namespace ExperimentManagerDesktop {
                 return result;
             });
         }
-        async void RefreshState(){await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
-        async void StartWorker(){await Execute(async()=>{summary.Text="正在安装或复用算力代理…";Display(await WorkerCommand("install"));});}
+        async void RefreshState(){if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
+        async void StartWorker(){await Execute(async()=>{if(!await EnsureDocker())return;deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);summary.Text="正在准备算力…";Display(await WorkerCommand("install"));});}
         async void OpenGpuSettings(){await Execute(async()=>{
             using(var form=new WorkerGpuForm((action,options)=>WorkerCommand(action,options))) form.ShowDialog(this);
             Display(await WorkerCommand("status"));
         });}
-        async void Stop(){await Execute(async()=>{Display(App.Worker?await WorkerCommand("stop"):await Controller("controller-stop"));});}
-        async void OpenController(){await Execute(async()=>{var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
+        async void Stop(){if(deactivated)return;await Execute(async()=>{
+            if(App.Worker&&MessageBox.Show(this,"停用将请求实验保存并停止。未配置续训的算法会记为中断。继续吗？",App.Title,MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
+            timer.Stop();try {
+                Display(App.Worker?await WorkerCommand("deactivate"):await Controller("controller-stop"));
+                await DesktopLifecycle.WaitForStopped(()=>App.Worker?WorkerCommand("status"):Controller("controller-status"),Display,App.Worker?(TimeSpan?)null:TimeSpan.FromSeconds(30),finalStatus:App.Worker?"stopped":null);
+                deactivated=true;settings["deactivated"]=true;App.Write(App.SettingsFile,settings);
+                if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
+                if(App.Worker)await ReleaseWorkerResources();DisplayInactive();Show();
+            }finally{timer.Start();}
+        });}
+        async void OpenController(){await Execute(async()=>{deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
+        void DisplayInactive(){summary.Text="已停用 · 点击“"+(App.Worker?"启用算力":"打开工作空间")+"”恢复\n"+App.Text(settings,"release_detail","实验记录与连接身份已保留。");}
+        void ImportClipboard(){
+            try {
+                string text=Clipboard.GetText().Trim();if(text.Length==0||text.Length>16384)throw new Exception("请先复制主控提供的连接凭证（小于 16 KiB）。");
+                if(text.StartsWith("exlab://connect/",StringComparison.Ordinal)) {string raw=text.Substring("exlab://connect/".Length).Replace('-','+').Replace('_','/');text=Encoding.UTF8.GetString(Convert.FromBase64String(raw.PadRight((raw.Length+3)/4*4,'=')));}
+                var value=App.Json.Deserialize<Dictionary<string,object>>(text);
+                if(App.Text(value,"node_id").Length==0||App.Text(value,"token").Length<20||App.Text(value,"hub_url").Length==0)throw new Exception("这是算力端，请复制 Worker 连接凭证。");
+                string path=Path.Combine(App.SettingsRoot,"clipboard.pairing.json");App.Write(path,value);pairing.Text=path;settings["pairing_file"]=path;App.Write(App.SettingsFile,settings);summary.Text="连接凭证已导入，点击“启用算力”。";
+            }catch(Exception ex){summary.Text="粘贴失败："+ex.Message;}
+        }
+        async Task<bool> EnsureDocker(){
+            var state=await WorkerCommand("runtime-status");if(App.Flag(state,"docker_ready"))return true;
+            if(background){summary.Text="Docker 未就绪。打开算力客户端并点击“启用算力”以启动 Docker。";Show();return false;}
+            if(MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return false;
+            summary.Text="正在启动 Docker Desktop…";await DesktopRuntime.StartDocker();var watch=Stopwatch.StartNew();
+            while(watch.Elapsed<TimeSpan.FromMinutes(2)){await Task.Delay(2000);state=await WorkerCommand("runtime-status");if(App.Flag(state,"docker_ready"))return true;}
+            throw new Exception("Docker 尚未就绪。请检查 Docker Desktop 的 Linux containers、所选 Ubuntu 的 WSL 集成，以及本机 Docker context。然后重试。");
+        }
+        async Task ReleaseWorkerResources(){
+            if(workerHold!=null){try{if(!workerHold.HasExited)workerHold.Kill();}catch(InvalidOperationException){}workerHold.Dispose();workerHold=null;}heldDistribution="";
+            if(!releaseResources.Checked){settings["release_detail"]="计算代理已停止；资源释放选项未开启。";App.Write(App.SettingsFile,settings);return;}
+            var state=await WorkerCommand("runtime-release");summary.Text="正在释放运行环境…";
+            settings["release_detail"]=await DesktopRuntime.Release(SelectedDistribution,state);App.Write(App.SettingsFile,settings);
+        }
         void Display(Dictionary<string,object> value) {
             string state=App.Text(value,"status");
-            string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state;
+            string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state=="online"?"已连接":state=="offline"?"主控离线":state=="preparing"?"准备中":state=="starting"?"启动中":state=="stopped"?"已停止":state=="running"?"运行中":state=="failed"?"启动失败":state;
             summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
             string backendVersion=App.Text(value,"version");
             if(App.Worker) {

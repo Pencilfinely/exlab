@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#234f41"><meta name="referrer" content="no-referrer"><title>实验台 · 移动监控</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/mobile/mobile.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="theme-color" content="#234f41"><meta name="referrer" content="no-referrer"><title>ExLab Monitor</title><link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/mobile/mobile.css"></head>
 <body>
-<header class="top"><div><span class="eyebrow">EXPERIMENT MONITOR</span><h1>实验台<span>移动监控</span></h1></div><span id="connection" class="badge">未连接</span></header>
+<header class="top"><div><span class="eyebrow">EXLAB / MONITOR</span><h1>ExLab<span>Monitor</span></h1></div><span id="connection" class="badge">未连接</span></header>
 <main>
   <p id="freshness" class="freshness">连接管理端，查看实验进展。</p><p id="notice" class="notice" role="status" hidden></p>
   <section id="login" class="card"><h2>连接你的实验台</h2><p class="muted">在电脑管理端的「设置 → 移动端访问」创建凭证，再填入下方。</p><form id="login-form"><label>移动访问凭证<input id="credential" type="password" required maxlength="512" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="check"><input id="remember" type="checkbox">在此设备记住凭证</label><p class="muted small">只在你自己的手机上启用。也可在管理端随时撤销此设备。</p><button id="login-button" class="primary">连接管理端</button></form><p class="muted small" id="login-origin"></p></section>
