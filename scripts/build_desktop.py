@@ -77,7 +77,7 @@ def compile_desktop(output, role, payload=None, compiler=None):
             + f'[assembly: AssemblyFileVersion("{numeric}.0")]\n'
             + f'[assembly: AssemblyInformationalVersion("{VERSION}")]\n', encoding='utf-8')
         target = temporary / output.name
-        args = [str(executable), '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
+        args = [str(executable), '/nologo', '/codepage:65001', '/target:winexe', '/platform:x64', '/optimize+',
                 '/out:' + str(target), '/resource:' + str(role_file) + ',Role',
                 '/win32manifest:' + str(MANIFEST.resolve(strict=True)),
                 '/win32icon:' + str(icon), '/resource:' + str(icon) + ',AppIcon',

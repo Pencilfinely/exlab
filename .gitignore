@@ -26,6 +26,7 @@ docs/SASRec接入说明.md
 # Native mobile toolchains, generated packages and signing material.
 mobile/**/build/
 mobile/**/.gradle/
+mobile/**/.kotlin/
 mobile/**/.hvigor/
 mobile/**/.idea/
 mobile/**/oh_modules/

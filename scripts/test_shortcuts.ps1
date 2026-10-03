@@ -15,7 +15,11 @@ class ShortcutTests {
             Directory.CreateDirectory(packages);Directory.CreateDirectory(desktop);Directory.CreateDirectory(menu);
             string oldTarget=Path.Combine(packages,"0.5.1",App.Executable),target=Path.Combine(packages,"0.5.2",App.Executable);
             string foreign=Path.Combine(root,"foreign",App.Executable);
+            foreach(string file in new[]{oldTarget,target,foreign}){
+                Directory.CreateDirectory(Path.GetDirectoryName(file));File.WriteAllBytes(file,new byte[0]);
+            }
             Require(App.Title==(worker?"ExLab Worker":"ExLab Center"),"Wrong application name");
+            Require(App.LegacyShortcutName==(worker?"\u5b9e\u9a8c\u7b97\u529b.lnk":"\u5b9e\u9a8c\u53f0.lnk"),"Legacy shortcut name lost its Unicode characters");
             Require(App.OwnsShortcutTarget(target,packages),"New executable should be owned");
             Require(App.OwnsShortcutTarget(Path.Combine(packages,"0.4.5","Experiment"+App.Role+".exe"),packages),"Original executable alias should be owned");
             Require(!App.OwnsShortcutTarget(foreign,packages),"Unrelated application must not be owned");
@@ -44,7 +48,7 @@ try {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll') | ForEach-Object { '/r:' + $_ }
     $sources = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'deploy/desktop') -Filter '*.cs' -File | ForEach-Object { $_.FullName })
     $executable = Join-Path $testRoot 'ShortcutTests.exe'
-    & $compiler /nologo /target:exe /main:ShortcutTests "/out:$executable" @references @sources $source
+    & $compiler /nologo /codepage:65001 /target:exe /main:ShortcutTests "/out:$executable" @references @sources $source
     if ($LASTEXITCODE -ne 0) { throw 'Shortcut test compilation failed' }
     & $executable $testRoot
     if ($LASTEXITCODE -ne 0) { throw 'Shortcut migration tests failed' }
