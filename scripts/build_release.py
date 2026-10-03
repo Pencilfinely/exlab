@@ -46,6 +46,7 @@ def application_files(root=ROOT):
     files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
     files['docs/EXPERIMENT-MATRICES.zh-CN.md'] = (root / 'docs/EXPERIMENT-MATRICES.zh-CN.md').read_bytes()
     files['mobile/README.md'] = (root / 'mobile/README.md').read_bytes()
+    files['docs/RELEASE-0.5.0.md'] = (root / 'docs/RELEASE-0.5.0.md').read_bytes()
     release_notes = 'docs/RELEASE-' + VERSION + '.md'
     files[release_notes] = (root / release_notes).read_bytes()
     for name in ('examples/managed-project/train.py', 'examples/managed-project/expman_entry.py',

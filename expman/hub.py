@@ -160,7 +160,11 @@ def _snapshot(value):
 
 
 def inspect_update_state(db):
-    """Inspect committed work using either the live DB or a read-only connection."""
+    """Report durable remote work; it survives a local controller replacement.
+
+    Only live local requests, imports and file writes gate the cooperative stop.
+    Their admission and fencing are checked by Hub.update_status under its lock.
+    """
     terminal = tuple(TERMINAL)
     placeholders = ",".join("?" for _ in terminal)
     active = db.execute(f"SELECT COUNT(*) FROM jobs WHERE state NOT IN ({placeholders}) "
@@ -183,13 +187,8 @@ def inspect_update_state(db):
             uncertain += 1
     counts = dict(active_jobs=active, pending_uploads=uploads, pending_projects=projects + deployments,
                   unverified_nodes=uncertain)
-    reasons = []
-    if active:
-        reasons.append(f"{active} 个实验或操作尚未完成")
-    if uploads or projects or deployments:
-        reasons.append("文件回传或项目分发尚未完成")
-    return dict(ready_for_update=not reasons, detail="；".join(reasons) or
-                "管理端当前无未完成实验或已登记的文件传输，可以安装更新；离线节点恢复后继续同步", **counts)
+    return dict(ready_for_update=True,
+                detail="管理端当前可以安装更新；远端实验继续运行，已保存的操作和文件传输在重启后继续同步", **counts)
 
 
 class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
@@ -319,6 +318,9 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
         with self.lock:
             result = inspect_update_state(self.db)
             busy_imports = self.local_imports is not None and bool(self.local_imports.threads)
+            result.update(inflight_requests=self.active_update_requests,
+                          active_imports=len(self.local_imports.threads) if busy_imports else 0,
+                          inflight_uploads=len(self.project_upload_locks))
             if self.active_update_requests or busy_imports or self.project_upload_locks:
                 result.update(ready_for_update=False, detail="正在处理请求或导入项目，请完成后重试")
             if stop and result["ready_for_update"]:

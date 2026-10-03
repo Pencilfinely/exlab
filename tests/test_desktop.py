@@ -190,7 +190,7 @@ class DesktopTests(unittest.TestCase):
             hub.close()
         database = (self.root / "hub.sqlite3").read_bytes()
         identity = (self.root / "hub.json").read_bytes()
-        self.assertFalse(desktop.controller_update_status(self.root)["ready_for_update"])
+        self.assertTrue(desktop.controller_update_status(self.root)["ready_for_update"])
         self.assertTrue(desktop.controller_install_status(self.root)["ready_for_install"])
         self.assertEqual((self.root / "hub.sqlite3").read_bytes(), database)
         self.assertEqual((self.root / "hub.json").read_bytes(), identity)
@@ -272,6 +272,37 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(desktop.controller_status(self.root)['running'])
         self.assertTrue(desktop.controller_update_status(self.root)['ready_for_update'])
         self.assertEqual(common.read_json(self.root / 'hub.json'), identity)
+
+    def test_live_update_stop_accepts_remote_running_work_without_changing_records(self):
+        hub = Hub(self.root)
+        try:
+            hub.add_node('offline-worker')
+            spec = json.dumps(common.validate_task(dict(backend='demo', name='Remote experiment')))
+            with hub.transaction():
+                hub.db.execute('UPDATE nodes SET last_seen=?,snapshot=?',
+                               (time.time() - 3 * 86400, '{"update_quiescent":false}'))
+                for job_id, state in (('a' * 32, 'running'), ('b' * 32, 'ready')):
+                    hub.db.execute('INSERT INTO jobs(id,spec,state,node_id,created,updated,command_id) '
+                                   "VALUES (?,?,?,'offline-worker',1,2,1)", (job_id, spec, state))
+            before = [dict(row) for row in hub.db.execute('SELECT * FROM jobs ORDER BY id')]
+            identity = common.read_json(self.root / 'hub.json')
+        finally:
+            hub.close()
+        self.serve()
+        status = desktop.controller_update_status(self.root)
+        self.assertTrue(status['ready_for_update'])
+        self.assertEqual(status['active_jobs'], 2)
+        result = desktop.controller_stop_for_update(self.root)
+        self.assertTrue(result['ready_for_update'])
+        self.thread.join(4)
+        self.assertFalse(self.thread.is_alive())
+        self.assertEqual(self.errors, [])
+        hub = Hub(self.root)
+        try:
+            self.assertEqual([dict(row) for row in hub.db.execute('SELECT * FROM jobs ORDER BY id')], before)
+            self.assertEqual(common.read_json(self.root / 'hub.json'), identity)
+        finally:
+            hub.close()
 
     def test_unmarked_rc2_and_rc3_controllers_still_complete_cooperative_stop(self):
         for version in ('0.3.0rc2', '0.3.0rc3'):

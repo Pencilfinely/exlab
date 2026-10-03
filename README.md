@@ -7,7 +7,7 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Current version: 0.5.0.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU.
+**Current version: 0.5.1.** Controller and worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. Center updates now preserve remote running experiments and pending transfers instead of blocking installation on them; see the [0.5.1 fix](docs/RELEASE-0.5.1.md).
 Adds Docker startup prompts, deactivation and resource release, synchronized Centers with explicit handover, clipboard connections, editable login startup preferences and device names. The applications and release assets now use the ExLab brand. See the [release notes and multi-Center setup](docs/RELEASE-0.5.0.md).
 
 ## Download and install
