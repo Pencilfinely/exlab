@@ -1,12 +1,19 @@
-# 实验台 · ExLab
+<!-- 兼容原中文文档入口；内容以 README.md 为准，更新时同步。 -->
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+# ExLab · 实验台
 
-把自己的电脑和服务器接到一起，在一个应用窗口中管理实验、算力和算法项目。
-选择算法原来的根目录，检查自动提取的参数，在页面内导入、分发和运行；不用修改算法源码，也不用去每台机器重复做适配。
+[中文项目首页](README.md) · [English](README.en.md)
 
-**当前版本为 0.5.2。** ExLab Center 与 ExLab Worker 独立安装，同一台电脑要管理实验并提供显卡，就安装两个版本。Monitor 支持长期配对、打开自动接入与 APK 内更新；桌面快捷方式也统一使用 ExLab 名称，详见 [0.5.2 发布说明](docs/RELEASE-0.5.2.md)。
-新增 Docker 启动提示、停用与资源释放、多主控同步和交接、剪贴板连接、安装后的登录自启设置及设备改名。界面和发布名称统一为 ExLab。详见[发布说明与双主控使用方法](docs/RELEASE-0.5.0.md)。
+在一个工作空间中管理 GPU 实验、算力设备和算法项目。
+导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
+
+**当前版本：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.2.md)
+
+- **ExLab Center（主控）**：导入算法、管理实验和算力，支持多主控同步与交接。
+- **ExLab Worker（算力端）**：接收并运行任务，支持资源设置、停用释放和登录自启。
+- **ExLab Monitor（手机端）**：查看实验进展，支持长期配对、自动接入与 APK 内更新。
+
+同一台电脑如需管理实验并提供显卡，分别安装 Center 和 Worker。[多主控与资源管理说明](docs/RELEASE-0.5.0.md)。
 
 ## 下载与安装
 
@@ -16,8 +23,8 @@
 
 | 使用位置 | 建议下载的文件名后缀 | 安装后打开 | 提前准备 |
 |---|---|---|---|
-| Windows 11 管理电脑 | windows-controller-x64-Setup.exe | **ExLab Center / 实验台**，程序为 ExLabCenter.exe | Microsoft Edge；不需要 WSL、Docker 或另装 Python |
-| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **ExLab Worker / 算力端**，程序为 ExLabWorker.exe | WSL2、Ubuntu 22.04+、启用该 Ubuntu 集成的 Docker Desktop、NVIDIA Windows 驱动 |
+| Windows 11 管理电脑 | windows-controller-x64-Setup.exe | **ExLab Center**，程序为 ExLabCenter.exe | Microsoft Edge；不需要 WSL、Docker 或另装 Python |
+| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **ExLab Worker**，程序为 ExLabWorker.exe | WSL2、Ubuntu 22.04+、启用该 Ubuntu 集成的 Docker Desktop、NVIDIA Windows 驱动 |
 | 原生 Ubuntu 22.04+ NVIDIA 服务器 | ubuntu-worker-x64.zip | 一次安装后在后台运行 | Docker Engine、NVIDIA Linux 驱动、NVIDIA Container Toolkit；普通用户可以运行 Docker |
 
 安装程序按当前 Windows 用户安装，不要求管理员权限；修改防火墙或系统依赖仍可能需要管理员权限。
@@ -69,9 +76,11 @@
 
 具体例子：[以真实 SASRec_Original 为例检查导入配置](docs/EXTERNAL-HARNESS.zh-CN.md)。该例使用 **E:/PythonProjects/SASRec_Original/src/main.py** 和单个 **Video_Games.test.txt**，不是另一份具有 experiment.py 的同名实现。
 
-## 移动监控（开发中）
+## 手机端：ExLab Monitor
 
-手机专用页面为 `/mobile/`。在管理端 **设置 → 移动端访问** 为每台手机创建只读或有限操作凭证，可查看实验、指标、日志和节点资源，以及停止 / 取消、支持时恢复实验、暂停 / 恢复节点接单。依赖管理端后台运行及局域网 / 可信私网互通。
+在 Center 的 **设置 → 移动端** 为手机创建只读或有限操作凭证，复制配对链接到 Monitor。默认长期配对并记住连接，再次打开自动接入；也可通过手机浏览器访问 `/mobile/`。可查看实验、指标、日志和节点资源；有限操作凭证还允许停止 / 取消、支持时恢复实验，以及暂停 / 恢复节点接单。使用时需主控在线，手机与主控网络互通。
+
+旧 APK 先覆盖安装一次 0.5.2，保留原应用数据；之后可在应用内检查、下载和校验更新，再调用系统安装器。旧定期凭证可在主控设备列表中点击“设为长期”。
 
 Android 与原生 HarmonyOS 6 的轻量客户端源码位于 `mobile/`，主要鸿蒙验收机型为 Mate 70 Pro。Android 测试 APK 已完成编译、Lint 和签名验证，鸿蒙 HAP 尚未生成，两端均未完成真机验收。鸿蒙 6 可先尝试经卓易通安装 APK，兼容性待实测；也可通过手机浏览器使用。详见[移动端使用、构建与验收说明](mobile/README.md)。
 

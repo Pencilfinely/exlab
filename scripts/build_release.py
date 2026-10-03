@@ -41,7 +41,7 @@ def application_files(root=ROOT):
             if path.is_symlink():
                 raise ValueError('Release inputs cannot be symlinks')
             files[path.relative_to(root).as_posix()] = path.read_bytes()
-    for name in ('README.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md', 'docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md', 'docs/EXTERNAL-HARNESS.md', 'docs/EXTERNAL-HARNESS.zh-CN.md', 'docs/RELEASE-0.3.0-rc.1.md'):
+    for name in ('README.md', 'README.en.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md', 'docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md', 'docs/EXTERNAL-HARNESS.md', 'docs/EXTERNAL-HARNESS.zh-CN.md', 'docs/RELEASE-0.3.0-rc.1.md'):
         files[name] = (root / name).read_bytes()
     files['expman/static/favicon.ico'] = (root / 'expman/static/favicon.ico').read_bytes()
     files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
@@ -153,7 +153,7 @@ def build(output, python_zip, compiler=None, android_apk=None, legacy_updater=Fa
             'Existing worker: select its old config to retain identity, policies and experiment state.\n'
             '旧算力端：选择原配置可继续使用原身份、资源策略和实验记录。\n'
             'Legacy CMD/shell launchers remain available for compatibility.\n'
-            'Read README.md (English) / README.zh-CN.md（中文） for complete instructions.\n'
+            'Read README.md（中文） / README.en.md (English) for complete instructions.\n'
         ).encode('utf-8')
         manifest = {name: {'sha256': hashlib.sha256(data).hexdigest(), 'bytes': len(data)} for name, data in files.items()}
         files['manifest.json'] = (json.dumps(manifest, indent=2, sort_keys=True) + '\n').encode()

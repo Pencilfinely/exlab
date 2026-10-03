@@ -1,127 +1,136 @@
-# ExLab
+# ExLab · 实验台
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+**简体中文** · [English](README.en.md)
 
-Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-only or limited-control credentials issued from Settings → Mobile access. An Android test APK is available; the native HarmonyOS 6 project is included as source and has not been compiled. Neither platform has completed device validation. See the [mobile build and acceptance guide](mobile/README.md).
+在一个工作空间中管理 GPU 实验、算力设备和算法项目。
+导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-Manage GPU experiments, computers and algorithm projects in one application window.
-Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
+**当前版本：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.2.md)
 
-**Current version: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. Monitor now restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
-Adds Docker startup prompts, deactivation and resource release, synchronized Centers with explicit handover, clipboard connections, editable login startup preferences and device names. The applications and release assets now use the ExLab brand. See the [release notes and multi-Center setup](docs/RELEASE-0.5.0.md).
+- **ExLab Center（主控）**：导入算法、管理实验和算力，支持多主控同步与交接。
+- **ExLab Worker（算力端）**：接收并运行任务，支持资源设置、停用释放和登录自启。
+- **ExLab Monitor（手机端）**：查看实验进展，支持长期配对、自动接入与 APK 内更新。
 
-## Download and install
+同一台电脑如需管理实验并提供显卡，分别安装 Center 和 Worker。[多主控与资源管理说明](docs/RELEASE-0.5.0.md)。
 
-Get application installers or complete ZIPs from the [latest release](https://github.com/Pencilfinely/exlab/releases/latest). GitHub's automatically generated Source code archives are not installers.
+## 下载与安装
 
-Existing desktop clients can upgrade to ExLab using their built-in updater. The original repository remains a migration download channel; upgraded clients automatically use the ExLab repository. Update Center and Worker separately.
+从[最新正式版本](https://github.com/Pencilfinely/exlab/releases/latest)下载应用安装包或完整 ZIP。GitHub 自动生成的 Source code 不是安装包。
 
-| Computer | Recommended asset suffix | Application | Prerequisites |
+已安装旧版可直接使用软件内更新升级到 ExLab。旧仓库保留兼容升级入口，升级后自动使用新仓库；主控与算力端分别更新。
+
+| 使用位置 | 建议下载的文件名后缀 | 安装后打开 | 提前准备 |
 |---|---|---|---|
-| Windows 11 controller | windows-controller-x64-Setup.exe | **ExLab Center**, ExLabCenter.exe | Microsoft Edge; no WSL, Docker or separate Python installation |
-| Windows 11 NVIDIA worker | windows-worker-x64-Setup.exe | **ExLab Worker**, ExLabWorker.exe | WSL2, Ubuntu 22.04+, Docker Desktop with integration enabled for that Ubuntu, NVIDIA Windows driver |
-| Native Ubuntu 22.04+ NVIDIA server | ubuntu-worker-x64.zip | Background worker after installation | Docker Engine, NVIDIA Linux driver and NVIDIA Container Toolkit; normal-user access to Docker |
+| Windows 11 管理电脑 | windows-controller-x64-Setup.exe | **ExLab Center**，程序为 ExLabCenter.exe | Microsoft Edge；不需要 WSL、Docker 或另装 Python |
+| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **ExLab Worker**，程序为 ExLabWorker.exe | WSL2、Ubuntu 22.04+、启用该 Ubuntu 集成的 Docker Desktop、NVIDIA Windows 驱动 |
+| 原生 Ubuntu 22.04+ NVIDIA 服务器 | ubuntu-worker-x64.zip | 一次安装后在后台运行 | Docker Engine、NVIDIA Linux 驱动、NVIDIA Container Toolkit；普通用户可以运行 Docker |
 
-Windows installers install for the current user without administrator privileges. Firewall or system dependency changes may still require elevation.
-Portable Windows ZIPs provide the same .exe applications: extract the whole archive before opening them. Current builds target x86-64 and NVIDIA GPUs.
-First worker setup downloads large images; allow at least 8 GiB plus space for code, datasets and experiment outputs.
+安装程序按当前 Windows 用户安装，不要求管理员权限；修改防火墙或系统依赖仍可能需要管理员权限。
+也可以完整解压对应 Windows ZIP，直接双击其中的 .exe 使用。当前面向 x86-64 和 NVIDIA GPU。
+首次算力环境准备需要下载较大的镜像，建议至少预留 8 GiB，另留数据集与实验结果的空间。
 
-## First use: three steps
+## 第一次使用：只做三件事
 
-### 1. Open ExLab Center
+### 1. 打开实验台
 
-Start **ExLab Center**. Its sidebar contains Overview, Experiments, Experiment Matrices, Compute, Algorithm Projects and Settings.
-The controller service runs in the background; closing the page window does not stop it. Reopen it through the application or tray.
-Local application launch signs you in automatically. You do not need to copy an administrator token or keep a terminal open.
+运行 **ExLab Center**，打开实验台窗口。侧栏包含总览、实验、实验矩阵、算力、算法项目和设置。
+管理服务在后台运行，关闭页面窗口不等于停止管理服务；以后从应用入口或托盘重新打开。
+本机打开时自动完成管理员登录，不需要复制令牌或保留命令行窗口。
 
-The controller keeps data separately from application files. For an existing deployment, select its original data directory, such as **E:/ExperimentCenter**, to retain experiment history.
-Do not use the replaceable application directory as your data directory.
+管理端将数据与应用文件分开保存。已有部署应选择原来的目录，例如 **E:/ExperimentCenter**，才能继续看到原实验。
+不要把程序升级目录当成数据目录。
 
-### 2. Connect a worker
+### 2. 接入一台算力机
 
-In **Compute**, add a computer, give it a unique name and select a controller address **that the worker can reach**. Download its pairing file.
-Copy the worker installer/package and **NAME.pairing.json** to that computer.
+在实验台的**算力**页面添加机器，填写一个独立节点标识，选择**那台机器能够访问的管理端地址**。点击**复制连接凭证**，在 Windows Worker 点击**粘贴连接凭证**。也可以下载 **名称.pairing.json**，把安装包和文件传到目标电脑。
 
-- **Windows:** install and open ExLab Worker, choose the pairing file and Ubuntu distribution, then start setup. The application checks prerequisites, verifies GPUs, creates configuration and accepts work in the background. Progress and logs stay available in its window.
-- **Ubuntu:** extract the worker ZIP and run this command as your normal user from that directory, replacing the pairing-file path:
+- **Windows：**安装并打开 ExLab Worker，选择配对文件和要使用的 Ubuntu，启动准备。软件检查依赖、验证 GPU、生成配置并在后台接单；窗口显示进度和日志入口。
+- **Ubuntu：**解压算力 ZIP，在该目录用普通用户运行下面这一条命令。配对文件路径换成实际文件。
 
     bash Install-Worker.sh --pairing /path/to/node.pairing.json
 
-The command returns while first setup continues in the background. Check progress with **bash Worker-Status.sh**; view logs with **bash Client-Worker.sh logs**.
-After setup, the computer appears online in the controller. Subsequent starts reuse its identity and configuration.
+安装命令返回后，首次准备继续在后台执行。需要查看时运行 **bash Worker-Status.sh**；完整日志用 **bash Client-Worker.sh logs** 查看。
+准备成功后，这台机器会在实验台显示在线。以后不用再传凭证或手改节点 JSON。
 
-A pairing file is one worker's credential and never contains the administrator token. Use a distinct identity for each computer; reuse the original identity when reinstalling that same computer.
-Computers must already be reachable over a LAN or trusted private network. Do not use localhost for a remote worker. Sharing a campus network does not guarantee reachability.
-Workers initiate connections to the controller and need no inbound worker port.
+配对文件相当于一台算力机的工作证，不含管理员凭证。每台机器使用不同身份；同一机器重装可继续使用原身份。
+机器须先通过局域网或可信私网互通。远程配对不要填写 localhost；同处校园网也不保证地址可达。
+算力端主动连接管理端，不需要开放算力端入站端口。
 
-### 3. Import and run an algorithm in the same window
+### 3. 在同一个窗口导入并运行算法
 
-1. Open **Algorithm Projects → Import algorithm** and choose the original root folder. Select the discovered main.py or other supported original entry.
-2. Review fixed parameters, separate experiment presets, datasets, extra dependencies and resource budgets in the page. Add or edit presets without opening several JSON files.
-3. Review the selected-file preview and **publish to the project library**. This records a fixed version of the code, data and configuration; it does not start training.
-4. Select online workers on the project card and **deploy**. Workers automatically prepare code, data and the Docker environment. Wait for installation to succeed.
-5. Choose **Create experiment**, select a preset and edit parameters. Submit a short test first, then follow progress, logs, metrics and result files in **Experiments**.
+1. 在**算法项目 → 导入算法**中选择原算法根目录。软件列出发现的入口；选对原来的 main.py 或其他受支持入口。
+2. 在页面检查固定参数、每组实验参数、数据文件、额外依赖和资源预算。可以增加不同实验预设，不用打开多个 JSON 文件。
+3. 检查文件预览，确认后**发布到项目库**。这一步保存代码、数据和配置的固定版本，尚未启动训练。
+4. 在项目卡片选择在线算力端并**分发**。节点自动准备代码、数据和 Docker 环境；等待安装成功。
+5. 点击**创建实验**，选一个预设并修改需要比较的参数，先提交短测试。随后在**实验**页面查看进度、日志、指标和结果文件。
 
-Experiment matrices combine datasets and parameter values: save the configuration, preview allocation, launch a batch, and export Markdown results. Allocation supports automatic selection, candidate/preferred workers, and a manually selected worker/GPU. Import forms include optional AI advice, and project removal cleans managed deployments while preserving original files. See the [workflow guide (Chinese)](docs/EXPERIMENT-MATRICES.zh-CN.md).
+在**实验矩阵**中一次选择多个数据集和参数组合，保存配置、预览分配、一键启动并导出 Markdown 结果。算力分配支持自动、候选/偏好节点及手动指定节点/GPU；导入新增表单和可选 AI 建议，项目删除会清理各算力端的受管理部署副本。[完整使用说明](docs/EXPERIMENT-MATRICES.zh-CN.md)。
 
-Local-folder import is available in the application on the controller computer. A remote browser can upload a prepared project ZIP; it cannot browse the controller's filesystem.
+选择本地目录需要在管理电脑上的应用窗口操作。从其他电脑打开实验台时，可上传已生成的项目 ZIP；网页不会读取管理电脑的任意目录。
 
-**The original algorithm is not rewritten.** The external harness calls its original entry in an isolated working copy, passes configuration and collects outputs.
-Native resume can be configured when the original entry supports it. Otherwise resume stays unavailable; a saved model alone is not advertised as full training recovery.
-Discovery is a draft: dynamic arguments, dependency versions and log meanings need review. Windows .bat entries do not run directly in Linux GPU containers; choose the Python/bash entry they actually invoke.
+**原算法不会被改写。** harness 在独立工作副本中调用原入口，传入配置并收集输出。
+算法已有原生续训入口时，可以配置调用它；没有就明确不提供恢复，不会伪装成完整续训。
+参数识别是待检查的草稿：动态参数、包版本和日志含义仍需人工确认。Windows .bat 不能直接在 Linux GPU 容器中执行，需要选择它实际调用的 Python/bash 入口。
 
-For a concrete example, see [Review an unchanged SASRec_Original import](docs/EXTERNAL-HARNESS.md). It uses **E:/PythonProjects/SASRec_Original/src/main.py** and one **Video_Games.test.txt** file, not the different implementation containing experiment.py.
+具体例子：[以真实 SASRec_Original 为例检查导入配置](docs/EXTERNAL-HARNESS.zh-CN.md)。该例使用 **E:/PythonProjects/SASRec_Original/src/main.py** 和单个 **Video_Games.test.txt**，不是另一份具有 experiment.py 的同名实现。
 
-## Distribution, outputs and background operation
+## 手机端：ExLab Monitor
 
-Publish a project once and let selected workers receive it. Current distribution sends **immutable code/data snapshots through the controller**, with private Git snapshots and Docker environments prepared on each worker. Routine use requires no node-side Git or Docker commands.
-**Direct GitHub/GitLab account integration and third-party registry publishing controls are not implemented.** Publish another version when source or data changes; create another experiment when only learning rate, seed or similar parameters change.
+在 Center 的 **设置 → 移动端** 为手机创建只读或有限操作凭证，复制配对链接到 Monitor。默认长期配对并记住连接，再次打开自动接入；也可通过手机浏览器访问 `/mobile/`。可查看实验、指标、日志和节点资源；有限操作凭证还允许停止 / 取消、支持时恢复实验，以及暂停 / 恢复节点接单。使用时需主控在线，手机与主控网络互通。
 
-Each experiment has its own configuration and output directory. Console output is saved, existing log files can be configured as metric sources, and models/results return with the experiment.
-Task completion and file upload completion may occur at different times. Check pending uploads before shutting down.
+旧 APK 先覆盖安装一次 0.5.2，保留原应用数据；之后可在应用内检查、下载和校验更新，再调用系统安装器。旧定期凭证可在主控设备列表中点击“设为长期”。
 
-The overview, experiment list and details show **cumulative runtime**. Timing starts with execution, freezes when it stops, and accumulates across resumed attempts; queueing, preparation and stopped periods are excluded. Workers persist timing, so closing the page or losing the controller connection does not reset it. Live values are estimates until confirmed by the worker. Details show submission, first start and latest stop times; CSV exports include timing fields. Update both Center and Worker for complete timing support. Old records remain unavailable, and uncertain history is marked incomplete.
+Android 与原生 HarmonyOS 6 的轻量客户端源码位于 `mobile/`，主要鸿蒙验收机型为 Mate 70 Pro。Android 测试 APK 已完成编译、Lint 和签名验证，鸿蒙 HAP 尚未生成，两端均未完成真机验收。鸿蒙 6 可先尝试经卓易通安装 APK，兼容性待实测；也可通过手机浏览器使用。详见[移动端使用、构建与验收说明](mobile/README.md)。
 
-The Windows worker can continue after its window closes, but still depends on the current user's WSL and Docker Desktop.
-**Background operation does not mean training continues through sleep, logout or power-off.** Optional login startup is not a Windows service running without user login.
-Native Ubuntu prefers user-level systemd when available and otherwise uses a detached process. Startup before login or persistence after logout depends on the machine's existing user-service/lingering settings; the installer does not silently change those system policies.
+## 分发、输出和后台运行
 
-## Scheduling capabilities
+你从管理端发布一个项目版本，算力端自动接收。当前通过**管理端传输固定源码/数据快照，节点维护私有 Git 快照和 Docker 环境**完成分发；无需自己在节点执行 Git 或 Docker 命令。
+**尚未直接对接 GitHub/GitLab 仓库账号或第三方镜像仓库的发布界面。** 源码或数据变更后重新导入/发布；只改学习率、seed 等参数则直接创建实验。
 
-| Mode | Current support |
+每个实验有自己的配置和输出目录。原程序的控制台输出会被保存，已有日志可以配置成指标来源，模型和结果文件随实验回传。
+状态“已完成”与“文件回传完成”可能有时间差；关机前查看待回传数量。
+
+总览、实验列表和详情显示**累计运行时长**：实验开始运行后自动计时，停止或完成后定格，恢复后继续累计，不含排队、环境准备和停止期间。算力端持久化计时，关闭页面或管理端暂时离线不会清零；运行中的页面数字为估算，最终以算力端回传记录为准。详情提供提交、首次开始和最近停止时间，结果 CSV 也包含计时字段。管理端与算力端都需更新后才能记录完整时长；旧记录显示暂无记录，无法确认的历史片段会标注记录不完整。
+
+Windows 算力端关闭窗口后可以继续后台运行，但仍依赖当前用户的 WSL 和 Docker Desktop。
+**后台运行不等于睡眠、注销或关机后仍能训练。** 登录启动选项也不等于 Windows 无人登录系统服务。
+原生 Ubuntu 优先使用用户级 systemd，不可用时使用后台进程；开机未登录/注销后继续运行取决于系统已有的用户服务和 lingering 设置，安装器不会擅自更改这些系统策略。
+
+## 现阶段的算力调度
+
+| 方式 | 当前支持 |
 |---|---|
-| One experiment on one GPU | Supported; an experiment can request exclusive use within this manager |
-| Separate experiments on separate GPUs | Supported when node concurrency and resource budgets allow |
-| Several independent experiments on one GPU | Supported when tasks allow sharing, the GPU job limit allows it and budgets fit |
-| One experiment across multiple GPUs or machines | Not implemented; requires algorithm and scheduler support |
-| Automatically measure and choose the fastest allocation | Not implemented |
+| 单卡单实验 | 支持，可以为实验选择独占 |
+| 多张卡各自跑独立实验 | 支持，需允许节点并发且资源预算足够 |
+| 一张卡同时跑多个独立实验 | 支持，新导入项目默认允许共享；单卡并发和节点资源预算仍需满足 |
+| 多卡/多机合跑一个实验 | 尚未实现，需算法与调度器共同支持 |
+| 自动测量并选择最快分配 | 尚未实现 |
 
-All GPUs in a shared machine may participate; another person's program using a GPU does not itself prevent admission. Each start checks current free VRAM/RAM, headroom, existing experiment reservations, CPU/RAM budgets, disk space and concurrency limits. Sharing may affect speed and does not impose a hard GPU memory limit. The manager does not silently change batch size, precision or learning rate to make a task fit.
+两张 A6000 或其他多卡节点可以全部接入，不需要固定卡号或排班；已有外部程序使用显卡不会直接阻止本软件启动任务。启动前检查实际剩余显存、显存预留、现有实验的预算以及 CPU、内存、磁盘和并发限制。共享不保证运行速度不受影响，也不硬限制训练程序的显存使用。软件不会偷偷修改 batch、精度或学习率来让任务放得下。
 
-Use **Compute → Resource settings** to edit node and GPU concurrency, CPU/RAM budgets and VRAM headroom. Updated workers receive saved changes after reconnecting, and the UI distinguishes pending from applied settings. Older workers need an upgrade. Lower limits affect future starts without stopping existing experiments. Fresh installations allow up to four experiments per enabled GPU and four times the enabled GPU count per node; conservative CPU/RAM defaults still apply and can be changed in the form. Upgrades preserve existing GPU choices and budgets.
+在**算力 → 资源设置**调整节点与每张卡的并发上限、CPU/内存预算及显存预留。新版节点离线时可先保存，重连并确认后生效；旧版节点先升级。设置只影响后续启动，不中断已有实验。新安装每张已启用卡默认最多 4 个实验，全节点上限为已启用卡数 × 4；CPU/内存初始预算仍保守，可在表单中按机器资源调整。已有节点和已有项目的显式配置不会因升级被覆盖。
 
-Single experiments and matrices have their own resource and sharing controls. Exclusive use only excludes other experiments managed by this software from the same GPU; it does not lock out external programs. Since current telemetry cannot attribute memory to each managed process, admission also conservatively reserves existing experiments' declared budgets; the free VRAM shown by system tools alone does not guarantee immediate admission.
-Workers can continue already assigned, cached tasks during a temporary controller outage and return records after reconnecting. An offline task is not silently duplicated onto another machine.
+创建实验和编辑矩阵时可以直接选择共享或独占，并修改本次资源预算。独占只限制实验台内其他任务与它同卡，不锁住整张显卡，也不控制外部程序。当前无法将进程显存准确归属到每个受管理实验，准入会保守为已有实验继续预留其声明预算；仅看到系统显示的空闲显存足够，不保证立即开跑。
+主控暂时离线时，节点可继续已分配、已缓存的任务，恢复连接后补传；不会擅自把失联任务重复派到另一台机器。
 
-## Existing deployments and everyday use
+## 已有部署与日常维护
 
-**Upgrading from 0.3.0-rc.1 or earlier:** download and install this release manually; those versions have no in-app update entry. Finish tasks and pending uploads, stop the old controller/agent in its client and exit that client from its tray before installing the same-role package.
+**从 0.3.0-rc.1 或更早版本升级：**旧版没有应用内更新入口，首次需要手动下载安装本版。先等任务与回传完成，在客户端停止旧管理服务/算力代理，再从托盘退出旧客户端，最后安装同角色新版。
 
-**From 0.3.0-rc.2 onward on Windows:** choose **Check for updates** in the application's status window or tray menu. Review the current/new versions and release notes, then download the matching Center or Worker installer. The application checks its size and SHA-256 before installation. You can download while busy and install later, after experiments and pending uploads finish. Installation checks that services can stop safely, exits the old client and opens the new installer. Your data-directory selection, Ubuntu distribution, node configuration and login-startup setting are retained.
+**Windows 从 0.3.0-rc.2 起：**在应用状态窗口或托盘菜单选择**检查更新**。查看当前版本、新版本和发布说明后，下载对应 Center 或 Worker 安装包。应用检查文件大小和 SHA-256，校验成功后才允许安装。忙时可以先下载，等实验与待回传完成再安装。安装前检查服务能否安全停止，退出旧客户端后打开新版安装器；保留原数据目录选择、Ubuntu、节点配置和登录启动选项。
 
-Preview versions check for newer previews and stable releases; stable versions check for stable releases only. Ubuntu workers continue to use a downloaded package and the existing script/manual upgrade procedure.
+预览版可接收更新的预览版和正式版；正式版只接收正式版。Ubuntu 算力端继续下载新版包，通过已有脚本或手动流程升级。
 
-Never run old and new agents against the same node directory at once. See [Everyday operations](docs/OPERATIONS.md) for upgrading, backups, background controls and troubleshooting.
-Use the application on localhost or a trusted private network; it is not a public multi-tenant service.
+不要让新旧两个代理同时使用同一个节点目录。完整操作、备份、后台停止和排错见 [日常使用说明](docs/OPERATIONS.zh-CN.md)。
+仅在本机或可信私网使用实验台；它不是直接开放公网的多租户服务。
 
-## Development and license
+## 开发与许可证
 
-Controller logic uses Python's standard library; a source checkout needs Python 3.10+.
-Release builds select explicit application files. Credentials, user algorithms and research datasets are excluded from public packages.
+管理逻辑使用 Python 标准库，源码运行需要 Python 3.10+。发布构建只选择明确的应用文件，用户凭证、算法与数据不进入公共安装包。
 
     python -m unittest discover -s tests -t . -v
     python scripts/build_release.py --download-python
 
-[Protocol](CONTRACT.md) · [Issues](https://github.com/Pencilfinely/exlab/issues) · [Legacy SDK reference for developers](docs/ALGORITHM-INTEGRATION.md).
+协议：[CONTRACT.md](CONTRACT.md) · 问题反馈：[GitHub Issues](https://github.com/Pencilfinely/exlab/issues) · 开发者旧 SDK 接口：[接入参考](docs/ALGORITHM-INTEGRATION.zh-CN.md)。
 
-MIT — see [LICENSE](LICENSE). CPython and separately downloaded components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md).
+本项目使用 [MIT](LICENSE)。CPython 和另外下载的组件保留各自许可证，见[第三方说明](THIRD_PARTY_NOTICES.md)。
