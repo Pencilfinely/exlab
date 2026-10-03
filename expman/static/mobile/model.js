@@ -20,5 +20,16 @@ globalThis.MobileModel = (() => {
     const xs=points.map(p=>p.x), ys=points.map(p=>p.y), xmin=Math.min(...xs), xmax=Math.max(...xs), ymin=Math.min(...ys), ymax=Math.max(...ys);
     return points.map(p=>`${16+(p.x-xmin)/(xmax-xmin||1)*288},${124-(p.y-ymin)/(ymax-ymin||1)*104}`).join(' ');
   }
-  return {terminal,names,actions,canControl,series,path};
+  function pairing(value, origin) {
+    const input=String(value||'').trim();
+    if (/^[A-Za-z0-9_-]{20,512}$/.test(input)) return input;
+    try {
+      const link=new URL(input);
+      if (!['http:','https:'].includes(link.protocol)||link.origin!==origin||link.username||link.password||link.search||link.pathname!=='/mobile/') throw new Error();
+      const fragment=new URLSearchParams(link.hash.slice(1)), credential=fragment.get('pair');
+      if ([...fragment.keys()].length!==1||!credential||!/^[A-Za-z0-9_-]{20,512}$/.test(credential)) throw new Error();
+      return credential;
+    } catch { throw new Error('请输入此实验台的移动凭证或配对链接'); }
+  }
+  return {terminal,names,actions,canControl,series,path,pairing};
 })();

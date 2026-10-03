@@ -28,7 +28,7 @@ try {
     if (Test-Path -LiteralPath $Gradle) { $Gradle = (Resolve-Path -LiteralPath $Gradle).Path }
     & $Gradle --version
     if ($LASTEXITCODE -ne 0) { throw 'Gradle unavailable; see ../README.md' }
-    $buildArguments = @('--project-dir', $PSScriptRoot, '--no-daemon', '--console=plain', ':app:assembleDebug', ':app:lintDebug')
+    $buildArguments = @('--project-dir', $PSScriptRoot, '--no-daemon', '--console=plain', ':app:testDebugUnitTest', ':app:assembleDebug', ':app:lintDebug')
     if ($Offline) { $buildArguments += '--offline' }
     & $Gradle @buildArguments
     if ($LASTEXITCODE -ne 0) { throw 'Android build or lint failed' }

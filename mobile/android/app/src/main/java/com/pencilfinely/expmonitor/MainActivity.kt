@@ -6,6 +6,8 @@ import android.graphics.Color
 import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
@@ -14,17 +16,33 @@ import android.webkit.*
 import android.widget.*
 import java.net.URI
 
-/** A platform container only. No experiment state, credentials or commands cross a JS bridge. */
+/** Pairing stays in origin-scoped Web storage; no credentials or commands cross a JS bridge. */
 class MainActivity : Activity() {
     private var browser: WebView? = null
     private var origin = ""
+    private var pairing: String? = null
+    private var failedLoad = false
+    private var resumed = false
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var updates: MonitorUpdateDialog
+    private val reconnect = Runnable { if (resumed && failedLoad) browser?.loadUrl("$origin/mobile/" + (pairing?.let { "#pair=$it" } ?: "")) }
     private val green = Color.rgb(35, 79, 65)
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.setDecorFitsSystemWindows(false)
-        showConnection()
+        updates = MonitorUpdateDialog(this)
+        val saved = getSharedPreferences("connection", MODE_PRIVATE)
+        try {
+            val previous = saved.getString("origin", "").orEmpty()
+            if (previous.isEmpty()) showConnection()
+            else {
+                // Earlier versions already validated and explicitly selected a private HTTP origin.
+                val connection = ControllerConnection.parse(previous, saved.getBoolean("allow_http", previous.startsWith("http://")))
+                origin = connection.origin; openMonitor()
+            }
+        } catch (_: Exception) { showConnection() }
     }
 
     private fun layout(): LinearLayout {
@@ -58,6 +76,7 @@ class MainActivity : Activity() {
     }
 
     private fun showConnection() {
+        handler.removeCallbacks(reconnect); failedLoad = false; pairing = null
         browser?.let { (it.parent as? ViewGroup)?.removeView(it); it.stopLoading(); it.destroy() }
         browser = null
         val root = layout()
@@ -72,37 +91,21 @@ class MainActivity : Activity() {
             setSingleLine(true)
             setText(getSharedPreferences("connection", MODE_PRIVATE).getString("origin", ""))
         }
-        val allowHttp = CheckBox(this).apply { setText(R.string.allow_private_http) }
+        val allowHttp = CheckBox(this).apply { setText(R.string.allow_private_http); isChecked = getSharedPreferences("connection", MODE_PRIVATE).getBoolean("allow_http", false) }
         val error = TextView(this).apply { setTextColor(Color.rgb(156, 58, 52)); setPadding(0, dp(10), 0, dp(10)) }
         form.addView(address); form.addView(allowHttp); form.addView(error)
         form.addView(Button(this).apply {
             setText(R.string.connect)
             setOnClickListener {
                 try {
-                    val uri = URI(address.text.toString().trim())
-                    val scheme = uri.scheme?.lowercase()
-                    require((scheme == "http" || scheme == "https") && uri.host != null &&
-                        uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
-                        (uri.path.isNullOrEmpty() || uri.path == "/") &&
-                        (uri.port == -1 || uri.port in 1..65535)) { getString(R.string.invalid_address) }
-                    if (scheme == "http") require(allowHttp.isChecked && privateHost(uri.host)) {
-                        getString(R.string.http_not_allowed)
-                    }
-                    origin = URI(scheme, null, uri.host.lowercase(), uri.port, null, null, null).toString()
-                    getSharedPreferences("connection", MODE_PRIVATE).edit().putString("origin", origin).apply()
+                    val connection = ControllerConnection.parse(address.text.toString(), allowHttp.isChecked)
+                    origin = connection.origin; pairing = connection.pairing
+                    getSharedPreferences("connection", MODE_PRIVATE).edit().putString("origin", origin).putBoolean("allow_http", allowHttp.isChecked).apply()
                     openMonitor()
-                } catch (failure: Exception) { error.text = failure.message ?: getString(R.string.invalid_address) }
+                } catch (failure: Exception) { error.text = failure.message ?: "请输入主控地址或配对链接" }
             }
         })
-    }
-
-    private fun privateHost(host: String): Boolean {
-        if (host == "localhost") return true
-        val parts = host.split('.').map { it.toIntOrNull() ?: return false }
-        if (parts.size != 4 || parts.any { it !in 0..255 } || parts.joinToString(".") != host) return false
-        return parts[0] == 10 || parts[0] == 127 ||
-            (parts[0] == 192 && parts[1] == 168) || (parts[0] == 172 && parts[1] in 16..31) ||
-            (parts[0] == 100 && parts[1] in 64..127)
+        form.addView(Button(this).apply { text = getString(R.string.monitor_check_version, BuildConfig.VERSION_NAME); setOnClickListener { updates.show() } })
     }
 
     private fun sameOrigin(value: String): Boolean = try {
@@ -114,12 +117,22 @@ class MainActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun openMonitor() {
         val root = layout()
-        val toolbar = LinearLayout(this)
-        val status = TextView(this).apply { text = origin; textSize = 11f; setPadding(dp(12), dp(8), dp(12), dp(8)) }
-        toolbar.addView(Button(this).apply { setText(R.string.switch_controller); setOnClickListener { showConnection() } })
-        toolbar.addView(Button(this).apply { setText(R.string.reload); setOnClickListener { status.text = origin; browser?.reload() } })
+        val toolbar = LinearLayout(this).apply { gravity = android.view.Gravity.END }
+        val status = TextView(this).apply { text = ""; textSize = 12f; setPadding(dp(16), dp(10), dp(16), dp(10)); visibility = View.GONE }
+        toolbar.addView(Button(this).apply { text = "连接"; setBackgroundColor(Color.TRANSPARENT); setTextColor(green); setOnClickListener { showConnection() } })
+        toolbar.addView(Button(this).apply { text = "更新"; setBackgroundColor(Color.TRANSPARENT); setTextColor(green); setOnClickListener { updates.show() } })
         root.addView(toolbar); root.addView(status)
         val web = WebView(this)
+        val frame = FrameLayout(this)
+        val waiting = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; gravity = android.view.Gravity.CENTER
+            setPadding(dp(28), dp(28), dp(28), dp(28)); visibility = View.GONE
+            addView(TextView(this@MainActivity).apply { setText(R.string.app_name); textSize = 25f; setTextColor(green) })
+            addView(TextView(this@MainActivity).apply { text = "已保存配对 · 等待实验台上线"; textSize = 14f; setPadding(0, dp(18), 0, dp(24)) })
+            addView(Button(this@MainActivity).apply { text = "立即重试"; setOnClickListener { handler.removeCallbacks(reconnect); handler.post(reconnect) } })
+        }
+        frame.addView(web, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        frame.addView(waiting, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         browser = web
         web.settings.apply {
             javaScriptEnabled = true
@@ -139,17 +152,33 @@ class MainActivity : Activity() {
             }
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
                 handler.cancel()
+                failedLoad = true; waiting.visibility = View.VISIBLE; web.visibility = View.INVISIBLE
+                status.visibility = View.VISIBLE
                 status.setText(R.string.certificate_error)
             }
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                if (sameOrigin(url) && !failedLoad) { pairing = null; handler.removeCallbacks(reconnect); status.visibility = View.GONE; waiting.visibility = View.GONE; web.visibility = View.VISIBLE }
+            }
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                failedLoad = false
+            }
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                if (request.isForMainFrame) status.setText(R.string.connection_error)
+                if (request.isForMainFrame) {
+                    failedLoad = true; status.visibility = View.VISIBLE; status.text = "等待实验台上线，自动重连中…"
+                    waiting.visibility = View.VISIBLE; web.visibility = View.INVISIBLE
+                    handler.removeCallbacks(reconnect); if (resumed) handler.postDelayed(reconnect, 5000)
+                }
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
-                if (request.isForMainFrame) status.text = getString(R.string.http_error, response.statusCode)
+                if (request.isForMainFrame) {
+                    status.visibility = View.VISIBLE; status.text = getString(R.string.http_error, response.statusCode)
+                    failedLoad = true; waiting.visibility = View.VISIBLE; web.visibility = View.INVISIBLE
+                    if (response.statusCode >= 500) { handler.removeCallbacks(reconnect); if (resumed) handler.postDelayed(reconnect, 5000) }
+                }
             }
         }
-        root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        web.loadUrl("$origin/mobile/")
+        root.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        web.loadUrl("$origin/mobile/" + (pairing?.let { "#pair=$it" } ?: ""))
     }
 
     @Deprecated("Platform fallback is used on Android 9 and later")
@@ -157,10 +186,10 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         val web = browser ?: return super.onBackPressed()
         web.evaluateJavascript("Boolean(window.ExperimentMobileBack && window.ExperimentMobileBack())") { handled ->
-            if (browser === web && handled != "true") showConnection()
+            if (browser === web && handled != "true") finish()
         }
     }
-    override fun onPause() { browser?.onPause(); super.onPause() }
-    override fun onResume() { super.onResume(); browser?.onResume() }
-    override fun onDestroy() { browser?.destroy(); browser = null; super.onDestroy() }
+    override fun onPause() { resumed = false; handler.removeCallbacks(reconnect); browser?.onPause(); super.onPause() }
+    override fun onResume() { super.onResume(); resumed = true; browser?.onResume(); updates.resume(); if (failedLoad) handler.post(reconnect) }
+    override fun onDestroy() { handler.removeCallbacks(reconnect); updates.close(); browser?.destroy(); browser = null; super.onDestroy() }
 }

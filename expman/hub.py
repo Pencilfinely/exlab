@@ -1030,11 +1030,15 @@ def make_server(hub, host="127.0.0.1", port=8765):
             mobile_files = {"/mobile": "mobile/index.html", "/mobile/": "mobile/index.html",
                             "/mobile/mobile.js": "mobile/mobile.js", "/mobile/model.js": "mobile/model.js",
                             "/mobile/mobile.css": "mobile/mobile.css", "/mobile-access": "mobile/access.html",
-                            "/mobile/access.js": "mobile/access.js"}
+                            "/mobile/access.js": "mobile/access.js", "/mobile/connect.css": "mobile/connect.css",
+                            "/mobile/favicon.ico": "mobile/favicon.ico", "/mobile/icon.svg": "mobile/icon.svg",
+                            "/mobile/icon-180.png": "mobile/icon-180.png", "/mobile/icon-192.png": "mobile/icon-192.png",
+                            "/mobile/icon-512.png": "mobile/icon-512.png"}
             if self.command == "GET" and path in mobile_files:
                 static = Path(__file__).parent / "static" / mobile_files[path]
                 content_type = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-                                ".css": "text/css; charset=utf-8"}[static.suffix]
+                                ".css": "text/css; charset=utf-8", ".ico": "image/vnd.microsoft.icon",
+                                ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
             if self.command == "GET" and path in ("/", "/app.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
@@ -1078,7 +1082,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
                         for block in iter(lambda: response.read(512 * 1024), b''):
                             self.wfile.write(block)
                     return
-            if path.startswith("/api/mobile/") and path not in ("/api/mobile/devices", "/api/mobile/revoke"):
+            if path.startswith("/api/mobile/") and path not in ("/api/mobile/devices", "/api/mobile/revoke", "/api/mobile/renew"):
                 query = parse_qs(url.query)
                 identities = query.get("id", [])
                 if path == "/api/mobile/job" and len(identities) != 1:
@@ -1181,6 +1185,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
                           '/api/local/centers/sync': hub.center_sync,
                           '/api/local/centers/promote': hub.center_promote,
                           "/api/mobile/devices": hub.mobile_enroll, "/api/mobile/revoke": hub.mobile_revoke,
+                          "/api/mobile/renew": hub.mobile_renew,
                           "/api/node-policy": hub.set_node_policy,
                           "/api/scheduling/preview": hub.scheduling_preview,
                           "/api/matrices/save": hub.matrix_save, "/api/matrices/preview": hub.matrix_preview,

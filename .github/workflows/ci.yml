@@ -21,7 +21,7 @@ jobs:
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;34.0.0"'
       - name: Build and lint Android client
         working-directory: mobile/android
-        run: sh ./gradlew --no-daemon --console=plain :app:assembleDebug :app:lintDebug
+        run: sh ./gradlew --no-daemon --console=plain :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
   test:
     strategy:
       fail-fast: false
@@ -43,10 +43,15 @@ jobs:
       - run: node --check expman/static/mobile/mobile.js
       - run: node --check expman/static/mobile/access.js
       - run: node tests/test_mobile_ui.js
+      - run: node tests/test_mobile_connection.js
       - name: Native Windows desktop transport and role tests
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test_desktop.ps1
+      - name: Branded shortcut migration
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_shortcuts.ps1
       - name: Windows update selection and download integrity tests
         if: runner.os == 'Windows'
         shell: pwsh

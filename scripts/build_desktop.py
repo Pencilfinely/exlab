@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -64,6 +65,17 @@ def compile_desktop(output, role, payload=None, compiler=None):
         role_file.write_text(role, encoding='utf-8')
         version_file = temporary / 'version.txt'
         version_file.write_text(VERSION, encoding='utf-8')
+        numeric = VERSION.split('-', 1)[0]
+        if not re.fullmatch(r'\d+\.\d+\.\d+', numeric):
+            raise ValueError('Desktop version must use three numeric components')
+        title = 'ExLab Worker' if role == 'worker' else 'ExLab Center'
+        branding = temporary / 'BrandInfo.cs'
+        branding.write_text('using System.Reflection;\n'
+            + f'[assembly: AssemblyTitle("{title}")]\n'
+            + f'[assembly: AssemblyDescription("{title}")]\n'
+            + '[assembly: AssemblyProduct("ExLab")]\n'
+            + f'[assembly: AssemblyFileVersion("{numeric}.0")]\n'
+            + f'[assembly: AssemblyInformationalVersion("{VERSION}")]\n', encoding='utf-8')
         target = temporary / output.name
         args = [str(executable), '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
                 '/out:' + str(target), '/resource:' + str(role_file) + ',Role',
@@ -74,6 +86,7 @@ def compile_desktop(output, role, payload=None, compiler=None):
         if payload is not None:
             args.append('/resource:' + str(payload) + ',AppPayload')
         args.append(str(source))
+        args.append(str(branding))
         args.extend(str(path) for path in extra_sources)
         result = subprocess.run(args, capture_output=True, text=True, encoding='utf-8',
                                 errors='replace', timeout=180)

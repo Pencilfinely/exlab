@@ -37,23 +37,44 @@ class MobileHubMixin:
         from .hub import APIError, _object
         _object(payload, "request")
         name, permission = payload.get("name"), payload.get("permission", "monitor")
-        days = payload.get("days", 30)
+        days = payload.get("days", 0)
         if not isinstance(name, str) or not name.strip() or len(name) > 80:
             raise APIError(400, "请输入 1–80 字的设备名称")
         if permission not in ("monitor", "control"):
             raise APIError(400, "权限必须为 monitor 或 control")
-        if type(days) is not int or not 1 <= days <= 90:
-            raise APIError(400, "有效期必须为 1–90 天")
+        if type(days) is not int or not 0 <= days <= 90:
+            raise APIError(400, "有效期必须为 1–90 天，或选择长期有效")
         token, identity, timestamp = secrets.token_urlsafe(32), uuid.uuid4().hex, now()
         with self.transaction():
-            count = self.db.execute("SELECT COUNT(*) FROM mobile_devices WHERE revoked IS NULL AND expires>?", (timestamp,)).fetchone()[0]
+            count = self.db.execute("SELECT COUNT(*) FROM mobile_devices WHERE revoked IS NULL AND (expires=0 OR expires>?)", (timestamp,)).fetchone()[0]
             if count >= 100:
                 raise APIError(409, "有效移动凭证已达 100 个，请先撤销不用的凭证")
             self.db.execute("INSERT INTO mobile_devices VALUES (?,?,?,?,?,?,NULL)",
                             (identity, name.strip(), permission, hashlib.sha256(token.encode()).hexdigest(),
-                             timestamp, timestamp + days * 86400))
+                             timestamp, timestamp + days * 86400 if days else 0))
         return {"id": identity, "name": name.strip(), "permission": permission,
-                "expires": timestamp + days * 86400, "token": token}
+                "expires": timestamp + days * 86400 if days else 0, "token": token}
+
+    def mobile_renew(self, payload):
+        from .hub import APIError, _object
+        _object(payload, "request")
+        identity, days = payload.get("id"), payload.get("days", 0)
+        if not isinstance(identity, str) or not identity or type(days) is not int or not 0 <= days <= 90:
+            raise APIError(400, "请选择设备和有效期")
+        timestamp = now()
+        expires = timestamp + days * 86400 if days else 0
+        with self.transaction():
+            row = self.db.execute("SELECT revoked,expires FROM mobile_devices WHERE id=?", (identity,)).fetchone()
+            if row is None:
+                raise APIError(404, "找不到移动设备")
+            if row["revoked"] is not None:
+                raise APIError(409, "已撤销的设备需要重新配对")
+            if row["expires"] and row["expires"] <= timestamp:
+                count = self.db.execute("SELECT COUNT(*) FROM mobile_devices WHERE revoked IS NULL AND (expires=0 OR expires>?)", (timestamp,)).fetchone()[0]
+                if count >= 100:
+                    raise APIError(409, "有效移动凭证已达 100 个，请先撤销不用的凭证")
+            self.db.execute("UPDATE mobile_devices SET expires=? WHERE id=?", (expires, identity))
+        return {"id": identity, "expires": expires}
 
     def mobile_revoke(self, payload):
         from .hub import APIError, _object
@@ -73,7 +94,7 @@ class MobileHubMixin:
         digest = hashlib.sha256(header[7:].encode()).hexdigest()
         with self.lock:
             row = self.db.execute("SELECT id,name,permission,expires FROM mobile_devices "
-                                  "WHERE token_hash=? AND revoked IS NULL AND expires>?", (digest, now())).fetchone()
+                                  "WHERE token_hash=? AND revoked IS NULL AND (expires=0 OR expires>?)", (digest, now())).fetchone()
             if row is None:
                 raise APIError(401, "移动凭证无效、已过期或已撤销，请重新连接")
             return dict(row)

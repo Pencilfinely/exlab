@@ -26,7 +26,9 @@ namespace ExperimentManagerDesktop {
             } }
         }
         internal static string Role { get { return Worker ? "Worker" : "Controller"; } }
-        internal static string Title { get { return Worker ? "ExLab Worker · 算力端" : "ExLab Center · 实验台"; } }
+        internal static string Title { get { return Worker ? "ExLab Worker" : "ExLab Center"; } }
+        internal static string ShortcutName { get { return Title+".lnk"; } }
+        internal static string LegacyShortcutName { get { return Worker ? "实验算力.lnk" : "实验台.lnk"; } }
         internal static string Executable { get { return Worker ? "ExLabWorker.exe" : "ExLabCenter.exe"; } }
         internal static string SettingsRoot { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ExperimentManager", "desktop", Role); } }
         internal static string SettingsFile { get { return Path.Combine(SettingsRoot, "settings.json"); } }
@@ -118,6 +120,33 @@ namespace ExperimentManagerDesktop {
             dynamic link=shell.CreateShortcut(destination); link.TargetPath=target; link.Arguments=arguments;
             link.WorkingDirectory=Path.GetDirectoryName(target); link.Description=Title; link.IconLocation=target+",0"; link.Save();
         }
+        internal static bool OwnsShortcutTarget(string target,string installRoot) {
+            try {
+                string path=Path.GetFullPath(target),root=Path.GetFullPath(installRoot).TrimEnd(Path.DirectorySeparatorChar)+Path.DirectorySeparatorChar;
+                string name=Path.GetFileName(path);
+                return path.StartsWith(root,StringComparison.OrdinalIgnoreCase)&&
+                    (name.Equals(Executable,StringComparison.OrdinalIgnoreCase)||name.Equals("Experiment"+Role+".exe",StringComparison.OrdinalIgnoreCase));
+            } catch { return false; }
+        }
+        internal static bool OwnedShortcut(string link,string installRoot) {
+            if(!File.Exists(link))return false;
+            try {
+                Type type=Type.GetTypeFromProgID("WScript.Shell");dynamic shell=Activator.CreateInstance(type);
+                dynamic shortcut=shell.CreateShortcut(link);
+                return OwnsShortcutTarget((string)shortcut.TargetPath,installRoot);
+            } catch { return false; }
+        }
+        internal static void InstallShortcuts(string desktopFolder,string menuFolder,string installRoot,string target,bool makeDesktop) {
+            string menu=Path.Combine(menuFolder,"ExLab",ShortcutName),desktop=Path.Combine(desktopFolder,ShortcutName);
+            if(File.Exists(menu)&&!OwnedShortcut(menu,installRoot))throw new IOException("同名开始菜单快捷方式不属于 ExLab，请先为其改名。");
+            if(makeDesktop&&File.Exists(desktop)&&!OwnedShortcut(desktop,installRoot))throw new IOException("同名桌面快捷方式不属于 ExLab，请先为其改名。");
+            Shortcut(menu,target,"");if(makeDesktop)Shortcut(desktop,target,"");
+            else if(OwnedShortcut(desktop,installRoot))File.Delete(desktop);
+            foreach(string old in new[]{Path.Combine(desktopFolder,LegacyShortcutName),
+                Path.Combine(menuFolder,"ExLab",(Worker?"Worker":"Center")+".lnk"),
+                Path.Combine(menuFolder,"Experiment Manager",Role+".lnk")})
+                if(OwnedShortcut(old,installRoot))File.Delete(old);
+        }
         internal static void WaitForPreviousClient(string[] args) {
             string raw=Arg(args,"--wait-pid");if(raw==null)return;
             int pid;long started;
@@ -190,7 +219,8 @@ namespace ExperimentManagerDesktop {
             startup.Checked=DesktopRuntime.AutoStart;
             var saved=App.Read(App.SettingsFile);
             if(App.Has(args,"--apply-update"))desktop.Checked=saved.ContainsKey("desktop_shortcut")?App.Flag(saved,"desktop_shortcut"):
-                File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.Worker?"实验算力.lnk":"实验台.lnk"));
+                (File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.ShortcutName))||
+                 File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.LegacyShortcutName)));
             if(App.Worker)pairing.Text=App.Text(saved,"pairing_file");
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.White;
             var panel=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=8 };
@@ -268,9 +298,9 @@ namespace ExperimentManagerDesktop {
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
                 settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.Write(App.SettingsFile,settings);
                 string target=Path.Combine(destination,App.Executable);
-                string menu=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs","ExLab",(App.Worker?"Worker":"Center")+".lnk");
-                App.Shortcut(menu,target,"");
-                if(makeDesktop) App.Shortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.Worker?"实验算力.lnk":"实验台.lnk"),target,"");
+                App.InstallShortcuts(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs"),
+                    Directory.GetParent(destination).FullName,target,makeDesktop);
                 using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run",true)) {
                     run.DeleteValue("ExperimentManager-"+App.Role,false);
                     if(autoStart) run.SetValue("ExLab-"+App.Role,App.Quote(target)+" --background");

@@ -5,16 +5,22 @@
   const storage=(kind,operation,key,value)=>{try{return window[kind][operation](key,value);}catch{return null;}};
   const key='expman_mobile_token';
   let token=storage('sessionStorage','getItem',key)||storage('localStorage','getItem',key)||'';
+  if(location.hash.startsWith('#pair=')){
+    try{token=M.pairing(location.href,location.origin);}catch(error){notice(error.message);}
+    // Remove the pairing credential from browser history immediately.
+    history.replaceState(null,'',location.pathname+location.search);
+  }
   let data={jobs:[],nodes:[]}, session=null, connected=false, sampledAt=0, serverTime=0;
   let generation=0, busy=false, polling=false, timer=null, selected=null, detail=null, view='overview', confirmation=null, connectionError=false;
   function notice(message){$('notice').textContent=message;$('notice').hidden=!message;}
   function usable(){return M.canControl(session,connected,sampledAt,busy)&&!document.hidden;}
   function status(){
     const fresh=connected&&Date.now()-sampledAt<15000;
-    $('connection').textContent=fresh?'管理端在线':token?'连接已中断':'未连接';
+    $('connection').textContent=fresh?'在线':token?'连接中':'未配对';
     $('connection').className='badge '+(fresh?'online':'offline');
     $('freshness').textContent=sampledAt?`${fresh?'最近同步':'数据可能已过时 · 最后同步'} ${new Date(sampledAt).toLocaleTimeString()}`:'连接管理端，查看实验进展。';
     document.querySelectorAll('[data-control]').forEach(b=>b.disabled=!usable());
+    $('reconnect-title').textContent=connectionError?'等待实验台上线':'正在连接实验台';
     if(detail){const workerOnline=data.nodes.find(n=>n.id===detail.node_id)?.online===true;const clock=serverTime+(fresh?(Date.now()-sampledAt)/1000:0);const timing=ExperimentTiming.describe(detail,clock,fresh&&workerOnline);$('detail-timer').textContent=timing.text;$('detail-timer').title=timing.note;let note=$('detail-timing-note');if(!note){note=el('p',undefined,'muted small');note.id='detail-timing-note';$('detail-timer').after(note);}note.textContent=timing.note+(fresh?'':' · 管理端连接中断');}
   }
   async function request(path,body){
@@ -29,7 +35,7 @@
   function clearCredentials(){storage('sessionStorage','removeItem',key);storage('localStorage','removeItem',key);}
   function disconnect(message=''){
     generation++;token='';session=null;connected=false;sampledAt=0;clearTimeout(timer);clearCredentials();selected=null;detail=null;data={jobs:[],nodes:[]};busy=false;
-    $('credential').value='';$('login').hidden=false;$('workspace').hidden=true;$('tabs').hidden=true;$('detail').hidden=true;closeConfirm();notice(message);status();
+    $('credential').value='';$('login').hidden=false;$('reconnect').hidden=true;$('workspace').hidden=true;$('tabs').hidden=true;$('detail').hidden=true;closeConfirm();notice(message);status();
   }
   function failure(error){connected=false;connectionError=true;if(error.status===401)disconnect(error.message);else notice(error.status?error.message:error.name==='AbortError'?'连接超时，请检查管理端和网络。':'无法连接管理端，请检查程序是否运行、网络和地址。');status();}
   async function refresh(){
@@ -38,8 +44,9 @@
     try{
       const next=await request('state');if(epoch!==generation)return;
       data=next;session=next.session;connected=true;sampledAt=Date.now();serverTime=next.time;
+      if($('remember').checked){storage('localStorage','setItem',key,token);storage('sessionStorage','removeItem',key);}else storage('sessionStorage','setItem',key,token);
       if(connectionError){notice('');connectionError=false;}
-      $('login').hidden=true;$('tabs').hidden=false;$('workspace').hidden=Boolean(selected);render();
+      $('login').hidden=true;$('reconnect').hidden=true;$('tabs').hidden=false;$('workspace').hidden=Boolean(selected);render();
       if(selected){const identity=selected;const item=await request('job?id='+encodeURIComponent(identity));if(epoch!==generation||selected!==identity)return;detail=item;renderDetail();}
     }catch(error){if(epoch===generation)failure(error);}
     finally{polling=false;if(token&&!document.hidden)timer=setTimeout(refresh,5000);status();}
@@ -72,7 +79,7 @@
       if(session.permission==='control'){const label=worker.mode==='drain'?'恢复接单':'暂停接单';const b=el('button',label);b.dataset.control='true';b.disabled=!usable();b.onclick=()=>confirmAction(label,`节点「${worker.id}」将${label}。`,'node-mode',{node_id:worker.id,mode:worker.mode==='drain'?'run':'drain',expected_mode:worker.mode});box.append(b);}
       return box;
     }));empty($('nodes'),'尚未接入算力节点');
-    $('account').replaceChildren();for(const [label,value]of [['管理端',location.origin],['设备名称',session.name],['权限',session.permission==='control'?'监控与有限操作':'只读监控'],['有效期',new Date(session.expires*1000).toLocaleString()]])$('account').append(el('dt',label),el('dd',value));
+    $('account').replaceChildren();for(const [label,value]of [['管理端',location.origin],['设备名称',session.name],['权限',session.permission==='control'?'监控与有限操作':'只读监控'],['有效期',session.expires===0?'长期有效 · 可在主控撤销':new Date(session.expires*1000).toLocaleString()],['界面版本',data.version||'未知']])$('account').append(el('dt',label),el('dd',value));
     status();
   }
   function switchView(next){view=next;selected=null;detail=null;$('detail').hidden=true;$('workspace').hidden=false;document.querySelectorAll('[data-view]').forEach(n=>n.hidden=n.dataset.view!==next);document.querySelectorAll('[data-tab]').forEach(n=>{if(n.dataset.tab===next)n.setAttribute('aria-current','page');else n.removeAttribute('aria-current');});window.scrollTo(0,0);}
@@ -106,12 +113,16 @@
     catch(error){if(epoch!==generation)return;if(error.status)failure(error);else{connected=false;notice('未能确认提交结果，请恢复连接后查看状态。请勿立即重复提交。');}}
     finally{if(epoch===generation){busy=false;status();}}
   }
-  $('login-form').onsubmit=async event=>{event.preventDefault();generation++;token=$('credential').value.trim();clearCredentials();storage($('remember').checked?'localStorage':'sessionStorage','setItem',key,token);notice('');$('login-button').disabled=true;try{await refresh();}finally{$('login-button').disabled=false;}};
+  $('login-form').onsubmit=async event=>{event.preventDefault();let next;try{next=M.pairing($('credential').value,location.origin);}catch(error){notice(error.message);return;}generation++;token=next;clearCredentials();storage('localStorage','setItem','expman_mobile_remember',$('remember').checked?'yes':'no');notice('');$('login-button').disabled=true;try{await refresh();}finally{$('login-button').disabled=false;}};
   $('logout').onclick=()=>disconnect('已退出，已清除此设备保存的凭证。');$('refresh').onclick=()=>{notice('');void refresh();};$('back').onclick=()=>switchView(view);
+  $('retry-connect').onclick=()=>{notice('');void refresh();};$('repair-pairing').onclick=()=>disconnect('请重新填写配对信息。');
+  $('update-web').onclick=()=>location.reload();
   $('search').oninput=renderJobs;$('filter').onchange=renderJobs;$('metric-key').onchange=drawChart;$('confirm-no').onclick=closeConfirm;$('confirm-yes').onclick=submitAction;
   document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>switchView(b.dataset.tab));
   window.ExperimentMobileBack=()=>{if(!$('confirm').hidden){closeConfirm();return true;}if(selected){switchView(view);return true;}if(view!=='overview'&&token){switchView('overview');return true;}return false;};
   document.addEventListener('keydown',event=>{if($('confirm').hidden)return;if(event.key==='Escape')closeConfirm();if(event.key==='Tab'){event.preventDefault();($('confirm-no')===document.activeElement?$('confirm-yes'):$('confirm-no')).focus();}});
   document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(timer);connected=false;closeConfirm();status();}else void refresh();});window.addEventListener('online',()=>void refresh());window.addEventListener('offline',()=>{connected=false;status();});
-  $('login-origin').textContent='当前管理端：'+location.origin;$('remember').checked=Boolean(storage('localStorage','getItem',key));setInterval(status,1000);status();if(token)void refresh();
+  $('login-origin').textContent=location.origin;$('remember').checked=storage('localStorage','getItem','expman_mobile_remember')!=='no';
+  if(token){$('login').hidden=true;$('reconnect').hidden=false;}
+  setInterval(status,1000);status();if(token)void refresh();
 })();

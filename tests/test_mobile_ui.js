@@ -25,3 +25,11 @@ assert.equal(M.path(M.series(events,'loss',2)),'16,20 304,124');
 assert.equal(M.path([{x:1,y:1},{x:1,y:1}]),'16,124 16,124');
 assert.equal(M.path([]),'');
 console.log('Mobile permissions, stale state, command availability and metric history passed.');
+const origin='https://lab.example', credential='a'.repeat(43);
+assert.equal(M.pairing(credential,origin),credential);
+assert.equal(M.pairing(origin+'/mobile/#pair='+credential,origin),credential);
+for(const value of ['https://else.example/mobile/#pair='+credential,origin+'/mobile/?token='+credential,
+  origin+'/mobile/#pair='+credential+'&pair='+credential,origin+'/mobile/#pair='+credential+'&extra=1',
+  'https://admin@lab.example/mobile/#pair='+credential,'javascript:alert(1)','short'])
+  assert.throws(()=>M.pairing(value,origin));
+console.log('Mobile pairing links stay scoped to their controller and reject credentials in queries.');

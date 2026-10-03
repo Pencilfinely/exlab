@@ -1,4 +1,4 @@
-/* Regenerate Windows icons from the approved SVG artwork. Requires sharp. */
+/* Regenerate desktop and mobile icon variants from the approved SVG artwork. Requires sharp. */
 'use strict';
 
 const fs = require('node:fs/promises');
@@ -66,11 +66,60 @@ async function build(name) {
 
 async function main() {
   await fs.mkdir(path.join(assets, 'generated'), { recursive: true });
-  for (const name of ['center', 'worker']) await build(name);
+  for (const name of ['center', 'worker', 'monitor']) await build(name);
   await fs.copyFile(path.join(assets, 'center.ico'), path.resolve(__dirname, '../expman/static/favicon.ico'));
+  await mobileIcons();
   await fs.writeFile(path.join(assets, 'generated', 'renderer.json'), JSON.stringify({
     sharp: sharp.versions.sharp, rsvg: sharp.versions.rsvg, sizes,
   }, null, 2) + '\n');
+}
+
+async function mobileIcons() {
+  const source = await fs.readFile(path.join(assets, 'monitor.svg'));
+  const root = path.resolve(__dirname, '..');
+  const resources = path.join(root, 'mobile/android/app/src/main/res');
+  const web = path.join(root, 'expman/static/mobile');
+  await fs.copyFile(path.join(assets, 'monitor.ico'), path.join(web, 'favicon.ico'));
+  await fs.writeFile(path.join(web, 'icon.svg'), source);
+  for (const size of [180, 192, 512]) {
+    const png = await sharp(source, { density: 72 * size / 48 }).resize(size, size).png().toBuffer();
+    await fs.writeFile(path.join(web, `icon-${size}.png`), png);
+    await fs.writeFile(path.join(assets, 'generated', `monitor-${size}.png`), png);
+  }
+  for (const [density, size] of [['mdpi',48],['hdpi',72],['xhdpi',96],['xxhdpi',144],['xxxhdpi',192]]) {
+    const folder = path.join(resources, 'mipmap-' + density); await fs.mkdir(folder, {recursive:true});
+    const png = await sharp(source, {density:72 * size / 48}).resize(size,size).png().toBuffer();
+    await fs.writeFile(path.join(folder,'ic_launcher.png'),png);
+    const circle = Buffer.from(`<svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg"><circle cx="${size/2}" cy="${size/2}" r="${size/2}" fill="#FFB6C1"/></svg>`);
+    const round = await sharp(circle).composite([{input:png},{input:circle,blend:'dest-in'}]).png().toBuffer();
+    await fs.writeFile(path.join(folder,'ic_launcher_round.png'),round);
+  }
+  // The 48 px artwork fits inside Android's 66 px adaptive-icon safe zone.
+  const tags = source.toString().match(/<path\b[^>]*>/g) || [];
+  if (tags.length !== 5) throw new Error('Review the Monitor SVG paths before regenerating adaptive icons.');
+  function color(value) {
+    if (/^#[\da-f]{6}$/i.test(value)) return value;
+    const rgba = value.match(/^rgba\((\d+),\s*(\d+),\s*(\d+),\s*1\)$/);
+    if (!rgba) throw new Error('Unsupported Monitor SVG color: '+value);
+    return '#' + rgba.slice(1).map(c=>Number(c).toString(16).padStart(2,'0')).join('');
+  }
+  function vector(monochrome) {
+    const paths = tags.map(tag=>{
+      const data=tag.match(/\bd="([^"]+)"/)[1],fill=tag.match(/\bfill="([^"]+)"/)[1];
+      return `    <path android:fillColor="${monochrome?'#FFFFFFFF':color(fill)}" android:fillType="${tag.includes('fill-rule="evenodd"')?'evenOdd':'nonZero'}" android:pathData="${data}"/>`;
+    }).join('\n');
+    return `<?xml version="1.0" encoding="utf-8"?>\n<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">\n  <group android:scaleX="1.25" android:scaleY="1.25" android:translateX="24" android:translateY="24">\n${paths}\n  </group>\n</vector>\n`;
+  }
+  await fs.writeFile(path.join(resources,'drawable/monitor_foreground.xml'),vector(false));
+  await fs.writeFile(path.join(resources,'drawable/monitor_monochrome.xml'),vector(true));
+  for (const qualifier of ['', '-v33']) {
+    const folder=path.join(resources,'mipmap-anydpi'+qualifier);await fs.mkdir(folder,{recursive:true});
+    const xml=`<?xml version="1.0" encoding="utf-8"?>\n<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n  <background android:drawable="@color/monitor_icon_background"/>\n  <foreground android:drawable="@drawable/monitor_foreground"/>\n  <monochrome android:drawable="@drawable/monitor_monochrome"/>\n</adaptive-icon>\n`;
+    for(const name of ['ic_launcher','ic_launcher_round'])await fs.writeFile(path.join(folder,name+'.xml'),xml);
+  }
+  await fs.writeFile(path.join(resources,'values/icon_colors.xml'),'<?xml version="1.0" encoding="utf-8"?>\n<resources><color name="monitor_icon_background">#FFB6C1</color></resources>\n');
+  await fs.writeFile(path.join(root,'mobile/harmonyos/AppScope/resources/base/media/app_icon.svg'),source);
+  console.log('Built Monitor launcher densities, adaptive / round / monochrome icons, web and HarmonyOS artwork.');
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.5.1
+        default: v0.5.2
 permissions:
   contents: write
 env:
@@ -33,10 +33,12 @@ jobs:
       - run: node --check expman/static/mobile/mobile.js
       - run: node --check expman/static/mobile/access.js
       - run: node tests/test_mobile_ui.js
+      - run: node tests/test_mobile_connection.js
       - name: Validate native desktop and updater
         shell: pwsh
         run: |
           ./scripts/test_desktop.ps1
+          ./scripts/test_shortcuts.ps1
           ./scripts/test_icons.ps1
           ./scripts/test_browser_icons.ps1
           ./scripts/test_updates.ps1

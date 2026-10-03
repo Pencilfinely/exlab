@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 
@@ -81,7 +82,7 @@ class MobileHTTPTests(unittest.TestCase):
         other = Hub(self.root)
         try:
             self.assertEqual(other.mobile_authenticate('Bearer ' + device['token'])['id'], device['id'])
-            other.db.execute('UPDATE mobile_devices SET expires=0')
+            other.db.execute('UPDATE mobile_devices SET expires=1')
             self.denied(401, '/api/mobile/state', device['token'])
         finally:
             other.close()
@@ -141,7 +142,7 @@ class MobileHTTPTests(unittest.TestCase):
         self.denied(404, '/api/mobile/jobs', token, {'spec':SPEC})
 
     def test_bad_input_cannot_grant_privileges_or_change_state(self):
-        for extra in ({'permission':'admin'},{'days':True},{'days':0},{'days':91},{'name':''}):
+        for extra in ({'permission':'admin'},{'days':True},{'days':-1},{'days':91},{'name':''}):
             self.denied(400, '/api/mobile/devices', self.admin, {'name':'phone', **extra})
         token = self.enroll('control')['token']
         identity = self.job()
@@ -154,12 +155,57 @@ class MobileHTTPTests(unittest.TestCase):
         files = application_files()
         for path, filename in [('/mobile/','index.html'),('/mobile-access','access.html'),
                                ('/mobile/mobile.js','mobile.js'),('/mobile/model.js','model.js'),
-                               ('/mobile/access.js','access.js'),('/mobile/mobile.css','mobile.css')]:
+                               ('/mobile/access.js','access.js'),('/mobile/mobile.css','mobile.css'),
+                               ('/mobile/connect.css','connect.css'),('/mobile/favicon.ico','favicon.ico'),
+                               ('/mobile/icon.svg','icon.svg'),('/mobile/icon-192.png','icon-192.png'),
+                               ('/mobile/icon-512.png','icon-512.png')]:
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(self.url+path) as response:
                 self.assertEqual(response.read(), files['expman/static/mobile/'+filename])
                 self.assertIn("connect-src 'self'", response.headers['Content-Security-Policy'])
                 self.assertEqual(response.headers['Cache-Control'], 'no-store')
         self.denied(404, '/mobile/../../hub.json')
+
+    def test_long_term_pairing_survives_restart_and_time_until_revoked(self):
+        device = self.enroll()
+        self.assertEqual(device['expires'], 0)
+        with patch('expman.mobile.now', return_value=10**11):
+            self.assertEqual(self.request('/api/mobile/state', device['token'])['session']['id'], device['id'])
+            other = Hub(self.root)
+            try:
+                self.assertEqual(other.mobile_authenticate('Bearer ' + device['token'])['id'], device['id'])
+            finally:
+                other.close()
+            self.request('/api/mobile/revoke', self.admin, {'id':device['id']})
+            self.denied(401, '/api/mobile/state', device['token'])
+            self.denied(409, '/api/mobile/renew', self.admin, {'id':device['id'],'days':0})
+
+    def test_renew_existing_pairing_preserves_credential_name_and_permission(self):
+        device = self.request('/api/mobile/devices', self.admin, {'name':'Existing phone','days':1})
+        before = dict(self.hub.db.execute('SELECT * FROM mobile_devices WHERE id=?', (device['id'],)).fetchone())
+        self.denied(401, '/api/mobile/renew', device['token'], {'id':device['id'],'days':0})
+        self.denied(403, '/api/mobile/renew', self.worker, {'id':device['id'],'days':0})
+        self.hub.db.execute('UPDATE mobile_devices SET expires=1 WHERE id=?', (device['id'],))
+        self.denied(401, '/api/mobile/state', device['token'])
+        self.request('/api/mobile/renew', self.admin, {'id':device['id'],'days':0})
+        after = dict(self.hub.db.execute('SELECT * FROM mobile_devices WHERE id=?', (device['id'],)).fetchone())
+        self.assertEqual({k:v for k,v in before.items() if k!='expires'}, {k:v for k,v in after.items() if k!='expires'})
+        self.assertEqual(self.request('/api/mobile/state', device['token'])['session']['expires'], 0)
+        self.request('/api/mobile/renew', self.admin, {'id':device['id'],'days':7})
+        self.assertGreater(self.request('/api/mobile/state', device['token'])['session']['expires'], 0)
+        for days in (-1, True, 91, '0'):
+            self.denied(400, '/api/mobile/renew', self.admin, {'id':device['id'],'days':days})
+
+    def test_device_limit_includes_long_term_credentials(self):
+        expired = self.hub.mobile_enroll({'name':'Expired phone', 'days':1})
+        self.hub.db.execute('UPDATE mobile_devices SET expires=1 WHERE id=?', (expired['id'],))
+        for index in range(100):
+            active = self.hub.mobile_enroll({'name':f'Phone {index}', 'days':0})
+        self.denied(409, '/api/mobile/devices', self.admin, {'name':'One more'})
+        self.denied(409, '/api/mobile/renew', self.admin, {'id':expired['id']})
+        self.request('/api/mobile/renew', self.admin, {'id':active['id']})
+        self.request('/api/mobile/revoke', self.admin, {'id':active['id']})
+        self.request('/api/mobile/renew', self.admin, {'id':expired['id']})
+        self.assertEqual(self.request('/api/mobile/state', expired['token'])['session']['expires'], 0)
 
 
 if __name__ == '__main__':

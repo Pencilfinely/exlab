@@ -36,7 +36,8 @@ NATIVE_ENTRIES = {'windows-controller-x64': 'ExLabCenter.exe',
 def application_files(root=ROOT):
     files = {}
     for path in sorted((root / 'expman').rglob('*')):
-        if path.is_file() and '__pycache__' not in path.parts and path.suffix in ('.py', '.js', '.css', '.html'):
+        public_image = path.is_relative_to(root / 'expman/static') and path.suffix in ('.ico', '.svg', '.png')
+        if path.is_file() and '__pycache__' not in path.parts and (path.suffix in ('.py', '.js', '.css', '.html') or public_image):
             if path.is_symlink():
                 raise ValueError('Release inputs cannot be symlinks')
             files[path.relative_to(root).as_posix()] = path.read_bytes()
