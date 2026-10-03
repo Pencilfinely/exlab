@@ -6,6 +6,8 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -15,6 +17,50 @@ using System.Windows.Forms;
 using Microsoft.Win32;
 
 namespace ExperimentManagerDesktop {
+    // Explicit Unicode Shell APIs preserve Chinese names on every Windows locale.
+    static class DesktopShortcuts {
+        [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IShellLinkW {
+            void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int capacity, IntPtr data, uint flags);
+            void GetIDList(out IntPtr value);
+            void SetIDList(IntPtr value);
+            void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder value, int capacity);
+            void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string value);
+            void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder value, int capacity);
+            void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string value);
+            void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder value, int capacity);
+            void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string value);
+            void GetHotkey(out ushort value);
+            void SetHotkey(ushort value);
+            void GetShowCmd(out int value);
+            void SetShowCmd(int value);
+            void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder value, int capacity, out int index);
+            void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string value, int index);
+            void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string value, uint reserved);
+            void Resolve(IntPtr window, uint flags);
+            void SetPath([MarshalAs(UnmanagedType.LPWStr)] string value);
+        }
+        static object Create() { return Activator.CreateInstance(Type.GetTypeFromCLSID(new Guid("00021401-0000-0000-C000-000000000046"))); }
+        internal static void Save(string destination,string target,string arguments,string description) {
+            Directory.CreateDirectory(Path.GetDirectoryName(destination));
+            object instance=Create();
+            try {
+                var link=(IShellLinkW)instance;
+                link.SetPath(target);link.SetArguments(arguments);link.SetWorkingDirectory(Path.GetDirectoryName(target));
+                link.SetDescription(description);link.SetIconLocation(target,0);
+                ((IPersistFile)instance).Save(destination,true);
+            } finally { Marshal.ReleaseComObject(instance); }
+        }
+        internal static string Target(string destination) {
+            object instance=Create();
+            try {
+                ((IPersistFile)instance).Load(destination,0);
+                var path=new StringBuilder(32768);
+                ((IShellLinkW)instance).GetPath(path,path.Capacity,IntPtr.Zero,4); // Raw target; never resolve or execute it.
+                return path.ToString();
+            } finally { Marshal.ReleaseComObject(instance); }
+        }
+    }
     static class App {
         internal static JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
         internal static string Package = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
@@ -115,10 +161,7 @@ namespace ExperimentManagerDesktop {
             return names.ToArray();
         }
         internal static void Shortcut(string destination, string target, string arguments) {
-            Directory.CreateDirectory(Path.GetDirectoryName(destination));
-            Type type=Type.GetTypeFromProgID("WScript.Shell"); dynamic shell=Activator.CreateInstance(type);
-            dynamic link=shell.CreateShortcut(destination); link.TargetPath=target; link.Arguments=arguments;
-            link.WorkingDirectory=Path.GetDirectoryName(target); link.Description=Title; link.IconLocation=target+",0"; link.Save();
+            DesktopShortcuts.Save(destination,target,arguments,Title);
         }
         internal static bool OwnsShortcutTarget(string target,string installRoot) {
             try {
@@ -131,9 +174,7 @@ namespace ExperimentManagerDesktop {
         internal static bool OwnedShortcut(string link,string installRoot) {
             if(!File.Exists(link))return false;
             try {
-                Type type=Type.GetTypeFromProgID("WScript.Shell");dynamic shell=Activator.CreateInstance(type);
-                dynamic shortcut=shell.CreateShortcut(link);
-                return OwnsShortcutTarget((string)shortcut.TargetPath,installRoot);
+                return OwnsShortcutTarget(DesktopShortcuts.Target(link),installRoot);
             } catch { return false; }
         }
         internal static void InstallShortcuts(string desktopFolder,string menuFolder,string installRoot,string target,bool makeDesktop) {

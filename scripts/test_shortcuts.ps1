@@ -27,6 +27,10 @@ class ShortcutTests {
             Require(!App.OwnsShortcutTarget(Path.Combine(packages,worker?"ExLabCenter.exe":"ExLabWorker.exe"),packages),"Other role must not be owned");
             string legacyDesktop=Path.Combine(desktop,App.LegacyShortcutName),oldMenu=Path.Combine(menu,"ExLab",worker?"Worker.lnk":"Center.lnk"),originalMenu=Path.Combine(menu,"Experiment Manager",App.Role+".lnk");
             foreach(string link in new[]{legacyDesktop,oldMenu,originalMenu})App.Shortcut(link,oldTarget,"");
+            // Read a shortcut produced by the original installer interface as well.
+            dynamic oldShell=Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell"));
+            dynamic oldLink=oldShell.CreateShortcut(originalMenu);oldLink.TargetPath=oldTarget;oldLink.Save();
+            Require(App.OwnedShortcut(originalMenu,packages),"Original WScript shortcut could not be read");
             App.InstallShortcuts(desktop,menu,packages,target,true);
             Require(File.Exists(Path.Combine(desktop,App.ShortcutName))&&File.Exists(Path.Combine(menu,"ExLab",App.ShortcutName)),"New branded shortcuts missing");
             foreach(string link in new[]{legacyDesktop,oldMenu,originalMenu})Require(!File.Exists(link),"Owned legacy shortcut remains");
