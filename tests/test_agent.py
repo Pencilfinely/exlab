@@ -341,6 +341,41 @@ class AgentTests(unittest.TestCase):
                 self.agent._reconcile(record)
         self.assertEqual(execute.call_count, 1)
 
+    def test_missing_container_error_formats_are_recognized_only_with_a_reachable_daemon(self):
+        record = self.record("running", self.docker_spec())
+        record["container_name"] = f"expman-{self.job_id}-1"
+        for message in (
+                "error: no such object: {name}",
+                "Error: No such object: {name}",
+                "Error response from daemon: No such container: {name}",
+                "error response from daemon: no such container: {name}",
+                "No such container: {name}"):
+            with self.subTest(message=message):
+                missing = subprocess.CompletedProcess([], 1, "[]\n", message.format(name=record["container_name"]) + "\n")
+                ready = subprocess.CompletedProcess([], 0, "29.0.0\n", "")
+                with patch.object(self.agent, "_exec", side_effect=[missing, ready]) as execute:
+                    self.assertIsNone(self.agent._inspect(record))
+                self.assertEqual(execute.call_args.args[0], ["docker", "info", "--format", "{{.ServerVersion}}"])
+
+    def test_inspect_errors_cannot_claim_an_unverified_container_is_missing(self):
+        record = self.record("running", self.docker_spec())
+        record["container_name"] = f"expman-{self.job_id}-1"
+        for message in (
+                "error: no such object: another-container",
+                "error: no such image: " + record["container_name"],
+                "error: permission denied",
+                "error: no such object: " + record["container_name"] + "\nconnection reset by peer"):
+            with self.subTest(message=message), patch.object(self.agent, "_exec", side_effect=[
+                    subprocess.CompletedProcess([], 1, "", message),
+                    subprocess.CompletedProcess([], 0, "29.0.0\n", "")]):
+                with self.assertRaises(RuntimeError):
+                    self.agent._inspect(record)
+        with patch.object(self.agent, "_exec", side_effect=[
+                subprocess.CompletedProcess([], 1, "[]\n", "error: no such object: " + record["container_name"]),
+                RuntimeError("Docker daemon unavailable")]):
+            with self.assertRaisesRegex(RuntimeError, "daemon unavailable"):
+                self.agent._inspect(record)
+
     def test_resume_does_not_start_a_second_container_while_old_one_runs(self):
         record = self.record("interrupted", self.docker_spec())
         record.update(container_name="expman-test", ever_started=True)

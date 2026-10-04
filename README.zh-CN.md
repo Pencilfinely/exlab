@@ -7,7 +7,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**当前版本：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.2.md)
+**桌面端当前版本：0.5.3 · Monitor APK：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.3.md)
 
 - **ExLab Center（主控）**：导入算法、管理实验和算力，支持多主控同步与交接。
 - **ExLab Worker（算力端）**：接收并运行任务，支持资源设置、停用释放和登录自启。

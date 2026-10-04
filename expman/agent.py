@@ -773,7 +773,12 @@ class Agent:
         if inspected.returncode:
             # Daemon unavailable is not evidence that the container vanished.
             self._exec(["docker", "info", "--format", "{{.ServerVersion}}"])
-            if "No such" in inspected.stderr:
+            # CLI versions vary the error prefix, capitalization and object type.
+            # Accept only a missing container/object with the exact requested name.
+            missing = re.fullmatch(
+                r"(?:error(?::| response from daemon:)\s*)?no such (?:object|container):\s*(.+)",
+                inspected.stderr.strip(), flags=re.IGNORECASE)
+            if missing and missing[1] == record["container_name"]:
                 return None
             raise RuntimeError(inspected.stderr[-500:])
         container = json.loads(inspected.stdout)[0]

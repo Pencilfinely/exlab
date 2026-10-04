@@ -193,6 +193,62 @@ class WorkerShutdownTests(unittest.TestCase):
             self.assertTrue(service._shutdown_step(self.service_root, self.agent))
         self.assertEqual(self.agent.records()[0]['state'], 'interrupted')
 
+    def test_shutdown_with_multiple_missing_historical_containers_can_finish_repeatedly(self):
+        self.owner()
+        original = []
+        for index, state in enumerate(('succeeded', 'failed', 'interrupted', 'paused'), 1):
+            self.job_id = str(index) * 32
+            record = self.record(state, self.docker_spec())
+            self.agent._save(record, container_name=f'expman-{self.job_id}-1', ever_started=True)
+            self.checkpoint(record)
+            original.append(copy.deepcopy(record))
+
+        def execute(argv, **kwargs):
+            if argv[:2] == ['docker', 'inspect']:
+                return subprocess.CompletedProcess(argv, 1, '[]\n', 'error: no such object: ' + argv[2] + '\n')
+            self.assertEqual(argv, ['docker', 'info', '--format', '{{.ServerVersion}}'])
+            return subprocess.CompletedProcess(argv, 0, '29.0.0\n', '')
+
+        with patch.object(self.agent, '_exec', side_effect=execute), \
+                patch.object(service, '_update_containers', return_value=[]) as scan:
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+        self.assertEqual(scan.call_count, 2)
+        self.assertEqual(self.agent.records(), original)
+        self.assertTrue(all(self.agent._checkpoint(record) for record in original))
+        self.assertEqual(common.read_json(self.service_root / 'status.json')['shutdown']['active_jobs'], 0)
+
+    def test_missing_running_container_is_interrupted_and_checkpoint_is_preserved_on_exit(self):
+        self.owner()
+        record = self.record('running', self.docker_spec())
+        self.agent._save(record, container_name=f'expman-{self.job_id}-1', ever_started=True)
+        self.checkpoint(record)
+
+        def execute(argv, **kwargs):
+            if argv[:2] == ['docker', 'inspect']:
+                return subprocess.CompletedProcess(argv, 1, '[]\n', 'error: no such object: ' + argv[2])
+            self.assertEqual(argv, ['docker', 'info', '--format', '{{.ServerVersion}}'])
+            return subprocess.CompletedProcess(argv, 0, '29.0.0\n', '')
+
+        with patch.object(self.agent, '_exec', side_effect=execute), \
+                patch.object(service, '_update_containers', return_value=[]):
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+        saved = self.agent.records()[0]
+        self.assertEqual(saved['state'], 'interrupted')
+        self.assertIn('Container missing', saved['detail'])
+        self.assertTrue(self.agent._checkpoint(saved))
+
+    def test_missing_history_cannot_hide_a_container_found_in_final_shutdown_scan(self):
+        self.owner()
+        record = self.record('interrupted', self.docker_spec())
+        self.agent._save(record, container_name=f'expman-{self.job_id}-1')
+        with patch.object(self.agent, '_exec', side_effect=[
+                subprocess.CompletedProcess([], 1, '[]\n', 'error: no such object: ' + record['container_name']),
+                subprocess.CompletedProcess([], 0, '29.0.0\n', '')]), \
+                patch.object(service, '_update_containers', return_value=['live-owned-container']):
+            self.assertFalse(service._shutdown_step(self.service_root, self.agent))
+        self.assertEqual(common.read_json(self.service_root / 'status.json')['status'], 'exit_failed')
+
     def test_new_assignments_received_in_flight_are_not_started_after_exit_request(self):
         self.owner()
         record = self.record('ready')
