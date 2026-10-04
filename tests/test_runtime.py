@@ -71,6 +71,20 @@ class RuntimeTests(unittest.TestCase):
         result, _ = self.release([reply(''), reply('')], processes=[123])
         self.assertTrue(result['can_stop_docker'])
         self.assertFalse(result['can_terminate_wsl'])
+        self.assertEqual(result['other_processes'], 1)
+        self.assertEqual(result['other_process_details'][0]['pid'], 123)
+
+    def test_disconnected_docker_still_reports_processes_for_explicit_memory_release(self):
+        with patch.object(runtime, 'docker_status', return_value={'docker_ready': False}), \
+                patch('expman.worker_upgrade.discover_configs', return_value=[]), \
+                patch.object(runtime, 'other_user_processes', return_value=[321]), \
+                patch.object(runtime, 'docker_command') as command:
+            result = runtime.release_runtime()
+        self.assertTrue(result['agents_stopped'])
+        self.assertFalse(result['can_stop_docker'])
+        self.assertFalse(result['can_terminate_wsl'])
+        self.assertEqual(result['other_process_details'][0]['pid'], 321)
+        command.assert_not_called()
 
     def test_dormant_flag_is_not_written_after_failed_shutdown(self):
         with temporary_directory() as path:
@@ -86,4 +100,5 @@ class RuntimeTests(unittest.TestCase):
                 patch.object(runtime, 'docker_command') as command:
             result = runtime.release_runtime()
         self.assertFalse(result['can_stop_docker'])
+        self.assertFalse(result['agents_stopped'])
         command.assert_not_called()

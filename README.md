@@ -7,6 +7,8 @@
 
 **桌面端当前版本：0.5.3 · Monitor APK：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.3.md)
 
+保留 Center 开启、按需释放算力内存：在 Worker 点击 **释放 WSL 内存**。本机实验先请求保存并停止；关闭 Ubuntu 后保持停用，点击“启用算力”恢复。存在其他会话时需确认关闭，其他 WSL 系统仍会保留。
+
 - **ExLab Center（主控）**：导入算法、管理实验和算力，支持多主控同步与交接。
 - **ExLab Worker（算力端）**：接收并运行任务，支持资源设置、停用释放和登录自启。
 - **ExLab Monitor（手机端）**：查看实验进展，支持长期配对、自动接入与 APK 内更新。

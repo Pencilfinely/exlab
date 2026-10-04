@@ -92,9 +92,18 @@ def other_user_processes(proc_root='/proc'):
 def release_runtime(worker_root=None, node_id=None):
     from .worker_upgrade import discover_configs, agent_is_running
     result = docker_status(worker_root, prefer_saved=True)
-    result.update(can_stop_docker=False, can_terminate_wsl=False, registry_stopped=False)
+    result.update(can_stop_docker=False, can_terminate_wsl=False, registry_stopped=False, agents_stopped=False)
     if any(agent_is_running(item['root']) for item in discover_configs()):
         return dict(result, detail='另一个算力代理仍在运行，运行环境已保留')
+    workloads = other_user_processes()
+    details = []
+    for pid in workloads[:20]:
+        try:
+            name = (Path('/proc') / str(pid) / 'comm').read_text().strip()[:80]
+        except OSError:
+            name = '未知进程'
+        details.append({'pid': pid, 'name': name})
+    result.update(agents_stopped=True, other_processes=len(workloads), other_process_details=details)
     if not result['docker_ready']:
         # Failure to contact a daemon is not evidence that its containers stopped.
         return dict(result, detail='Docker 未连接，无法确认容器状态；运行环境已保留')
@@ -123,7 +132,6 @@ def release_runtime(worker_root=None, node_id=None):
         reply = docker_command(['ps', '-q'], endpoint)
         if reply.returncode or reply.stdout.strip():
             raise ValueError('容器状态发生变化，运行环境已保留')
-        workloads = other_user_processes()
         result.update(can_stop_docker=True, can_terminate_wsl=not workloads,
                       other_processes=len(workloads),
                       detail='计算环境已空闲' if not workloads else 'Ubuntu 中另有进程；可停止 Docker，WSL 已保留')

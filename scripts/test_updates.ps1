@@ -393,9 +393,83 @@ static class InstallProbeTests {
         Assert(verify>=0&&complete>verify&&version>complete&&write>version,
             "Real installer must verify stopped state, install the WSL backend, then record installed_version and write settings.");
     }
+    sealed class MemoryFixture {
+        internal readonly List<string> Calls=new List<string>();
+        internal string Inventory="Ubuntu\r\ndocker-desktop\r\n",After="",Identity="owned-daemon",Containers="",DesktopStatus="stopped";
+        internal bool FailStop,FailInfo;int inventories;
+        internal Task<string> Run(int timeout,string executable,string[] argv) {
+            string file=Path.GetFileName(executable);Calls.Add(file+" "+String.Join(" ",argv));
+            if(file=="wsl.exe") {
+                if(argv[0]=="--list")return Task.FromResult(inventories++==0?Inventory:After);
+                if(argv[0]=="--shutdown"||argv[0]=="--terminate")return Task.FromResult("");
+            } else {
+                if(argv[0]=="--context"&&argv[2]=="info") {if(FailInfo)throw new IOException("daemon unavailable");return Task.FromResult(Identity);}
+                if(argv[0]=="--context"&&argv[2]=="ps")return Task.FromResult(Containers);
+                if(argv[0]=="desktop"&&argv[1]=="status")return Task.FromResult("{\"Status\":\""+DesktopStatus+"\"}");
+                if(argv[0]=="desktop"&&argv[1]=="stop") {if(FailStop)throw new IOException("unsupported stop CLI");return Task.FromResult("");}
+            }
+            throw new Exception("Unexpected memory-release command: "+Calls[Calls.Count-1]);
+        }
+        internal string Release(Dictionary<string,object> state,bool explicitClose) {
+            return DesktopRuntime.Release("Ubuntu",state,explicitClose,Run).GetAwaiter().GetResult();
+        }
+        internal bool Called(string suffix) {return Calls.Exists(call=>call.EndsWith(suffix,StringComparison.Ordinal));}
+    }
+    static Dictionary<string,object> IdleRuntime(bool otherProcesses=false) {
+        return new Dictionary<string,object>{{"can_stop_docker",true},{"can_terminate_wsl",!otherProcesses},
+            {"docker_id","owned-daemon"},{"docker_ready",true},{"agents_stopped",true}};
+    }
+    static void MemoryRelease() {
+        var inactive=new MemoryFixture();
+        var inactiveState=DesktopRuntime.InspectStoppedDistribution(inactive.Run).GetAwaiter().GetResult();
+        Assert(App.Flag(inactiveState,"can_stop_docker")&&App.Flag(inactiveState,"agents_stopped"),"Stopped Ubuntu could not release a verified idle Windows Docker.");
+        Assert(inactive.Calls.Count==2&&!inactive.Calls.Exists(call=>call.StartsWith("wsl.exe ")),"Inspecting a stopped Ubuntu woke WSL.");
+        var inactiveBusy=new MemoryFixture{Containers="another-live-container"};
+        var busyState=DesktopRuntime.InspectStoppedDistribution(inactiveBusy.Run).GetAwaiter().GetResult();
+        Assert(App.Flag(busyState,"docker_ready")&&!App.Flag(busyState,"can_stop_docker"),"Stopped Ubuntu inspection ignored another live container.");
+        var inactiveOffline=new MemoryFixture{FailInfo=true};
+        var offlineState=DesktopRuntime.InspectStoppedDistribution(inactiveOffline.Run).GetAwaiter().GetResult();
+        Assert(!App.Flag(offlineState,"docker_ready")&&!App.Flag(offlineState,"can_stop_docker"),"Unavailable Windows Docker was reported as verified idle.");
+        var automatic=new MemoryFixture();automatic.Release(IdleRuntime(true),false);
+        Assert(automatic.Called("desktop stop"),"Automatic release did not stop a verified idle Docker.");
+        Assert(!automatic.Calls.Exists(call=>call.StartsWith("wsl.exe ")),"Automatic release closed Ubuntu despite its other user processes.");
+        var full=new MemoryFixture();string fullDetail=full.Release(IdleRuntime(true),true);
+        Assert(full.Called("wsl.exe --shutdown")&&!full.Called("wsl.exe --terminate Ubuntu"),"Explicit release did not shut down the otherwise idle WSL VM.");
+        Assert(full.Calls[full.Calls.Count-1]=="wsl.exe --list --running --quiet","Release did not verify closure without waking WSL.");
+        Assert(fullDetail.Contains("Center"),"Memory release omitted that Center remains available.");
+        var other=new MemoryFixture{Inventory="Ubuntu\nDebian\ndocker-desktop\n",After="Debian\n"};other.Release(IdleRuntime(true),true);
+        Assert(other.Called("wsl.exe --terminate Ubuntu")&&!other.Called("wsl.exe --shutdown"),"Explicit memory release shut down another WSL distribution.");
+        var unknown=new MemoryFixture{DesktopStatus="running",After="docker-desktop\n"};
+        var disconnected=new Dictionary<string,object>{{"can_stop_docker",false},{"can_terminate_wsl",false},{"docker_ready",false},{"agents_stopped",true}};
+        unknown.Release(disconnected,true);
+        Assert(unknown.Called("wsl.exe --terminate Ubuntu")&&!unknown.Called("wsl.exe --shutdown"),"Unverified Docker authorized global WSL shutdown.");
+        Assert(!unknown.Called("desktop stop"),"Disconnected Docker was stopped without container verification.");
+        var alreadyOff=new MemoryFixture();alreadyOff.Release(disconnected,true);
+        Assert(alreadyOff.Called("desktop status --format json")&&alreadyOff.Called("wsl.exe --shutdown"),"Already-stopped Docker prevented reclaiming the WSL VM.");
+        Assert(!alreadyOff.Called("desktop stop")&&!alreadyOff.Calls.Exists(call=>call.Contains(" info ")),"Memory release started or reconnected an already-stopped Docker.");
+        var noConsent=new MemoryFixture();noConsent.Release(disconnected,false);
+        Assert(noConsent.Calls.Count==0,"Disconnected runtime was closed without explicit consent.");
+        var live=new MemoryFixture();var busy=IdleRuntime();busy["can_stop_docker"]=false;live.Release(busy,true);
+        Assert(live.Calls.Count==0,"Other running containers were ignored by explicit memory release.");
+        var agent=new MemoryFixture();var supervised=IdleRuntime(true);supervised["agents_stopped"]=false;agent.Release(supervised,true);
+        Assert(agent.Calls.Count==0,"Explicit release ignored another live compute agent.");
+        foreach(bool changedIdentity in new[]{true,false}) {
+            var race=new MemoryFixture();if(changedIdentity)race.Identity="different-daemon";else race.Containers="new-live-container";
+            race.Release(IdleRuntime(),true);
+            Assert(!race.Called("desktop stop")&&!race.Calls.Exists(call=>call.StartsWith("wsl.exe ")),"Changed Docker identity or new containers did not block VM shutdown.");
+        }
+        var unreadable=new MemoryFixture{FailInfo=true};unreadable.Release(IdleRuntime(),true);
+        Assert(!unreadable.Calls.Exists(call=>call.StartsWith("wsl.exe ")),"Failed Docker recheck allowed closing Ubuntu.");
+        var oldDocker=new MemoryFixture{FailStop=true,After="docker-desktop\n"};oldDocker.Release(IdleRuntime(),true);
+        Assert(oldDocker.Called("wsl.exe --terminate Ubuntu")&&!oldDocker.Called("wsl.exe --shutdown"),"Unsupported Docker stop CLI allowed global WSL shutdown.");
+        var restarted=new MemoryFixture{After="Ubuntu\n"};string restartedDetail=restarted.Release(IdleRuntime(),true);
+        Assert(restartedDetail!=fullDetail,"An immediate restart by another application was reported as successful memory release.");
+        foreach(var fixture in new[]{automatic,full,other,unknown,alreadyOff,noConsent,live,agent,unreadable,oldDocker,restarted})
+            Assert(!fixture.Calls.Exists(call=>call.Contains("--exec")||call.Contains("--unregister")||call.Contains(" desktop start")||call.Contains(" wsl.exe -d")),"Memory release launched WSL/Docker or removed a distribution.");
+    }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();
+            WorkerCompletion();InstallerWiring();MemoryRelease();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
@@ -435,7 +509,7 @@ static class InstallProbeTests {
                 File.WriteAllText(release,"exit");
                 child.WaitForExit(5000);
             }
-            Console.WriteLine("PASS installer: "+assertions+" worker completion/wiring assertions; stopped WSL code install, no restart, preserved identity, version validation, readiness subprocess and previous-client handoff.");
+            Console.WriteLine("PASS installer/runtime: "+assertions+" assertions; worker installation, identity, handoff, explicit WSL memory release, other-process consent, distro scope and closure verification.");
             return 0;
         } catch(Exception ex){Console.Error.WriteLine(ex);return 1;}
     }
