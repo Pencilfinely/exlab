@@ -1,17 +1,14 @@
 """Release entry points. Controller and worker roles remain separate."""
 import argparse
-import json
 import os
 from pathlib import Path
-import socket
 import sys
 import time
 import urllib.parse
 import urllib.request
 import webbrowser
 
-from .common import atomic_json, read_json
-from .hub import Hub, make_server
+from .common import read_json
 
 
 class InstanceLock:
@@ -86,33 +83,12 @@ def controller(root, port=None, host='0.0.0.0', open_browser=True):
     root = Path(root).expanduser().resolve()
     if reopen_controller(root, open_browser):
         return
-    with InstanceLock(root / 'controller.lock'):
-        hub = Hub(root)
-        server = None
-        try:
-            saved = read_json(root / 'launcher.json', {})
-            preferred = port if port is not None else saved.get('port', 8765)
-            for candidate in ([preferred] if port is not None or saved else range(preferred, preferred + 20)):
-                try:
-                    server = make_server(hub, host, candidate)
-                    break
-                except OSError:
-                    if port is not None or saved or candidate == preferred + 19:
-                        raise RuntimeError('Controller port is occupied. Close its previous instance or use --port.') from None
-            actual_port = server.server_address[1]
-            atomic_json(root / 'launcher.json', {'port': actual_port, 'host': host})
-            print(f'Experiment Manager controller / 主控端: http://127.0.0.1:{actual_port}', flush=True)
-            print(f'Data / 数据目录: {root}', flush=True)
-            print('Keep this window open. Ctrl+C stops the controller. / 保持窗口运行，Ctrl+C 退出。', flush=True)
-            if open_browser:
-                webbrowser.open(browser_url(root, actual_port))
-            server.serve_forever(poll_interval=0.5)
-        except KeyboardInterrupt:
-            print('Controller stopped. Data saved. / 主控端已停止，数据已保存。', flush=True)
-        finally:
-            if server:
-                server.server_close()
-            hub.close()
+    # CLI and native clients must publish the same owner and handle the same
+    # cooperative stop requests. A separate serve_forever silently bypassed
+    # desktop deactivation and updates, including Start-Controller.cmd.
+    from .desktop import controller_serve
+    controller_serve(root, 8765 if port is None else port, host,
+                     fixed_port=port is not None, open_browser=open_browser, foreground=True)
 
 
 def main():

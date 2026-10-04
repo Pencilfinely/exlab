@@ -5,7 +5,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**桌面端当前版本：0.5.3 · Monitor APK：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.3.md)
+**桌面端当前版本：0.5.4 · Monitor APK：0.5.2** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.4.md)
 
 保留 Center 开启、按需释放算力内存：在 Worker 点击 **释放 WSL 内存**。本机实验先请求保存并停止；关闭 Ubuntu 后保持停用，点击“启用算力”恢复。存在其他会话时需确认关闭，其他 WSL 系统仍会保留。
 

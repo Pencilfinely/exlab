@@ -79,7 +79,7 @@ class UpdateReadinessTests(unittest.TestCase):
             self.assertFalse(result['ready_for_update'])
             self.assertTrue(result['manual_stop_required'])
             self.assertEqual(result['backend_version'], '0.3.0rc1')
-            self.assertIn('停止代理', result['detail'])
+            self.assertIn('停用并释放资源', result['detail'])
             self.assertNotIn('同步', result['detail'])
             docker.assert_not_called()
             sleep.assert_not_called()
@@ -123,7 +123,7 @@ class UpdateReadinessTests(unittest.TestCase):
             self.assertFalse(result['ready_for_update'])
             self.assertTrue(result['manual_stop_required'])
             self.assertEqual(result['backend_version'], '0.3.0rc1')
-            self.assertIn('停止主控', result['detail'])
+            self.assertIn('停用并释放资源', result['detail'])
             opener.assert_not_called()
             sleep.assert_not_called()
         self.assertFalse(center.exists())
@@ -134,6 +134,21 @@ class UpdateReadinessTests(unittest.TestCase):
             result = desktop.controller_update_status(center)
         self.assertFalse(result['ready_for_update'])
         self.assertEqual(result['status'], 'unknown')
+
+    def test_old_unmanaged_cli_guides_terminal_exit_without_ignored_stop_request(self):
+        center = self.folder / 'center'
+        backend = dict(running=True, responsive=True, status='running', managed=False, version='0.4.3')
+        with patch.object(desktop, 'controller_status', return_value=backend), \
+                patch.object(desktop.urllib.request, 'build_opener') as opener, \
+                patch.object(desktop.time, 'sleep') as sleep:
+            result = desktop.controller_stop_for_update(center)
+            self.assertFalse(result['ready_for_update'])
+            self.assertTrue(result['manual_stop_required'])
+            self.assertIn('原主控启动终端按 Ctrl+C', result['detail'])
+            self.assertNotIn('客户端点击', result['detail'])
+            opener.assert_not_called()
+            sleep.assert_not_called()
+        self.assertFalse(center.exists())
 
     def test_stopped_controller_reads_queued_work_without_database_recovery(self):
         center = self.folder / 'center'

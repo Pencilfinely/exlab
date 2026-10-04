@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
-from expman import common, desktop
+from expman import __version__, common, desktop
 from expman.hub import Hub
 from tests.support import temporary_directory
 
@@ -310,10 +310,23 @@ class DesktopTests(unittest.TestCase):
                 self.serve()
                 owner = common.read_json(self.root / 'desktop-process.json')
                 owner.pop('update_stop_protocol')
+                owner.pop('version')
                 common.atomic_json(self.root / 'desktop-process.json', owner)
-                status = dict(desktop.controller_status(self.root), version=version)
-                self.assertNotIn('update_stop_protocol', status)
-                with patch.object(desktop, 'controller_status', return_value=status):
+                real_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                def older_health(request, **kwargs):
+                    response = real_opener.open(request, **kwargs)
+                    if request.full_url.endswith('/api/state'):
+                        with response:
+                            value = json.load(response)
+                        value['version'] = version
+                        value.pop('controller_owner')
+                        return io.BytesIO(json.dumps(value).encode())
+                    return response
+                with patch.object(desktop.urllib.request, 'build_opener') as opener:
+                    opener.return_value.open.side_effect = older_health
+                    status = desktop.controller_status(self.root)
+                    self.assertTrue(status['managed'])
+                    self.assertNotIn('update_stop_protocol', status)
                     result = desktop.controller_stop_for_update(self.root)
                 self.assertTrue(result['ready_for_update'])
                 self.thread.join(4)
@@ -324,18 +337,94 @@ class DesktopTests(unittest.TestCase):
         common.atomic_json(self.root / 'hub.json', {'admin_token': 'test-only-token'})
         common.atomic_json(self.root / 'launcher.json', {'port': 8765})
         common.atomic_json(self.root / 'desktop-process.json',
-                           {'nonce': 'stale-owner', 'version': '0.3.0rc3', 'update_stop_protocol': 1})
+                           {'pid': os.getpid(), 'nonce': 'stale-owner', 'version': '0.3.0rc3', 'update_stop_protocol': 1})
         with patch.object(desktop.urllib.request, 'build_opener') as opener:
             opener.return_value.open.return_value = io.BytesIO(b'{"version":"0.3.0rc1","nodes":[],"jobs":[]}')
             status = desktop.controller_status(self.root)
         self.assertNotIn('update_stop_protocol', status)
+        self.assertFalse(status['managed'])
+
+    def test_stale_pid_does_not_claim_unmanaged_cli_of_the_same_version(self):
+        common.atomic_json(self.root / 'hub.json', {'admin_token': 'test-only-token'})
+        common.atomic_json(self.root / 'desktop-process.json',
+                           {'pid': 123, 'nonce': 'stale-owner', 'version': __version__, 'update_stop_protocol': 1})
+        with patch.object(desktop, '_owner_is_running', return_value=False), \
+                patch.object(desktop.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.side_effect = lambda *a, **kw: io.BytesIO(
+                json.dumps({'version': __version__, 'nodes': [], 'jobs': []}).encode())
+            status = desktop.controller_status(self.root)
+            self.assertTrue(status['running'])
+            self.assertFalse(status['managed'])
+            self.assertNotIn('update_stop_protocol', status)
+            with self.assertRaisesRegex(ValueError, '原启动终端'):
+                desktop.controller_stop(self.root)
+        self.assertFalse((self.root / 'desktop-stop.json').exists())
+
+    def test_live_http_nonce_rejects_stale_owner_even_if_pid_and_version_match(self):
+        self.serve()
+        owner = common.read_json(self.root / 'desktop-process.json')
+        try:
+            common.atomic_json(self.root / 'desktop-process.json', dict(owner, nonce='stale-owner'))
+            status = desktop.controller_status(self.root)
+            self.assertTrue(status['responsive'])
+            self.assertFalse(status['managed'])
+            self.assertNotIn('update_stop_protocol', status)
+            self.assertTrue(desktop.controller_update_status(self.root)['manual_stop_required'])
+            with self.assertRaisesRegex(ValueError, '旧启动入口'):
+                desktop.controller_stop(self.root)
+            self.assertFalse((self.root / 'desktop-stop.json').exists())
+        finally:
+            common.atomic_json(self.root / 'desktop-process.json', owner)
+
+    def test_owner_replaced_after_inspection_does_not_receive_stop_or_update_request(self):
+        self.serve()
+        status = desktop.controller_status(self.root)
+        ready = desktop.controller_update_status(self.root)
+        owner = common.read_json(self.root / 'desktop-process.json')
+        try:
+            common.atomic_json(self.root / 'desktop-process.json', dict(owner, nonce='replacement-owner'))
+            with patch.object(desktop, 'controller_status', return_value=status):
+                with self.assertRaisesRegex(ValueError, '旧启动入口'):
+                    desktop.controller_stop(self.root)
+            with patch.object(desktop, 'controller_update_status', return_value=ready):
+                result = desktop.controller_stop_for_update(self.root)
+            self.assertFalse(result['ready_for_update'])
+            self.assertIn('所有权已变化', result['detail'])
+            self.assertFalse((self.root / 'desktop-stop.json').exists())
+            self.assertFalse((self.root / 'desktop-update-request.json').exists())
+        finally:
+            common.atomic_json(self.root / 'desktop-process.json', owner)
+
+    def test_windows_owner_probe_never_sends_a_signal(self):
+        with patch.object(desktop.os, 'name', 'nt'), \
+                patch.object(desktop.ctypes, 'WinDLL', create=True) as library, \
+                patch.object(desktop.os, 'kill') as kill:
+            kernel = library.return_value
+            kernel.OpenProcess.return_value = 42
+            def running(handle, code):
+                code._obj.value = 259
+                return True
+            kernel.GetExitCodeProcess.side_effect = running
+            self.assertTrue(desktop._owner_is_running({'pid': 123, 'nonce': 'test-owner'}))
+            kernel.OpenProcess.assert_called_once_with(0x1000, False, 123)
+            kernel.CloseHandle.assert_called_once_with(42)
+            kill.assert_not_called()
+            kernel.OpenProcess.return_value = 0
+            self.assertFalse(desktop._owner_is_running({'pid': 123, 'nonce': 'test-owner'}))
+
+    def test_invalid_owner_pid_is_not_probed(self):
+        for pid in (None, 0, -1, 2**32, True, '123'):
+            with self.subTest(pid=pid), patch.object(desktop.os, 'kill') as kill:
+                self.assertFalse(desktop._owner_is_running({'pid': pid, 'nonce': 'stale'}))
+                kill.assert_not_called()
 
     def test_status_refreshes_owner_published_while_health_probe_waits(self):
         common.atomic_json(self.root / "hub.json", {"admin_token": "test-only-token"})
         common.atomic_json(self.root / "launcher.json", {"port": 8765})
         def became_ready(*args, **kwargs):
-            common.atomic_json(self.root / "desktop-process.json", {"nonce": "newly-ready"})
-            return io.BytesIO(b'{"nodes":[],"jobs":[]}')
+            common.atomic_json(self.root / "desktop-process.json",
+                               {"pid": os.getpid(), "nonce": "newly-ready", "version": __version__})
+            return io.BytesIO(json.dumps({'version': __version__, 'nodes': [], 'jobs': []}).encode())
         with patch("expman.desktop.urllib.request.build_opener") as opener:
             opener.return_value.open.side_effect = became_ready
             status = desktop.controller_status(self.root)

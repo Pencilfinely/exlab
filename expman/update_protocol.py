@@ -18,9 +18,11 @@ def supports_update_stop(state):
 def manual_stop_required(state, *, worker):
     version = state.get('version')
     version_text = version if isinstance(version, str) and version else '未知'
-    role, action = ('算力端', '停止代理') if worker else ('主控', '停止主控')
+    role = '算力端' if worker else '主控'
+    if worker or state.get('managed'):
+        action = '请先完成实验和文件回传，再在客户端点击「停用并释放资源」，然后重试安装。若从终端启动，请在原终端按 Ctrl+C 正常退出。'
+    else:
+        action = '请在原主控启动终端按 Ctrl+C 正常退出，再重试安装。客户端可以保留开启，原数据与连接凭证会保留。'
     return dict(state, ready_for_update=False, manual_stop_required=True,
                 backend_version=version,
-                detail=f'当前后台{role}版本 {version_text} 不支持安全更新握手。'
-                       f'请确认实验及文件回传完成，在客户端点击「{action}」，然后重试安装更新。'
-                       '若由终端启动，请退出原启动终端。')
+                detail=f'后台{role}仍是 {version_text}，当前启动方式不支持自动停止更新。' + action)

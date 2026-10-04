@@ -43,11 +43,18 @@ def atomic_json(path, obj):
 
 
 def read_json(path, default=None):
-    try:
-        with open(path, encoding="utf-8-sig") as stream:
-            return json.load(stream)
-    except FileNotFoundError:
-        return default
+    for attempt in range(4):
+        try:
+            with open(path, encoding="utf-8-sig") as stream:
+                return json.load(stream)
+        except FileNotFoundError:
+            return default
+        except PermissionError:
+            # Windows may briefly deny an open while the atomic writer replaces
+            # a lifecycle file. Permanent permissions must still fail closed.
+            if os.name != "nt" or attempt == 3:
+                raise
+            time.sleep(0.0125 * 2**attempt)
 
 
 def sha256_file(path):

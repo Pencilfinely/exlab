@@ -10,7 +10,7 @@ namespace ExperimentManagerDesktop {
         readonly ClientForm client;
         readonly Label versions=new Label { AutoSize=true };
         readonly Label status=new Label { AutoSize=true, MaximumSize=new Size(560,0) };
-        readonly TextBox notes=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Dock=DockStyle.Fill };
+        readonly TextBox notes=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Dock=DockStyle.Fill,BackColor=Color.White };
         readonly ProgressBar progress=new ProgressBar { Dock=DockStyle.Top,Height=18 };
         readonly Button check=new Button { Text="检查更新",AutoSize=true };
         readonly Button download=new Button { Text="下载更新",AutoSize=true,Enabled=false };
@@ -69,7 +69,10 @@ namespace ExperimentManagerDesktop {
                     catch(IOException) {} catch(InvalidOperationException) {} catch(System.Security.Cryptography.CryptographicException) {}
                 }
                 versions.Text="当前版本："+App.Version+(result==null?"":"    新版本："+result.Version);
-                notes.Text=result==null?"当前渠道暂无可用的新版本。":result.Notes;
+                // GitHub bodies use LF; the native multiline TextBox needs
+                // Windows line endings to keep headings and paragraphs apart.
+                notes.Text=(result==null?"当前渠道暂无可用的新版本。":result.Notes??"")
+                    .Replace("\r\n","\n").Replace('\r','\n').Replace("\n","\r\n");
                 status.Text=result==null?"已是当前渠道的最新版本。":downloaded==null?"发现新版本，点击“下载更新”。":"已找到下载并校验过的安装包，可以安装更新。";
             } catch(Exception ex) {status.Text="检查失败："+ex.Message;}
             finally {progress.Style=ProgressBarStyle.Blocks;progress.Value=0;Working(false);}

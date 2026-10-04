@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import closing
+import ctypes
 import json
 import math
 import os
@@ -21,6 +22,10 @@ from . import __version__
 from .common import atomic_json, read_json
 from .launcher import InstanceLock, default_controller_root
 from .update_protocol import UPDATE_STOP_PROTOCOL, manual_stop_required, supports_update_stop
+
+# Published desktop backends whose owner file predates its version field.
+_UNVERSIONED_OWNERS = frozenset(('0.3.0rc1', '0.3.0rc2', '0.3.0rc3',
+                               '0.3.0-rc.1', '0.3.0-rc.2', '0.3.0-rc.3'))
 
 
 def choose_directory():
@@ -58,6 +63,53 @@ try {
     return str(Path(selected).resolve()) if selected else None
 
 
+def _owner_is_running(owner):
+    """Check PID existence read-only; never send a signal to a recorded PID."""
+    pid = owner.get('pid')
+    if type(pid) is not int or not 0 < pid < 2**32 or not owner.get('nonce'):
+        return False
+    if os.name == 'nt':
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, OverflowError):
+        return False
+
+
+def _owner_matches_health(owner, health):
+    if not _owner_is_running(owner):
+        return False
+    if owner.get('version') != health.get('version') and not (
+            'version' not in owner and health.get('version') in _UNVERSIONED_OWNERS):
+        return False
+    # Older managed backends predate the HTTP nonce. New backends attest the
+    # live owner themselves, so a recycled PID/stale file cannot claim them.
+    if 'controller_owner' in health:
+        live = health['controller_owner']
+        return isinstance(live, dict) and all(live.get(key) == owner.get(key)
+                                             for key in ('pid', 'nonce', 'version'))
+    return True
+
+
+def _owner_identity(owner):
+    return {key: owner.get(key) for key in ('pid', 'nonce', 'version')}
+
+
 def controller_status(root):
     root = Path(root).expanduser().resolve()
     settings, hub = read_json(root / 'launcher.json', {}), read_json(root / 'hub.json', {})
@@ -69,8 +121,10 @@ def controller_status(root):
     alive = _lock_is_held(root / 'controller.lock')
     result = {'running': alive, 'responsive': False,
               'status': 'unresponsive' if alive else 'stopped', 'root': str(root), 'port': port,
-              'log_path': str(root / 'desktop.log'), 'managed': bool(state.get('nonce'))}
-    result['detail'] = ('主控进程仍在运行，暂时无法连接；请稍候，或点击停止主控后重试'
+              'log_path': str(root / 'desktop.log'), 'managed': alive and _owner_is_running(state)}
+    if result['managed']:
+        result['controller_owner'] = _owner_identity(state)
+    result['detail'] = ('主控进程仍在运行，暂时无法连接；请稍候再试'
                         if alive else '主控尚未启动')
     if not isinstance(port, int) or not hub.get('admin_token'):
         return result
@@ -85,17 +139,20 @@ def controller_status(root):
         # The request may have waited for startup. The owner file is written
         # before serve_forever, so refresh it after the successful health probe.
         state = read_json(root / 'desktop-process.json', {})
-        result['managed'] = bool(state.get('nonce'))
+        result['managed'] = _owner_matches_health(state, value)
+        result.pop('controller_owner', None)
+        if result['managed']:
+            result['controller_owner'] = _owner_identity(state)
         result.update(running=True, responsive=True, status='running', version=value.get('version'),
             nodes=len(value.get('nodes', [])), jobs=len(value.get('jobs', [])),
             detail='主控运行中；关闭应用窗口后继续在后台运行')
-        if 'update_stop_protocol' in state and state.get('version') == value.get('version'):
+        if result['managed'] and 'update_stop_protocol' in state:
             result['update_stop_protocol'] = state['update_stop_protocol']
     except (OSError, ValueError):
         # Startup or shutdown may complete while the health request is pending.
         alive = _lock_is_held(root / 'controller.lock')
         result.update(running=alive, status='unresponsive' if alive else 'stopped',
-                      detail='主控进程仍在运行，暂时无法连接；请稍候，或点击停止主控后重试'
+                      detail='主控进程仍在运行，暂时无法连接；请稍候再试'
                       if alive else '主控尚未启动，或仍在启动中')
     return result
 
@@ -144,8 +201,10 @@ def controller_stop(root):
     if not status['running']:
         return status
     process = read_json(root / 'desktop-process.json', {})
-    if not process.get('nonce'):
-        raise ValueError('主控由旧启动入口运行，请先退出旧主控窗口，再从本应用启动')
+    if not status.get('managed') or not _owner_is_running(process) or (
+            _owner_identity(process) != status.get('controller_owner')):
+        raise ValueError('主控由旧启动入口运行，客户端无法停止它。请在原启动终端按 Ctrl+C 正常退出，'
+                         '再从本应用打开工作空间；原数据与连接凭证会保留。')
     atomic_json(root / 'desktop-stop.json', {'nonce': process['nonce']})
     return dict(status, status='stopping', detail='正在停止主控；节点中的 Docker 实验继续运行')
 
@@ -278,7 +337,7 @@ def controller_stop_for_update(root):
         return result
     request_id = uuid.uuid4().hex
     owner = read_json(root / 'desktop-process.json', {})
-    if not owner.get('nonce'):
+    if not _owner_is_running(owner) or _owner_identity(owner) != result.get('controller_owner'):
         return dict(result, ready_for_update=False, detail='主控所有权已变化，请重试')
     request_path = root / 'desktop-update-request.json'
     atomic_json(request_path, {'nonce': owner['nonce'], 'request_id': request_id, 'expires': time.time() + 15})
@@ -296,7 +355,7 @@ def controller_stop_for_update(root):
                 detail='安全停止检查超时，尚未安装更新；请确认主控空闲后重试。旧版本请手动退出后安装。')
 
 
-def controller_serve(root, port, host):
+def controller_serve(root, port, host, *, fixed_port=False, open_browser=False, foreground=False):
     from .hub import Hub, make_server
     root = Path(root).expanduser().resolve()
     # Status probes briefly take this same exclusive lock. Give a probe time
@@ -307,18 +366,19 @@ def controller_serve(root, port, host):
         nonce = uuid.uuid4().hex
         try:
             saved = read_json(root / 'launcher.json', {})
-            port = saved.get('port', port)
-            for candidate in ([port] if saved else range(port, port + 20)):
+            port = port if fixed_port else saved.get('port', port)
+            for candidate in ([port] if saved or fixed_port else range(port, port + 20)):
                 try:
                     server = make_server(hub, host, candidate)
                     break
                 except OSError:
-                    if saved or candidate == port + 19:
+                    if saved or fixed_port or candidate == port + 19:
                         raise RuntimeError('主控端口已占用；请选择原主控数据目录，或关闭占用端口的程序') from None
             atomic_json(root / 'launcher.json', {'host': host, 'port': server.server_address[1]})
-            atomic_json(root / 'desktop-process.json', {'pid': os.getpid(), 'nonce': nonce, 'started': time.time(),
-                                                       'version': __version__,
-                                                       'update_stop_protocol': UPDATE_STOP_PROTOCOL})
+            owner = {'pid': os.getpid(), 'nonce': nonce, 'started': time.time(),
+                     'version': __version__, 'update_stop_protocol': UPDATE_STOP_PROTOCOL}
+            hub.desktop_owner = owner
+            atomic_json(root / 'desktop-process.json', owner)
             root.joinpath('desktop-pending.json').unlink(missing_ok=True)
             stopped = threading.Event()
 
@@ -354,9 +414,17 @@ def controller_serve(root, port, host):
                             return
             monitor = threading.Thread(target=watch, daemon=True)
             monitor.start()
-            print('Controller running at http://127.0.0.1:' + str(server.server_address[1]), flush=True)
+            print('ExLab Center / 主控端: http://127.0.0.1:' + str(server.server_address[1]), flush=True)
             try:
+                if foreground:
+                    print(f'Data / 数据目录: {root}', flush=True)
+                    print('Keep this window open. Ctrl+C stops the controller. / 保持窗口运行，Ctrl+C 退出。', flush=True)
+                if open_browser:
+                    from .launcher import browser_url, webbrowser
+                    webbrowser.open(browser_url(root, server.server_address[1]))
                 server.serve_forever(poll_interval=0.25)
+            except KeyboardInterrupt:
+                print('Controller stopped. Data saved. / 主控端已停止，数据已保存。', flush=True)
             finally:
                 stopped.set()
                 monitor.join(timeout=2)

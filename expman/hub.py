@@ -448,8 +448,12 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
             for node in nodes:
                 node["snapshot"]["task_templates"] = [item for item in node["snapshot"].get("task_templates", [])
                     if item.get("project_bundle_id") not in deleted_bundles]
-            return {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
-                    "time": timestamp, "version": __version__, 'center': self.center_info()}
+            result = {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
+                      "time": timestamp, "version": __version__, 'center': self.center_info()}
+            owner = getattr(self, 'desktop_owner', None)
+            if owner is not None:
+                result['controller_owner'] = {key: owner[key] for key in ('pid', 'nonce', 'version')}
+            return result
 
     def submit(self, payload):
         _object(payload, "request")
