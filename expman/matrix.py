@@ -108,26 +108,29 @@ class MatrixHubMixin:
 
     def _matrix_public(self, row, full=False):
         definition = json.loads(row["definition"])
-        jobs = self._matrix_jobs(row["id"])
-        states = {}
-        for job in jobs:
-            states[job["state"]] = states.get(job["state"], 0) + 1
+        states = {item["state"]: item["count"] for item in self.db.execute(
+            "SELECT j.state,COUNT(*) AS count FROM jobs j JOIN matrix_jobs mj ON j.id=mj.job_id "
+            "JOIN matrix_runs mr ON mr.id=mj.run_id WHERE mr.matrix_id=? GROUP BY j.state", (row["id"],))}
         result = {key: row[key] for key in ("id", "revision", "count", "created", "updated")}
         result.update(name=definition["name"], description=definition["description"],
-                      job_count=len(jobs), states=states)
+                      job_count=sum(states.values()), states=states)
         if full:
+            jobs = self._matrix_jobs(row["id"])
+            self._attach_record_tags(jobs, "job")
             result.update(definition)
             for job in jobs:
                 job.pop("log_tail", None)
             result["jobs"] = jobs
             result["runs"] = [dict(item) for item in self.db.execute(
                 "SELECT id,revision,request_id,created FROM matrix_runs WHERE matrix_id=? ORDER BY created", (row["id"],))]
+            self._attach_record_tags([result], "matrix")
         return result
 
     def matrices(self):
         with self.lock:
-            return {"matrices": [self._matrix_public(row) for row in self.db.execute(
-                "SELECT * FROM matrices WHERE deleted_at IS NULL ORDER BY updated DESC,id")]}
+            records = [self._matrix_public(row) for row in self.db.execute(
+                "SELECT * FROM matrices WHERE deleted_at IS NULL ORDER BY created DESC,id")]
+            return {"matrices": self._attach_record_tags(records, "matrix")}
 
     def matrix_item(self, identity):
         with self.lock:
@@ -231,6 +234,7 @@ class MatrixHubMixin:
         definition, specs = expand_matrix(payload)
         with self.transaction():
             self._validate_scheduling_nodes(specs)
+            tag_ids = self._validate_tag_ids(payload["tag_ids"]) if "tag_ids" in payload else None
             timestamp = now()
             if payload.get("id"):
                 row = self._matrix_find(payload["id"])
@@ -243,6 +247,8 @@ class MatrixHubMixin:
                 identity = uuid.uuid4().hex
                 self.db.execute("INSERT INTO matrices VALUES (?,?,1,?,?,?,NULL)",
                                 (identity, _json(definition), len(specs), timestamp, timestamp))
+            if tag_ids is not None:
+                self._set_record_tags("matrix", identity, tag_ids)
             return self._matrix_public(self._matrix_find(identity), full=True)
 
     def matrix_start(self, payload):
@@ -264,6 +270,7 @@ class MatrixHubMixin:
             if revision != row["revision"]:
                 raise _error(409, "Matrix changed; preview the current revision before starting")
             definition, specs = expand_matrix(json.loads(row["definition"]))
+            tag_ids = [item[0] for item in self.db.execute("SELECT tag_id FROM matrix_tags WHERE record_id=?", (identity,))]
             self._validate_scheduling_nodes(specs)
             run_id, timestamp, ids = uuid.uuid4().hex, now(), []
             self.db.execute("INSERT INTO matrix_runs VALUES (?,?,?,?,?,?)", (run_id, identity, revision, request_id, _json(definition), timestamp))
@@ -272,6 +279,7 @@ class MatrixHubMixin:
                 job_id = uuid.uuid4().hex
                 ids.append(job_id)
                 self.db.execute("INSERT INTO jobs(id,spec,state,created,updated) VALUES (?,?,?,?,?)", (job_id, _json(spec), "queued", timestamp, timestamp))
+                self._set_record_tags("job", job_id, tag_ids)
                 self.db.execute("INSERT INTO matrix_jobs VALUES (?,?,?)", (run_id, job_id, ordinal))
                 self._event(job_id, "submitted", {"request_id": request_id, "matrix_id": identity, "run_id": run_id})
             self._assign()

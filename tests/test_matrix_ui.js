@@ -6,6 +6,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../expman/static/app.js'), 'utf8');
 const html = fs.readFileSync(path.join(__dirname, '../expman/static/index.html'), 'utf8');
+const recordsSource = fs.readFileSync(path.join(__dirname, '../expman/static/records.js'), 'utf8');
+const templatesSource = fs.readFileSync(path.join(__dirname, '../expman/static/templates.js'), 'utf8');
 
 function fragment(start, end) {
   const offset = source.indexOf(start), limit = source.indexOf(end, offset);
@@ -28,7 +30,7 @@ function baseContext(extra = {}) {
     node: element,
     $: id => { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); },
     copy: value => JSON.parse(JSON.stringify(value)),
-    inlineFeedback() {}, notify() {},
+    inlineFeedback() {}, notify() {}, renderDraftTags() {},
     ...extra,
   });
 }
@@ -60,7 +62,7 @@ function check(name, callback) { checks.push([name, callback]); }
 check('all static element references exist and original clipboard controls remain', () => {
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
   assert.equal(new Set(ids).size, ids.length, 'HTML IDs must be unique');
-  for (const match of source.matchAll(/\$\('([^']+)'\)/g)) {
+  for (const match of (source+recordsSource+templatesSource).matchAll(/\$\('([^']+)'\)/g)) {
     if (!match[1].endsWith('-')) assert.ok(ids.includes(match[1]), `Missing element ${match[1]}`);
   }
   for (const text of ['async function writeClipboardText(', 'async function copyDetailText(', "document.execCommand('copy')", "$('copy-live-log').dataset.copyAvailable", "$('copy-detail-state').onclick"]) {
@@ -82,7 +84,7 @@ check('the complete application initializes without runtime errors before login'
     navigator: {}, window: {addEventListener() {}}, URLSearchParams,
     setInterval() {}, requestAnimationFrame() {},
   });
-  vm.runInContext(source, context);
+  vm.runInContext(recordsSource+templatesSource+source, context);
 });
 
 check('text and multiline inputs update immediately with silent input validation', () => {

@@ -29,6 +29,7 @@ from . import __version__
 from .common import atomic_json, expand_grid, now, read_json, safe_child, sha256_file, validate_task
 from .scheduler import choose_assignment
 from .matrix import MatrixHubMixin, initialize as initialize_matrices
+from .record_tags import RecordTagsHubMixin, initialize as initialize_record_tags
 from .mobile import MobileHubMixin, initialize as initialize_mobile
 from .centers import CenterHubMixin, initialize as initialize_centers, open_remote
 from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_policies,
@@ -191,7 +192,7 @@ def inspect_update_state(db):
                 detail="管理端当前可以安装更新；远端实验继续运行，已保存的操作和文件传输在重启后继续同步", **counts)
 
 
-class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
+class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -266,6 +267,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
             self.db.execute("INSERT OR IGNORE INTO nodes(id) VALUES (?)", (node_id,))
         self._cleanup_project_archives()
         initialize_matrices(self.db)
+        initialize_record_tags(self.db)
         initialize_node_policies(self.db)
         initialize_mobile(self.db)
         with self.lock:
@@ -428,6 +430,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
     def state(self):
         with self.lock:
             jobs = [self._job(row) for row in self.db.execute("SELECT * FROM jobs ORDER BY created DESC,id")]
+            self._attach_record_tags(jobs, "job")
             for job in jobs:
                 job.pop("log_tail", None)
             nodes = []
@@ -449,6 +452,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
                 node["snapshot"]["task_templates"] = [item for item in node["snapshot"].get("task_templates", [])
                     if item.get("project_bundle_id") not in deleted_bundles]
             result = {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
+                      "tags": self.record_tags()["tags"],
                       "time": timestamp, "version": __version__, 'center': self.center_info()}
             owner = getattr(self, 'desktop_owner', None)
             if owner is not None:
@@ -462,19 +466,23 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
             raise APIError(400, "request_id must be a nonempty string of at most 200 characters")
         spec = validate_task(payload.get("spec"))
         specs = expand_grid(spec, payload["grid"]) if "grid" in payload else [spec]
-        fingerprint = hashlib.sha256(_json(specs).encode()).hexdigest()
         with self.transaction():
+            tag_ids = self._validate_tag_ids(payload.get("tag_ids", []), check_exists=False)
+            fingerprint_data = {"specs": specs, "tag_ids": tag_ids} if tag_ids else specs
+            fingerprint = hashlib.sha256(_json(fingerprint_data).encode()).hexdigest()
             self._validate_scheduling_nodes(specs)
             previous = self.db.execute("SELECT * FROM submissions WHERE request_id=?", (request_id,)).fetchone()
             if previous:
                 if previous["fingerprint"] != fingerprint:
                     raise APIError(409, "request_id already identifies a different submission")
                 return {"ids": json.loads(previous["ids"])}
+            self._validate_tag_ids(tag_ids)
             ids, timestamp = [], now()
             for item in specs:
                 job_id = uuid.uuid4().hex
                 ids.append(job_id)
                 self.db.execute("INSERT INTO jobs(id,spec,state,created,updated) VALUES (?,?,?,?,?)", (job_id, _json(item), "queued", timestamp, timestamp))
+                self._set_record_tags("job", job_id, tag_ids)
                 self._event(job_id, "submitted", {"request_id": request_id})
             self.db.execute("INSERT INTO submissions VALUES (?,?,?)", (request_id, fingerprint, _json(ids)))
             self._assign()
@@ -857,6 +865,7 @@ class Hub(MatrixHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
     def job(self, job_id):
         with self.lock:
             result = self._job(self._find_job(job_id))
+            self._attach_record_tags([result], "job")
             events = list(self.db.execute("SELECT * FROM events WHERE job_id=? ORDER BY event_id DESC LIMIT 200", (job_id,)))
             result["events"] = [{**dict(row), "data": json.loads(row["data"])} for row in reversed(events)]
             result["artifacts"] = [dict(row) for row in self.db.execute("SELECT name,size,sha256,uploaded FROM artifacts WHERE job_id=? ORDER BY name,uploaded", (job_id,))]
@@ -1045,8 +1054,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/app.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/app.js": "app.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/app.js", "/records.js", "/templates.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/app.js": "app.js", "/records.js": "records.js", "/templates.js": "templates.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
@@ -1071,7 +1080,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     self._bytes(error.read(MAX_BODY), status=error.code)
                     return
                 except OSError:
-                    if self.command != 'GET' or path not in ('/api/state', '/api/job', '/api/matrices',
+                    if self.command != 'GET' or path not in ('/api/state', '/api/job', '/api/matrices', '/api/tags',
                             '/api/matrices/item', '/api/results.csv', '/api/matrices/report.md', '/api/artifact'):
                         raise APIError(503, '调度主控暂时离线，本地副本可查看；恢复连接后再操作')
                 else:
@@ -1156,6 +1165,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     self._bytes(hub.results_csv(), "text/csv; charset=utf-8", disposition='attachment; filename="results.csv"')
                 elif path == "/api/matrices":
                     self._send(hub.matrices())
+                elif path == "/api/tags":
+                    self._send(hub.record_tags())
                 elif path == "/api/matrices/item":
                     self._send(hub.matrix_item(parameter("id")))
                 elif path == "/api/matrices/report.md":
@@ -1180,6 +1191,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
             elif self.command == "POST":
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
+                          "/api/tags/save": hub.tag_save, "/api/tags/delete": hub.tag_delete,
+                          "/api/tags/assign": hub.tag_assign,
                           '/api/node-rename': hub.rename_node,
                           '/api/centers/enroll': hub.center_enroll, '/api/centers/revoke': hub.center_revoke,
                           '/api/centers/register': lambda p: hub.center_register(node_id, p),

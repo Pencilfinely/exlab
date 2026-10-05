@@ -67,7 +67,7 @@ function jobTimer(job) {
 function updateTimers() { if(token)document.querySelectorAll('.experiment-timer').forEach(updateTimer); }
 function formatTimestamp(value) {
   if(!Number.isFinite(value))return '—';
-  return new Date(value*1000).toLocaleString('zh-CN',{hour12:false});
+  return new Date(value*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
 }
 function renderTimingDetail(job) {
   $('detail-elapsed').replaceChildren(jobTimer(job));
@@ -191,6 +191,7 @@ function renderProjects(){
 }
 function openProjectRun(project){
   showView('projects');
+  projectRunTagIds=[];renderDraftTags('project-run-tags',()=>projectRunTagIds,values=>projectRunTagIds=values);
   $('project-run-form').hidden=true;projectPresets=[];
   if(!(state.nodes||[]).length){notify('当前没有接入的算力机。先到“算力管理”添加机器并导入配对凭证，再分发项目、创建实验。');return;}
   for(const worker of state.nodes||[]){
@@ -216,7 +217,7 @@ $('project-run-form').onsubmit=async event=>{
     spec.resources=readTaskResources('project-resources',spec.resources);
     applyScheduling(spec,readScheduling('project-scheduling'));
     if(!spec.params||typeof spec.params!=='object'||Array.isArray(spec.params))throw new Error('参数必须是 JSON 对象。');
-    const result=await api('/api/jobs',{request_id:requestId(),spec});notify(`已提交 ${result.ids.length} 个实验。系统会按所选算力策略匹配节点。`);showView('experiments');await refresh();
+    const result=await api('/api/jobs',{request_id:requestId(),spec,tag_ids:projectRunTagIds});notify(`已提交 ${result.ids.length} 个实验。系统会按所选算力策略匹配节点。`);showView('experiments');await refresh();
   }catch(error){notify('提交失败：'+error.message);}finally{$('project-run-submit').disabled=false;}
 };
 $('spec').value='';
@@ -252,7 +253,7 @@ $('pair-form').onsubmit=async event=>{
     $('pair-form').hidden=true;await refresh();
   }catch(error){notify('配对失败 / Pairing failed: '+error.message);}
 };
-async function refresh(){if(!token)return;try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}}
+async function refresh(){if(!token)return;try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';refreshTagControls();render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}}
 function openNodeResources(id){
   if(nodeResourceBusy)return;const worker=(state.nodes||[]).find(item=>item.id===id);if(!worker)return;
   const snapshot=worker.snapshot||{},desired=worker.resource_policy||{},policy={max_running:2,max_prefetch:4,cpu_budget:4,ram_budget_mb:8192,...snapshot.policy,...desired.policy};
@@ -318,21 +319,28 @@ function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n
     if(Number.isFinite(snap.pending_uploads))box.append(node('p',`待回传文件：${snap.pending_uploads}`));
     box.append(node('p',`节点并发上限 ${snap.policy?.max_running??'—'} · `+(snap.gpus||[]).map(g=>`${g.name}：每卡 ${g.max_jobs??1} 个任务`).join('；'),'muted'));
     const resourceButton=node('button','资源设置','subtle');resourceButton.onclick=()=>openNodeResources(n.id);box.append(resourceButton);
-    const templateDetails=node('details',undefined,'worker-templates');templateDetails.append(node('summary','高级：节点任务模板'));
-    for(const template of (Array.isArray(snap.task_templates)?snap.task_templates:[])){
-      const use=node('button','使用模板 · '+String(template.name||'template'),'subtle');
-      use.onclick=()=>{$('spec').value=JSON.stringify(template,null,2);$('grid').value='{}';showView('experiments');$('advanced-submit').open=true;notify('已填入节点任务，核对后点击“提交到队列”。');$('submit-form').scrollIntoView({behavior:'smooth'});};templateDetails.append(use);
-    }
-    if(templateDetails.children.length>1)box.append(templateDetails);const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
+    renderNodeTemplates(box,n);const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
   updateNodeResourceStatus();renderProjects();renderJobs();renderOverview();
 }
-function renderJobs(){const filter=$('filter').value.toLowerCase();const jobs=(state.jobs||[]).filter(j=>JSON.stringify([j.spec.name,j.spec.algorithm,j.spec.group]).toLowerCase().includes(filter));$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;for(const j of jobs){const row=node('tr'),title=node('td');title.append(node('strong',j.spec.name),node('small',`${j.spec.algorithm} / ${j.spec.group}`));const status=node('td');status.append(node('span',names[j.state]||j.state,'badge '+j.state));const met=j.metrics||{};row.append(title,status,node('td',j.node_id||'等待匹配'),(()=>{const cell=node('td');cell.append(jobTimer(j));return cell;})(),node('td',Object.entries(met).filter(([k])=>!['step','time','attempt'].includes(k)).slice(0,2).map(([k,v])=>`${k}: ${typeof v==='number'?v.toPrecision(4):v}`).join(' · ')||'—'));row.onclick=()=>detail(j.id,true);$('jobs').append(row);}}
+function renderJobs(){
+  const scrollTop=$('jobs-scroll').scrollTop,jobs=filteredJobs();$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;
+  $('empty').textContent=(state.jobs||[]).length?'没有匹配的实验，请调整关键词、状态或标签筛选。':'还没有实验。先到“算法项目”导入项目并分发，再选择配置创建实验。';
+  for(const j of pageRecords(jobs,'jobs')){
+    const row=node('tr'),title=node('td');title.append(node('strong',j.spec.name),node('small',`${j.spec.algorithm} / ${j.spec.group}`),recordTagButtons('job',j));
+    const status=node('td');status.append(node('span',names[j.state]||j.state,'badge '+j.state));
+    const elapsed=node('td');elapsed.append(jobTimer(j));const created=node('td',formatTimestamp(j.created),'record-time'),met=j.metrics||{};
+    row.append(title,status,node('td',j.node_id||'等待匹配'),created,completionCell(j),elapsed,node('td',Object.entries(met).filter(([k])=>!['step','time','attempt'].includes(k)).slice(0,2).map(([k,v])=>`${k}: ${typeof v==='number'?v.toPrecision(4):v}`).join(' · ')||'—'));
+    row.tabIndex=0;row.onclick=()=>detail(j.id,true);row.onkeydown=event=>{if(event.target===row&&['Enter',' '].includes(event.key)){event.preventDefault();void detail(j.id,true);}};$('jobs').append(row);
+  }
+  $('jobs-scroll').scrollTop=scrollTop;
+}
 $('filter').oninput=renderJobs;
 $('submit-form').onsubmit=async event=>{event.preventDefault();$('submit-button').disabled=true;try{const spec=JSON.parse($('spec').value),grid=JSON.parse($('grid').value||'{}'),request_id=globalThis.crypto?.randomUUID?crypto.randomUUID():Date.now()+'-'+Math.random();const result=await api('/api/jobs',{spec,grid,request_id});notify(`已提交 ${result.ids.length} 个实验。没有符合环境、数据和节点策略的机器时，实验会保留在队列。`);await refresh();}catch(error){notify('提交失败：'+error.message);}finally{$('submit-button').disabled=false;}};
 async function download(path,name){try{const response=await fetch(path,{headers:{Authorization:'Bearer '+token}});if(!response.ok)throw new Error(await response.text());const objectURL=URL.createObjectURL(await response.blob()),a=node('a');a.href=objectURL;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(objectURL),1000);}catch(e){notify(e.message);}}
 $('export').onclick=()=>download('/api/results.csv','实验结果.csv');
 async function detail(id,scroll){selected=id;try{const data=await api('/api/job?id='+encodeURIComponent(id)),j=data.job||data;setTimingClock(data.time);renderTimingDetail(j);$('detail').hidden=false;$('detail-name').textContent=j.spec.name;$('detail-state').textContent=`${names[j.state]||j.state} · 节点 ${j.node_id||'未分配'} · 尝试 ${j.attempt||1} · ${typeof j.detail==='string'?j.detail:JSON.stringify(j.detail||'')}`;$('detail-spec').textContent=JSON.stringify({id:j.id,source:j.spec.source,params:j.spec.params,resources:j.spec.resources,environments:j.spec.environments,metric_protocol:j.spec.metric_protocol},null,2);
+  $('detail-tags').replaceChildren(recordTagButtons('job',j));
   const events=data.events||j.events||[];$('events').textContent=events.slice(-30).map(e=>JSON.stringify(e)).join('\n');$('actions').replaceChildren();const options=terminal.includes(j.state)?(['paused','interrupted','failed'].includes(j.state)&&j.spec.resume_supported!==false?[['resume','从检查点恢复']]:[]):[[j.spec.resume_supported===false?'cancel':'stop',j.spec.resume_supported===false?'停止实验（无续训）':'请求保存并停止'],...(j.spec.resume_supported===false?[]:[['cancel','取消实验']])];for(const [action,label] of options){const b=node('button',label,'subtle');b.onclick=async()=>{try{await api('/api/action',{job_id:id,action});notify('请求已记录；节点收到并执行后才会更新状态。离线节点不会立即响应。');await detail(id,false);}catch(e){notify(e.message);}};$('actions').append(b);}
   $('artifacts').replaceChildren();for(const a of data.artifacts||j.artifacts||[]){const b=node('button',`${a.name} · ${(a.size/1024).toFixed(1)} KiB`,'subtle');b.onclick=()=>download('/api/artifact?job_id='+encodeURIComponent(id)+'&sha256='+encodeURIComponent(a.sha256),a.name.split('/').pop());$('artifacts').append(b);}if(!$('artifacts').children.length)$('artifacts').append(node('p','还没有完整回传的文件。运行状态与文件归档分别同步。','muted'));
   document.getElementById("live-log").textContent=j.log_tail||'等待节点回传日志';$('copy-live-log').dataset.copyAvailable=String(Boolean(j.log_tail?.trim()));$('copy-live-log').disabled=!j.log_tail?.trim();metricData=events.map(e=>e.metrics||e.data?.metrics||e.payload?.metrics||{}).filter(m=>Number.isFinite(m.step));if(j.metrics&&Number.isFinite(j.metrics.step))metricData.push(j.metrics);const unique=new Map();for(const sample of metricData)unique.set(sample.step,{...unique.get(sample.step),...sample});metricData=[...unique.values()].sort((a,b)=>a.step-b.step);const old=$('metric-select').value,keys=[...new Set(metricData.flatMap(m=>Object.keys(m)))].filter(k=>!['step','time','attempt'].includes(k));$('metric-select').replaceChildren(...keys.map(k=>{const o=node('option',k);o.value=k;return o;}));if(keys.includes(old))$('metric-select').value=old;drawChart();if(scroll)$('detail').scrollIntoView({behavior:'smooth',block:'start'});
@@ -648,13 +656,17 @@ function availableTemplates(){
 }
 async function loadMatrices(){
   if(matrixLoading)return;matrixLoading=true;
-  try{const result=await api('/api/matrices');$('matrix-list').replaceChildren();
-    for(const matrix of result.matrices||[]){const row=node('div',undefined,'matrix-card'),heading=node('div',undefined,'section-title'),label=node('div');label.append(node('h3',matrix.name),node('p',`${matrix.count} 个组合 · 已提交 ${matrix.job_count} 次实验 · 修订 ${matrix.revision}`,'muted'));heading.append(label);row.append(heading);
+  try{const result=await api('/api/matrices');matrixRecords=result.matrices||[];renderMatrices();
+  }catch(error){notify('读取矩阵失败：'+error.message);}finally{matrixLoading=false;}
+}
+function renderMatrices(){
+    const scrollTop=$('matrices-scroll').scrollTop,records=filteredMatrices();$('matrix-list').replaceChildren();
+    for(const matrix of pageRecords(records,'matrices')){const row=node('div',undefined,'matrix-card'),heading=node('div',undefined,'section-title'),label=node('div');label.append(node('h3',matrix.name),node('p',`${matrix.count} 个组合 · 已提交 ${matrix.job_count} 次实验 · 修订 ${matrix.revision}`,'muted'),node('p','创建于 '+formatTimestamp(matrix.created),'record-time'));heading.append(label);row.append(heading,recordTagButtons('matrix',matrix));
       if(matrix.description)row.append(node('p',matrix.description,'muted'));const badges=node('div',undefined,'actions');for(const [status,count] of Object.entries(matrix.states||{}))badges.append(node('span',`${names[status]||status} ${count}`,'badge '+status));row.append(badges);
       const actions=node('div',undefined,'actions');actions.append(smallButton('编辑',async()=>{try{openMatrix(await api('/api/matrices/item?id='+encodeURIComponent(matrix.id)));}catch(error){notify(error.message);}}),smallButton('一键启动',event=>void startMatrix(matrix,event.currentTarget)),smallButton('查看结果',()=>void showMatrixResults(matrix.id)),smallButton('导出 Markdown',()=>download('/api/matrices/report.md?id='+encodeURIComponent(matrix.id),matrix.name+'.md')),smallButton('删除矩阵',async()=>{if(!confirm(`删除矩阵“${matrix.name}”？历史实验与结果会保留。`))return;try{await api('/api/matrices/delete',{id:matrix.id});if(matrixDraft?.id===matrix.id){matrixDraft=null;$('matrix-form').hidden=true;}if(matrixResultId===matrix.id)$('matrix-result').hidden=true;await loadMatrices();}catch(error){notify('删除失败：'+error.message);}},true));row.append(actions);$('matrix-list').append(row);
     }
-    if(!$('matrix-list').children.length)$('matrix-list').append(node('p','尚无实验矩阵。导入并部署算法后，新建一个矩阵，添加数据集和参数即可批量运行。','empty-state'));
-  }catch(error){notify('读取矩阵失败：'+error.message);}finally{matrixLoading=false;}
+    if(!records.length)$('matrix-list').append(node('p',matrixRecords.length?'没有匹配的矩阵，请调整关键词或标签筛选。':'尚无实验矩阵。导入并部署算法后，新建一个矩阵，添加数据集和参数即可批量运行。','empty-state'));
+    $('matrices-scroll').scrollTop=scrollTop;
 }
 function matrixPayload(){
   if(!matrixDraft?.spec)throw new Error('请选择已部署项目的实验配置，或导入一份矩阵配置文件。');
@@ -662,6 +674,7 @@ function matrixPayload(){
   const grid={};for(const axis of matrixAxes){if(!axis.key.trim())throw new Error('请填写每个参数维度的名称。');if(axis.key in grid)throw new Error('参数维度重复：'+axis.key);const values=lines(axis.text);if(!values.length)throw new Error('参数 '+axis.key+' 至少需要一个候选值。');grid[axis.key]=values.map(value=>axis.type==='string'?value:parseValue(value));}
   const payload={name,description:$('matrix-description').value.trim(),spec:copy(matrixDraft.spec),datasets:copy(matrixDraft.datasets||[]),grid,...readScheduling('matrix-scheduling')};
   payload.spec.resources=readTaskResources('matrix-resources',payload.spec.resources);
+  if(matrixDraft.tag_ids)payload.tag_ids=[...matrixDraft.tag_ids];
   if(matrixDraft.id){payload.id=matrixDraft.id;payload.revision=matrixDraft.revision;}
   return payload;
 }
@@ -669,6 +682,7 @@ function openMatrix(definition){
   matrixTemplates=availableTemplates();matrixDraft=definition?copy(definition):{name:'',description:'',spec:matrixTemplates[0]?copy(matrixTemplates[0].spec):null,datasets:[],grid:{}};
   matrixTemplateDrafts=new Map();matrixTemplateKey='current';
   matrixDraft.datasets=(matrixDraft.datasets||[]).map(dataset=>({...dataset,params:dataset.params||{}}));matrixDraft.grid||={};
+  matrixDraft.tag_ids||=(matrixDraft.tags||[]).map(tag=>tag.id);renderDraftTags('matrix-tags',()=>matrixDraft.tag_ids,values=>matrixDraft.tag_ids=values);
   if(!definition&&matrixDraft.spec)matrixDraft.spec.scheduling={mode:'auto'};
   $('matrix-editor-title').textContent=matrixDraft.id?'编辑实验矩阵':'新建实验矩阵';$('matrix-name').value=matrixDraft.name||'';$('matrix-description').value=matrixDraft.description||'';$('matrix-name').maxLength=160;
   const select=$('matrix-template');select.replaceChildren();if(matrixDraft.spec){const current=node('option','当前配置 · '+matrixDraft.spec.name);current.value='current';select.append(current);}
@@ -732,13 +746,30 @@ async function startMatrix(matrix,button){
   }finally{matrixStartsInFlight.delete(matrix.id);if(button)button.disabled=false;}
 }
 async function showMatrixResults(id,scroll=true){
-  try{const matrix=await api('/api/matrices/item?id='+encodeURIComponent(id));matrixResultId=id;$('matrix-result-title').textContent=matrix.name+' · 结果';$('matrix-result-summary').textContent=`${matrix.runs?.length||0} 个批次 · ${matrix.job_count} 次实验 · `+Object.entries(matrix.states||{}).map(([status,count])=>`${names[status]||status} ${count}`).join(' · ');$('matrix-result-jobs').replaceChildren();for(const job of matrix.jobs||[]){const row=node('tr'),label=node('td');label.append(node('strong',job.spec.name),node('small',job.spec.dataset_name||''));const status=node('td');status.append(node('span',names[job.state]||job.state,'badge '+job.state));row.append(label,status,node('td',job.node_id||'等待分配'),node('td',Object.entries(job.metrics||{}).filter(([key])=>!['step','time','attempt'].includes(key)).map(([key,value])=>`${key}: ${value}`).join(' · ')||'—'));row.onclick=()=>{showView('experiments');void detail(job.id,true);};$('matrix-result-jobs').append(row);}$('matrix-result-export').onclick=()=>download('/api/matrices/report.md?id='+encodeURIComponent(id),matrix.name+'.md');$('matrix-result').hidden=false;if(scroll)$('matrix-result').scrollIntoView({behavior:'smooth'});}
-  catch(error){notify('读取矩阵结果失败：'+error.message);}
+  try{const matrix=await api('/api/matrices/item?id='+encodeURIComponent(id));
+    if(matrixResultId!==id){recordPages['matrix-result'].page=1;$('matrix-result-scroll').scrollTop=0;}
+    matrixResultId=id;matrixResultRecords=matrix.jobs||[];$('matrix-result-title').textContent=matrix.name+' · 结果';
+    $('matrix-result-summary').textContent=`${matrix.runs?.length||0} 个批次 · ${matrix.job_count} 次实验 · `+Object.entries(matrix.states||{}).map(([status,count])=>`${names[status]||status} ${count}`).join(' · ');
+    renderMatrixResultJobs();$('matrix-result-export').onclick=()=>download('/api/matrices/report.md?id='+encodeURIComponent(id),matrix.name+'.md');
+    $('matrix-result').hidden=false;if(scroll)$('matrix-result').scrollIntoView({behavior:'smooth'});
+  }catch(error){notify('读取矩阵结果失败：'+error.message);}
+}
+function renderMatrixResultJobs(){
+  const scrollTop=$('matrix-result-scroll').scrollTop;
+  $('matrix-result-jobs').replaceChildren();
+  for(const job of pageRecords(matrixResultRecords,'matrix-result')){
+    const row=node('tr'),label=node('td');label.append(node('strong',job.spec.name),node('small',job.spec.dataset_name||''),recordTagButtons('job',job));
+    const status=node('td');status.append(node('span',names[job.state]||job.state,'badge '+job.state));
+    row.append(label,status,node('td',job.node_id||'等待分配'),node('td',formatTimestamp(job.created),'record-time'),completionCell(job),node('td',Object.entries(job.metrics||{}).filter(([key])=>!['step','time','attempt'].includes(key)).map(([key,value])=>`${key}: ${value}`).join(' · ')||'—'));
+    row.onclick=()=>{showView('experiments');void detail(job.id,true);};row.tabIndex=0;
+    row.onkeydown=event=>{if(event.target===row&&['Enter',' '].includes(event.key)){event.preventDefault();row.onclick();}};$('matrix-result-jobs').append(row);
+  }
+  $('matrix-result-scroll').scrollTop=scrollTop;
 }
 $('matrix-result-refresh').onclick=()=>matrixResultId&&void showMatrixResults(matrixResultId,false);$('matrix-result-close').onclick=()=>{$('matrix-result').hidden=true;matrixResultId=null;};
 function downloadContent(text,name,type){const url=URL.createObjectURL(new Blob([text],{type})),link=node('a');link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('matrix-export-config').onclick=()=>{try{const payload=matrixPayload();delete payload.id;delete payload.revision;downloadContent(JSON.stringify(payload,null,2)+'\n',payload.name+'.matrix.json','application/json');inlineFeedback('matrix-feedback','矩阵配置已导出，可再次导入或分享。');}catch(error){inlineFeedback('matrix-feedback',error.message,true);}};
 $('matrix-import').onclick=()=>$('matrix-file').click();$('matrix-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>2*1024*1024)throw new Error('配置文件不能超过 2 MiB');const value=JSON.parse((await file.text()).replace(/^\uFEFF/,''));if(!value?.spec||!Array.isArray(value.datasets||[])||!value.grid||Array.isArray(value.grid))throw new Error('请选择包含 spec、datasets、grid 的矩阵配置。');delete value.id;delete value.revision;openMatrix(value);inlineFeedback('matrix-feedback','已导入配置，请预览资源与组合，再保存启动。');}catch(error){notify('导入矩阵失败：'+error.message);}finally{event.target.value='';}};
 function markdownCell(value){return String(value??'—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\|/g,'\\|').replace(/[\r\n]+/g,' ');}
-$('export-markdown').onclick=()=>{const filter=$('filter').value.toLowerCase(),jobs=(state.jobs||[]).filter(job=>JSON.stringify([job.spec.name,job.spec.algorithm,job.spec.group]).toLowerCase().includes(filter)),keys=[...new Set(jobs.flatMap(job=>Object.keys(job.metrics||{})))].filter(key=>!['step','time','attempt'].includes(key));const headers=['实验','算法','状态','节点',...keys],rows=jobs.map(job=>[job.spec.name,job.spec.algorithm,names[job.state]||job.state,job.node_id||'等待分配',...keys.map(key=>job.metrics?.[key])]);const text=['# 实验结果',`\n导出时间：${new Date().toLocaleString('zh-CN')}；共 ${jobs.length} 次实验。指标为最近一次回传值。\n`,'| '+headers.map(markdownCell).join(' | ')+' |','| '+headers.map(()=>'---').join(' | ')+' |',...rows.map(row=>'| '+row.map(markdownCell).join(' | ')+' |'),'\n## 实验参数\n',...jobs.map(job=>'### '+markdownCell(job.spec.name)+'\n\n```json\n'+JSON.stringify(job.spec.params,null,2).replace(/```/g,'\\u0060\\u0060\\u0060')+'\n```\n')].join('\n');downloadContent(text,'实验结果.md','text/markdown;charset=utf-8');};
-showView(location.hash.slice(1));refresh();setInterval(()=>{void refresh();if(token&&currentView==='matrices'){void loadMatrices();if(matrixResultId&&!$('matrix-result').hidden)void showMatrixResults(matrixResultId,false);}},5000);setInterval(updateTimers,1000);
+$('export-markdown').onclick=()=>{const jobs=filteredJobs(),keys=[...new Set(jobs.flatMap(job=>Object.keys(job.metrics||{})))].filter(key=>!['step','time','attempt'].includes(key));const headers=['实验','算法','状态','节点',...keys],rows=jobs.map(job=>[job.spec.name,job.spec.algorithm,names[job.state]||job.state,job.node_id||'等待分配',...keys.map(key=>job.metrics?.[key])]);const text=['# 实验结果',`\n导出时间：${new Date().toLocaleString('zh-CN')}；共 ${jobs.length} 次实验。指标为最近一次回传值。\n`,'| '+headers.map(markdownCell).join(' | ')+' |','| '+headers.map(()=>'---').join(' | ')+' |',...rows.map(row=>'| '+row.map(markdownCell).join(' | ')+' |'),'\n## 实验参数\n',...jobs.map(job=>'### '+markdownCell(job.spec.name)+'\n\n```json\n'+JSON.stringify(job.spec.params,null,2).replace(/```/g,'\\u0060\\u0060\\u0060')+'\n```\n')].join('\n');downloadContent(text,'实验结果.md','text/markdown;charset=utf-8');};
+initializeRecordTools();initializeNodeTemplateTools();showView(location.hash.slice(1));refresh();setInterval(()=>{void refresh();if(token&&currentView==='matrices'){void loadMatrices();if(matrixResultId&&!$('matrix-result').hidden)void showMatrixResults(matrixResultId,false);}},5000);setInterval(updateTimers,1000);

@@ -35,7 +35,7 @@ function context(extra = {}) {
   const $ = id => { if (!elements.has(id)) elements.set(id, node()); return elements.get(id); };
   const env = vm.createContext({node, $, document, copy: clone, console, Date, Map,
     state: {jobs: [], nodes: []}, nodeResourceEditor: null, nodeResourceBusy: false,
-    notify() {}, renderProjects() {}, renderJobs() {}, renderOverview() {},
+    notify() {}, renderProjects() {}, renderJobs() {}, renderOverview() {}, renderNodeTemplates() {}, renderDraftTags() {},projectRunTagIds:[],
     inlineFeedback(id, message) { $(id).textContent = message; $(id).hidden = !message; },
     ...extra,
   });
