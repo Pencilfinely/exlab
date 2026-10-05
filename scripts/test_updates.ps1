@@ -419,6 +419,90 @@ static class InstallProbeTests {
         return new Dictionary<string,object>{{"can_stop_docker",true},{"can_terminate_wsl",!otherProcesses},
             {"docker_id","owned-daemon"},{"docker_ready",true},{"agents_stopped",true}};
     }
+    sealed class WorkerReleaseFixture {
+        internal readonly MemoryFixture Native=new MemoryFixture();
+        internal readonly List<string> Commands=new List<string>();
+        internal readonly Queue<Dictionary<string,object>> Statuses=new Queue<Dictionary<string,object>>();
+        internal bool Consent=true,FailInspection,MissingInspection;
+        internal int Prompts,StoppedCallbacks;
+        internal Func<Task> Delay=()=>Task.FromResult(true);
+        internal WorkerReleaseFixture() {
+            Statuses.Enqueue(new Dictionary<string,object>{{"running",true},{"status","online"}});
+            Statuses.Enqueue(new Dictionary<string,object>{{"running",true},{"status","shutting_down"}});
+            Statuses.Enqueue(new Dictionary<string,object>{{"running",false},{"status","stopped"}});
+        }
+        internal Task<Dictionary<string,object>> Command(string action) {
+            Commands.Add(action);
+            if(action=="status")return Task.FromResult(Statuses.Dequeue());
+            if(action=="deactivate")return Task.FromResult(new Dictionary<string,object>{{"running",true},{"status","shutting_down"}});
+            if(action=="runtime-release") {
+                Assert(StoppedCallbacks==1&&Statuses.Count==0,"Resource inspection preceded confirmed worker shutdown and dormancy.");
+                if(FailInspection)throw new IOException("inspection unavailable");
+                return Task.FromResult(MissingInspection?null:IdleRuntime(true));
+            }
+            throw new Exception("Unified worker stop invoked an unrelated command: "+action);
+        }
+        internal Task<Dictionary<string,object>> Prepare() {
+            return DesktopRuntime.PrepareWorkerRelease("Ubuntu",Command,()=>{Prompts++;return Consent;},null,
+                ()=>{StoppedCallbacks++;Commands.Add("dormant");},Native.Run,Delay);
+        }
+    }
+    static void UnifiedWorkerRelease() {
+        var active=new WorkerReleaseFixture();var ready=active.Prepare().GetAwaiter().GetResult();
+        Assert(active.Prompts==1&&active.StoppedCallbacks==1,"Active compute did not use one stop confirmation and become dormant.");
+        Assert(String.Join(",",active.Commands)=="status,deactivate,status,status,dormant,runtime-release",
+            "Unified stop skipped saving, completion verification or resource inspection.");
+        Assert(DesktopRuntime.NeedsOtherProcessConfirmation(ready),"Other Ubuntu sessions bypassed release confirmation.");
+        var gate=new TaskCompletionSource<bool>();var draining=new WorkerReleaseFixture{Delay=()=>gate.Task};
+        var pending=draining.Prepare();
+        Assert(!pending.IsCompleted&&draining.StoppedCallbacks==0&&!draining.Commands.Contains("runtime-release"),
+            "WSL release began while experiment save/stop was still pending.");
+        gate.SetResult(true);pending.GetAwaiter().GetResult();
+        Assert(draining.StoppedCallbacks==1,"Completed graceful stop did not proceed to resource release.");
+        var canceled=new WorkerReleaseFixture{Consent=false};
+        Assert(canceled.Prepare().GetAwaiter().GetResult()==null,"Declining stop did not cancel the unified flow.");
+        Assert(canceled.StoppedCallbacks==0&&canceled.Commands.Count==1&&canceled.Native.Calls.Count==1,
+            "Canceled deactivation changed the worker or Docker/WSL runtime.");
+        var retry=new WorkerReleaseFixture();retry.Statuses.Clear();
+        for(int i=0;i<2;i++)retry.Statuses.Enqueue(new Dictionary<string,object>{{"running",false},{"status","stopped"}});
+        retry.Prepare().GetAwaiter().GetResult();
+        Assert(retry.Prompts==0&&retry.Commands.Contains("runtime-release"),"Already deactivated compute could not retry release without another stop prompt.");
+        var closed=new WorkerReleaseFixture();closed.Native.Inventory="docker-desktop\n";
+        var closedState=closed.Prepare().GetAwaiter().GetResult();
+        Assert(closed.StoppedCallbacks==1&&closed.Commands.Count==1&&closed.Commands[0]=="dormant"&&closed.Prompts==0,
+            "Retrying a stopped Ubuntu launched its worker command transport.");
+        Assert(App.Flag(closedState,"can_terminate_wsl")&&!DesktopRuntime.NeedsOtherProcessConfirmation(closedState),
+            "Stopped Ubuntu unnecessarily asked to close other sessions.");
+        Assert(closed.Native.Calls.Count==3&&!closed.Native.Calls.Exists(call=>call.Contains("--exec")),
+            "Stopped Ubuntu was awakened during Docker inspection.");
+        var offline=new WorkerReleaseFixture();offline.Native.Inventory="";offline.Native.FailInfo=true;
+        var offlineState=offline.Prepare().GetAwaiter().GetResult();
+        Assert(!DesktopRuntime.NeedsOtherProcessConfirmation(offlineState),"Already stopped Ubuntu asked for unrelated session consent when Docker was disconnected.");
+        foreach(var failure in new[] {
+            new Dictionary<string,object>{{"running",false},{"status","exit_failed"},{"detail","save failed"}},
+            new Dictionary<string,object>{{"running",false},{"status","failed"}},
+            new Dictionary<string,object>{{"status","stopped"}}
+        }) {
+            var rejected=new WorkerReleaseFixture();rejected.Statuses.Clear();
+            rejected.Statuses.Enqueue(new Dictionary<string,object>{{"running",true},{"status","online"}});
+            rejected.Statuses.Enqueue(failure);bool failed=false;
+            try{rejected.Prepare().GetAwaiter().GetResult();}catch(IOException){failed=true;}catch(InvalidDataException){failed=true;}
+            Assert(failed&&rejected.StoppedCallbacks==0&&!rejected.Commands.Contains("runtime-release"),
+                "Failed or unverified shutdown allowed marking compute stopped and releasing WSL.");
+        }
+        var inspectionFailure=new WorkerReleaseFixture{FailInspection=true};bool inspectionFailed=false;
+        try{inspectionFailure.Prepare().GetAwaiter().GetResult();}catch(IOException){inspectionFailed=true;}
+        Assert(inspectionFailed&&inspectionFailure.StoppedCallbacks==1,"Resource inspection failure lost the already stopped worker state.");
+        var missingInspection=new WorkerReleaseFixture{MissingInspection=true};bool missingFailed=false;
+        try{missingInspection.Prepare().GetAwaiter().GetResult();}catch(InvalidDataException){missingFailed=true;}
+        Assert(missingFailed&&missingInspection.StoppedCallbacks==1,"Missing resource inspection was mistaken for canceled or successful release.");
+        var blocked=IdleRuntime(true);blocked["can_stop_docker"]=false;
+        Assert(!DesktopRuntime.NeedsOtherProcessConfirmation(blocked),"Other live containers offered a force-close confirmation.");
+        var supervised=IdleRuntime(true);supervised["agents_stopped"]=false;
+        Assert(!DesktopRuntime.NeedsOtherProcessConfirmation(supervised),"Another live agent offered a force-close confirmation.");
+        var disconnected=IdleRuntime(true);disconnected["docker_ready"]=false;disconnected["can_stop_docker"]=false;
+        Assert(DesktopRuntime.NeedsOtherProcessConfirmation(disconnected),"Disconnected Docker hid other Ubuntu sessions from confirmation.");
+    }
     static void MemoryRelease() {
         var inactive=new MemoryFixture();
         var inactiveState=DesktopRuntime.InspectStoppedDistribution(inactive.Run).GetAwaiter().GetResult();
@@ -469,7 +553,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();MemoryRelease();
+            WorkerCompletion();InstallerWiring();UnifiedWorkerRelease();MemoryRelease();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
@@ -509,7 +593,7 @@ static class InstallProbeTests {
                 File.WriteAllText(release,"exit");
                 child.WaitForExit(5000);
             }
-            Console.WriteLine("PASS installer/runtime: "+assertions+" assertions; worker installation, identity, handoff, explicit WSL memory release, other-process consent, distro scope and closure verification.");
+            Console.WriteLine("PASS installer/runtime: "+assertions+" assertions; worker installation, identity, unified deactivation/release, graceful completion, cancellation, dormant retry, other-process consent, distro scope and closure verification.");
             return 0;
         } catch(Exception ex){Console.Error.WriteLine(ex);return 1;}
     }

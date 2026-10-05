@@ -395,7 +395,7 @@ namespace ExperimentManagerDesktop {
         bool startingAfterUpdate;
         bool deactivated;
         CheckBox startup=new CheckBox { Text="登录 Windows 后启动",AutoSize=true };
-        CheckBox releaseResources=new CheckBox { Text="停用 / 退出时释放 Docker 与 WSL",AutoSize=true };
+        CheckBox releaseResources=new CheckBox { Text="退出客户端时自动释放空闲的 Docker 与 WSL",AutoSize=true };
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
         TextBox data=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
@@ -435,7 +435,6 @@ namespace ExperimentManagerDesktop {
             var actions=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
             AddButton(actions,App.Worker?"启用算力":"打开工作空间",()=> { if(App.Worker) StartWorker(); else OpenController(); });
             AddButton(actions,"停用并释放资源",()=>Stop());
-            if(App.Worker) AddButton(actions,"释放 WSL 内存",()=>ReleaseMemory());
             if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
@@ -451,7 +450,6 @@ namespace ExperimentManagerDesktop {
             tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
             menu.Items.Add("停用并释放资源",null,(s,e)=>Stop());
-            if(App.Worker) menu.Items.Add("释放 WSL 内存",null,(s,e)=>ReleaseMemory());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
@@ -608,11 +606,30 @@ namespace ExperimentManagerDesktop {
             using(var form=new WorkerGpuForm((action,options)=>WorkerCommand(action,options))) form.ShowDialog(this);
             Display(await WorkerCommand("status"));
         });}
-        async void Stop(){if(deactivated)return;await Execute(async()=>{
-            if(App.Worker&&MessageBox.Show(this,"停用将请求实验保存并停止。未配置续训的算法会记为中断。继续吗？",App.Title,MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
-            timer.Stop();try {
-                await StopBackend();
-                if(App.Worker)await ReleaseWorkerResources();DisplayInactive();Show();
+        async void Stop(){if(!App.Worker&&deactivated)return;await Execute(async()=>{
+            timer.Stop();bool workerStopped=false;try {
+                if(App.Worker) {
+                    var state=await DesktopRuntime.PrepareWorkerRelease(SelectedDistribution,action=>WorkerCommand(action),
+                        ()=>MessageBox.Show(this,"停用将请求本机实验保存并停止，然后释放空闲的 Docker 与 WSL 内存。\n未配置续训的算法会记为中断。Center 保持运行。继续吗？",
+                            App.Title,MessageBoxButtons.OKCancel,MessageBoxIcon.Question)==DialogResult.OK,
+                        Display,()=>{
+                            workerStopped=true;deactivated=true;settings["deactivated"]=true;
+                            settings["release_detail"]="算力已停用；正在检查 Docker 与 WSL 的释放状态。";
+                            ReleaseWorkerHold();App.Write(App.SettingsFile,settings);
+                        });
+                    if(state==null)return;
+                    await ReleaseWorkerResources(true,state);
+                } else await StopBackend();
+                DisplayInactive();Show();
+            }catch(Exception ex){
+                if(workerStopped) {
+                    settings["release_detail"]="算力已停用；资源释放未完成："+ex.Message+"。可再次点击“停用并释放资源”重试。";
+                    App.Write(App.SettingsFile,settings);DisplayInactive();Show();
+                    // Execute's general error display would hide that compute
+                    // already stopped and resource release remains retryable.
+                    return;
+                }
+                throw;
             }finally{timer.Start();}
         });}
         async Task StopBackend(){
@@ -621,27 +638,6 @@ namespace ExperimentManagerDesktop {
             deactivated=true;settings["deactivated"]=true;App.Write(App.SettingsFile,settings);
             if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
         }
-        async void ReleaseMemory(){await Execute(async()=>{
-            timer.Stop();try {
-                string distribution=SelectedDistribution;
-                string inventory=await Task.Run(()=>App.RunWithTimeout(15000,"wsl.exe","--list","--running","--quiet"));
-                bool running=Array.Exists(DesktopRuntime.RunningDistributions(inventory),name=>name.Equals(distribution,StringComparison.OrdinalIgnoreCase));
-                if(!running) {
-                    // Do not start a stopped Ubuntu merely to inspect it. Keep
-                    // the desktop dormant before releasing Windows Docker.
-                    deactivated=true;settings["deactivated"]=true;App.Write(App.SettingsFile,settings);
-                    ReleaseWorkerHold();
-                    var state=await DesktopRuntime.InspectStoppedDistribution();
-                    settings["release_detail"]=await DesktopRuntime.Release(distribution,state,true);
-                    App.Write(App.SettingsFile,settings);DisplayInactive();Show();return;
-                }
-                var current=await WorkerCommand("status");
-                if((App.Flag(current,"running")||App.Text(current,"status")=="starting"||App.Text(current,"status")=="preparing")&&
-                        MessageBox.Show(this,"释放内存会停用本机算力并关闭 Ubuntu。运行中的实验先请求保存；未配置续训的算法会记为中断。\nCenter 保持运行。继续吗？",App.Title,MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
-                await StopBackend();
-                await ReleaseWorkerResources(true);DisplayInactive();Show();
-            }finally{timer.Start();}
-        });}
         async void OpenController(){await Execute(async()=>{deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
         void DisplayInactive(){summary.Text="已停用 · 点击“"+(App.Worker?"启用算力":"打开工作空间")+"”恢复\n"+App.Text(settings,"release_detail","实验记录与连接身份已保留。");}
         void ImportClipboard(){
@@ -664,12 +660,12 @@ namespace ExperimentManagerDesktop {
         void ReleaseWorkerHold(){
             if(workerHold!=null){try{if(!workerHold.HasExited)workerHold.Kill();}catch(InvalidOperationException){}workerHold.Dispose();workerHold=null;}heldDistribution="";
         }
-        async Task ReleaseWorkerResources(bool explicitMemoryRelease=false){
+        async Task ReleaseWorkerResources(bool explicitRelease=false,Dictionary<string,object> state=null){
             ReleaseWorkerHold();
-            if(!explicitMemoryRelease&&!releaseResources.Checked){settings["release_detail"]="计算代理已停止；资源释放选项未开启。";App.Write(App.SettingsFile,settings);return;}
-            var state=await WorkerCommand("runtime-release");
-            bool confirm=explicitMemoryRelease&&(!App.Flag(state,"can_terminate_wsl")||!App.Flag(state,"can_stop_docker"))&&
-                (App.Flag(state,"can_stop_docker")||(!App.Flag(state,"docker_ready")&&App.Flag(state,"agents_stopped")));
+            if(!explicitRelease&&!releaseResources.Checked){settings["release_detail"]="算力已停用；退出时自动释放选项未开启，Docker 与 WSL 保留。";App.Write(App.SettingsFile,settings);return;}
+            if(state==null)state=await WorkerCommand("runtime-release");
+            bool closeOtherProcesses=explicitRelease&&App.Flag(state,"can_terminate_wsl");
+            bool confirm=explicitRelease&&DesktopRuntime.NeedsOtherProcessConfirmation(state);
             if(confirm) {
                 var names=new List<string>();object details;
                 if(state.TryGetValue("other_process_details",out details)&&details is IList)foreach(object item in (IList)details) {
@@ -680,11 +676,12 @@ namespace ExperimentManagerDesktop {
                 if(!App.Flag(state,"docker_ready"))message+="Docker 未连接，无法核查其容器；可能仍有其他任务。\n";
                 message+="请先保存这些程序中的工作。Center 保持运行，实验文件和连接凭证保留。\n确认关闭并释放 WSL 内存吗？";
                 if(MessageBox.Show(this,message,App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes) {
-                    settings["release_detail"]="算力已停用；Ubuntu 暂时保留。可随时点击“释放 WSL 内存”重试。";App.Write(App.SettingsFile,settings);return;
+                    settings["release_detail"]="算力已停用；已保留其他会话，WSL 内存尚未释放。可再次点击“停用并释放资源”重试。";App.Write(App.SettingsFile,settings);return;
                 }
+                closeOtherProcesses=true;
             }
             summary.Text="正在释放 WSL 内存…";
-            settings["release_detail"]=await DesktopRuntime.Release(SelectedDistribution,state,confirm);App.Write(App.SettingsFile,settings);
+            settings["release_detail"]=await DesktopRuntime.Release(SelectedDistribution,state,closeOtherProcesses);App.Write(App.SettingsFile,settings);
         }
         void Display(Dictionary<string,object> value) {
             string state=App.Text(value,"status");

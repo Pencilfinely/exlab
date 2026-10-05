@@ -45,8 +45,40 @@ namespace ExperimentManagerDesktop {
         internal static Task<string> Release(string distribution,Dictionary<string,object> state,bool closeOtherProcesses=false) {
             return Release(distribution,state,closeOtherProcesses,Run);
         }
+        internal static async Task<Dictionary<string,object>> PrepareWorkerRelease(string distribution,
+                Func<string,Task<Dictionary<string,object>>> workerCommand,Func<bool> confirmStop,
+                Action<Dictionary<string,object>> progress,Action stopped,
+                Func<int,string,string[],Task<string>> execute=null,Func<Task> delay=null) {
+            if(String.IsNullOrWhiteSpace(distribution)||distribution.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("请选择算力端使用的 Ubuntu。");
+            if(execute==null)execute=Run;
+            string[] running=RunningDistributions(await execute(15000,"wsl.exe",new[]{"--list","--running","--quiet"}));
+            Dictionary<string,object> state;
+            if(Array.Exists(running,name=>name.Equals(distribution,StringComparison.OrdinalIgnoreCase))) {
+                var current=await workerCommand("status");
+                if((App.Flag(current,"running")||App.Text(current,"status")=="starting"||App.Text(current,"status")=="preparing")&&
+                        !confirmStop())return null;
+                var requested=await workerCommand("deactivate");
+                if(progress!=null)progress(requested);
+                await DesktopLifecycle.WaitForStopped(()=>workerCommand("status"),progress,null,delay,finalStatus:"stopped");
+                // Mark the client dormant before inspecting resources so its
+                // polling and WSL hold cannot keep or restart Ubuntu.
+                stopped();
+                state=await workerCommand("runtime-release");
+            } else {
+                // Repeated release must not wake an already stopped Ubuntu.
+                stopped();
+                state=await InspectStoppedDistribution(execute);
+            }
+            if(state==null)throw new InvalidDataException("未取得资源检查结果；算力已停用，可重试释放。");
+            return state;
+        }
         internal static Task<Dictionary<string,object>> InspectStoppedDistribution() {
             return InspectStoppedDistribution(Run);
+        }
+        internal static bool NeedsOtherProcessConfirmation(Dictionary<string,object> state) {
+            return App.Flag(state,"agents_stopped")&&!App.Flag(state,"can_terminate_wsl")&&
+                (App.Flag(state,"can_stop_docker")||!App.Flag(state,"docker_ready"));
         }
         internal static async Task<Dictionary<string,object>> InspectStoppedDistribution(Func<int,string,string[],Task<string>> execute) {
             // The selected Ubuntu is already stopped. Inspect Windows Docker
@@ -92,7 +124,7 @@ namespace ExperimentManagerDesktop {
                 catch(Exception) { /* An empty, verified Docker may remain running on older CLI versions. */ }
             }
             if(!App.Flag(state,"can_terminate_wsl")&&!closeOtherProcesses)
-                return "Docker "+(dockerStopped?"已停止":"保持运行")+"；Ubuntu 中另有进程，WSL 已保留。可点击“释放 WSL 内存”确认关闭。";
+                return "Docker "+(dockerStopped?"已停止":"保持运行")+"；Ubuntu 中另有进程，WSL 内存尚未释放。可点击“停用并释放资源”确认关闭。";
             string[] running=RunningDistributions(await execute(15000,"wsl.exe",new[]{"--list","--running","--quiet"}));
             bool all=dockerStopped&&CanShutdownAll(distribution,running);
             await execute(30000,"wsl.exe",all?new[]{"--shutdown"}:new[]{"--terminate",distribution});

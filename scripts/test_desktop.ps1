@@ -109,6 +109,36 @@ public static class DesktopGpuSettingsTest {
         }
     }
 }
+public static class DesktopClientControlsTest {
+    static int Buttons(System.Windows.Forms.Control root,string label) {
+        int count=root is System.Windows.Forms.Button&&root.Text==label?1:0;
+        foreach(System.Windows.Forms.Control child in root.Controls)count+=Buttons(child,label);
+        return count;
+    }
+    public static void Verify(System.Reflection.Assembly assembly,bool worker) {
+        var staticFlags=System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic;
+        var instanceFlags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
+        var role=assembly.GetType("ExperimentManagerDesktop.App",true).GetField("Worker",staticFlags);
+        object original=role.GetValue(null);role.SetValue(null,worker);
+        try {
+            var type=assembly.GetType("ExperimentManagerDesktop.ClientForm",true);
+            // Never show the form: Shown starts live controller/WSL actions.
+            using(var form=(System.Windows.Forms.Form)System.Activator.CreateInstance(type,instanceFlags,null,new object[]{new string[0]},null)) {
+                string stop="\u505c\u7528\u5e76\u91ca\u653e\u8d44\u6e90",old="\u91ca\u653e WSL \u5185\u5b58";
+                if(Buttons(form,stop)!=1||Buttons(form,old)!=0)throw new Exception("Client must have one combined stop/release button.");
+                var tray=(System.Windows.Forms.NotifyIcon)type.GetField("tray",instanceFlags).GetValue(form);
+                int stops=0,oldEntries=0;
+                foreach(System.Windows.Forms.ToolStripItem item in tray.ContextMenuStrip.Items) {
+                    if(item.Text==stop)stops++;if(item.Text==old)oldEntries++;
+                }
+                if(stops!=1||oldEntries!=0)throw new Exception("Tray duplicated the unified resource-release action.");
+                var preference=(System.Windows.Forms.CheckBox)type.GetField("releaseResources",instanceFlags).GetValue(form);
+                if(preference.Text.IndexOf("\u9000\u51fa",StringComparison.Ordinal)<0||preference.Text.Contains("\u505c\u7528"))
+                    throw new Exception("Automatic exit preference still appears to control explicit deactivation.");
+            }
+        } finally {role.SetValue(null,original);}
+    }
+}
 '@
 
 function Invoke-AppMethod($Method, [object[]]$Values) {
@@ -126,11 +156,14 @@ try {
         & $Python (Join-Path $PSScriptRoot 'build_desktop.py') --role $role --output $executable
         if ($LASTEXITCODE -ne 0) { throw "Failed to compile desktop role: $role" }
 
-        # Load bytes rather than locking the compiled executable on disk. No
-        # Form, NotifyIcon, installer, WSL session, or application Main is invoked
-        # by reflection; command transport and icon loading are exercised directly.
+        # Load bytes rather than locking the compiled executable on disk. The
+        # client control check constructs and disposes the form without showing
+        # it; no startup handler, installer, WSL session or live service runs.
+        # GPU settings use an isolated command fixture.
         $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($executable))
         $app = $assembly.GetType('ExperimentManagerDesktop.App', $true)
+        [DesktopClientControlsTest]::Verify($assembly, $role -eq 'worker')
+        Write-Output "PASS $role controls: one combined stop/release action in window and tray; automatic exit preference is separate."
         if ($role -eq 'worker') {
             [DesktopGpuSettingsTest]::Verify($assembly.GetType('ExperimentManagerDesktop.WorkerGpuForm', $true),
                 (Join-Path $runtimeRoot 'gpu-settings-preview.png'))

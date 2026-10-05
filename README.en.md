@@ -7,11 +7,11 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.5. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.5 release notes](docs/RELEASE-0.5.5.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
+**Desktop version: 0.5.6. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.6 release notes](docs/RELEASE-0.5.6.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
 
 Experiment and matrix lists now have bounded scrolling, pagination, creation and completion timestamps, and searchable colored labels. Worker templates open as forms for editing parameters, previewing allocation, submitting experiments, or creating matrices.
 
-Keep Center open and use **释放 WSL 内存** in Worker to reclaim compute memory on demand. Local experiments are requested to save and stop before Ubuntu closes. Worker stays deactivated until you enable compute again; other Ubuntu sessions require confirmation, and other WSL distributions remain available.
+Keep Center open and use **停用并释放资源 (Deactivate and release resources)** in Worker to request local experiments to save and stop, then release idle Docker and WSL resources. Other Ubuntu sessions require confirmation before closing; other WSL distributions remain available. The window reports whether resources were released, and the same button retries release after deactivation. Enable compute to resume. A separate preference controls automatic resource release when exiting the client.
 Adds Docker startup prompts, deactivation and resource release, synchronized Centers with explicit handover, clipboard connections, editable login startup preferences and device names. The applications and release assets now use the ExLab brand. See the [release notes and multi-Center setup](docs/RELEASE-0.5.0.md).
 
 ## Download and install

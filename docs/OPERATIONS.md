@@ -2,7 +2,7 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.en.md)
 
-This guide covers the **0.4.5 desktop release**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis. For mobile access, update the controller and follow the [mobile guide](../mobile/README.md).
+This guide covers the **0.5.6 desktop release**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis. For mobile access, update the controller and follow the [mobile guide](../mobile/README.md).
 
 ## Enable a previously disabled GPU
 
@@ -20,11 +20,12 @@ Wait for local experiments, queued work and uploads to finish first. An idle run
 | Exit the worker completely | Worker tray menu → Exit | Requests cooperative experiment stops, waits for execution to stop, then exits the agent and client; algorithms without native resume cannot promise recovery |
 | Stop accepting new experiments | Controller → Compute → Pause accepting work | Current experiments continue; new assignments/starts pause |
 | Stop the controller | Experiment Center stop control | Controller operations become unavailable; already running worker Docker experiments continue |
-| Stop the worker agent | Experiment Worker stop control | Acceptance/reporting stops; existing Docker experiments are not forcibly killed and can be managed after agent restart |
+| Deactivate compute and release memory | Worker window or tray → 停用并释放资源 | Requests local experiments to save and stop, then releases idle Docker and WSL; Center stays running; algorithms without native resume may not recover |
 | End an experiment | Experiment detail controls | Uses that project's supported stop/cancel behavior |
 
 Before shutdown or upgrade, finish tasks and pending uploads. Stopping the agent does not mean all training containers have ended.
-Tray exit shows progress and keeps the client available if shutdown cannot be confirmed. Pending reports and files remain on the worker for synchronization after the next start. It does not close WSL or Docker Desktop.
+The single deactivation button handles both stopping and resource release; click it again after deactivation to retry release. Other Ubuntu sessions require confirmation before closing. Declining leaves WSL running and explicitly reports that its memory was not released. Other running containers or compute agents block closing their runtime, and other WSL distributions remain available.
+Tray exit shows progress and keeps the client available if shutdown cannot be confirmed. Pending reports and files remain on the worker for synchronization after the next start. The automatic resource-release preference applies only to client exit, not the explicit deactivation button. Automatic exit preserves other Ubuntu sessions.
 Windows sleep, logout, Docker exit, WSL shutdown or power-off can affect training. Background application operation does not remove these dependencies.
 
 From the Ubuntu worker package directory:
