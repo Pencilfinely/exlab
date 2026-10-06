@@ -147,7 +147,7 @@ class RecordTagsTests(unittest.TestCase):
             with urllib.request.urlopen(urllib.request.Request(base + path, data=body, headers=headers), timeout=3) as response:
                 return json.load(response)
         try:
-            for script in ("records.js", "templates.js"):
+            for script in ("records.js", "templates.js", "projects.js"):
                 with urllib.request.urlopen(base + "/" + script, timeout=3) as response:
                     self.assertEqual(response.headers.get_content_type(), "text/javascript")
                     self.assertEqual(response.read(), (Path(__file__).resolve().parents[1] / "expman/static" / script).read_bytes())

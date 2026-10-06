@@ -1054,8 +1054,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/app.js", "/records.js", "/templates.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/app.js": "app.js", "/records.js": "records.js", "/templates.js": "templates.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/app.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/app.js": "app.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")

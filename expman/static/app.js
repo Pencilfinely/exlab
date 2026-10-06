@@ -139,7 +139,7 @@ function readTaskResources(id,original={}){
   }
   if(!['shared','exclusive'].includes(inputs.exclusive.value))throw new Error('请选择 GPU 使用方式。');values.exclusive=inputs.exclusive.value==='exclusive';return values;
 }
-function renderProjectParameters(){let values;try{values=JSON.parse($('project-params').value);}catch{return;}if(!values||typeof values!=='object'||Array.isArray(values))return;objectFields($('project-param-fields'),values,(key,value)=>{values[key]=value;$('project-params').value=JSON.stringify(values,null,2);});}
+function renderProjectParameters(){let values;try{values=JSON.parse($('project-params').value);}catch{return;}if(!values||typeof values!=='object'||Array.isArray(values))return;$('project-param-fields').paramInputs=objectFields($('project-param-fields'),values,(key,value)=>{values[key]=value;$('project-params').value=JSON.stringify(values,null,2);});}
 $('project-params').onchange=renderProjectParameters;
 function demoTemplate(){ $('spec').value=JSON.stringify({name:'第一次演示',algorithm:'demo',group:'学习使用',metric_protocol:'demo-v1',backend:'demo',params:{steps:30,delay:0.3,seed:42},resources:{gpu_memory_mb:0,cpu:1,ram_mb:256,exclusive:false}},null,2); }
 $('upload-project').onclick=()=>$('project-file').click();
@@ -159,66 +159,10 @@ $('project-file').onchange=async event=>{
       let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
       reply=await api('/api/projects/upload',{upload_id,size:file.size,offset,data:btoa(binary)});
     }
-    $('project-progress').textContent=`已上传 ${reply.project.name}。请在下方勾选算力机，再点击“分发到所选节点”。`;
-    await refresh();
+    $('project-progress').textContent=`已上传 ${reply.project.name}。选择算力节点完成部署后即可创建实验。`;
+    await refresh();openProjectWorkspace(reply.project,'deploy');
   }catch(error){$('project-progress').textContent='上传失败：'+error.message+' 重新选择同一文件可继续上传。';}
   finally{$('upload-project').disabled=false;event.target.value='';}
-};
-function renderProjects(){
-  $('projects').replaceChildren();
-  for(const project of state.projects||[]){
-    const box=node('div',undefined,'node');
-    box.append(node('strong',project.name),node('p',`版本 ${project.digest.slice(0,12)} · ${(project.size/1024/1024).toFixed(1)} MiB`,'project-meta'));
-    const chosen=projectSelections.get(project.digest)||new Set();projectSelections.set(project.digest,chosen);
-    if(!(state.nodes||[]).length){box.append(node('p','还没有接入算力机。先添加一台机器，再分发此项目。','muted'));const add=node('button','添加算力机','subtle');add.onclick=()=>{showView('compute');$('add-worker').click();};box.append(add);}
-    for(const worker of state.nodes||[]){
-      const supported=(worker.snapshot?.capabilities||[]).includes('project-bundle-v1');
-      const deployment=(project.deployments||[]).find(item=>item.node_id===worker.id);
-      const label=node('label',undefined,'project-worker'),check=node('input');check.type='checkbox';check.value=worker.id;check.checked=chosen.has(worker.id);check.disabled=!supported;
-      check.onchange=()=>check.checked?chosen.add(worker.id):chosen.delete(worker.id);
-      const statuses={queued:'等待节点领取',downloading:'下载中',installing:'安装中',installed:'已安装',failed:'安装失败'};
-      label.append(check,node('span',`${worker.id} · ${worker.online?'在线':'离线'} · ${supported?(statuses[deployment?.status]||'未分发'):'需更新算力代理'}`));box.append(label);
-      if(deployment?.detail)box.append(node('p',deployment.detail,'project-deployment-detail'));
-    }
-    const deploy=node('button','分发到所选节点','subtle');
-    deploy.onclick=async()=>{try{if(!chosen.size)throw new Error('先勾选目标算力机。');await api('/api/projects/deploy',{digest:project.digest,node_ids:[...chosen]});notify('分发已排队，节点会自动下载和安装。安装完成后点击“创建实验”。');await refresh();}catch(error){notify(error.message);}};
-    const create=node('button','创建实验');create.onclick=()=>openProjectRun(project);
-    const remove=node('button','删除项目','text-button danger-text');remove.onclick=()=>void deleteProject(project,remove);
-    box.append(deploy,create,remove);$('projects').append(box);
-  }
-  if(!(state.projects||[]).length)$('projects').append(node('p','项目库还是空的。点击“从文件夹导入”，或上传已有的 ZIP 项目包。','muted'));
-  renderProjectCleanups();
-}
-function openProjectRun(project){
-  showView('projects');
-  projectRunTagIds=[];renderDraftTags('project-run-tags',()=>projectRunTagIds,values=>projectRunTagIds=values);
-  $('project-run-form').hidden=true;projectPresets=[];
-  if(!(state.nodes||[]).length){notify('当前没有接入的算力机。先到“算力管理”添加机器并导入配对凭证，再分发项目、创建实验。');return;}
-  for(const worker of state.nodes||[]){
-    if(!(project.deployments||[]).some(item=>item.node_id===worker.id&&item.status==='installed'))continue;
-    for(const template of worker.snapshot?.task_templates||[]){
-      if(template.project_id===project.project_id&&(!project.bundle_id||template.project_bundle_id===project.bundle_id))projectPresets.push({worker:worker.id,template});
-    }
-  }
-  if(!projectPresets.length){notify('尚无已安装且回报实验配置的节点。请先分发，等待节点显示“已安装”。');return;}
-  const seen=new Set();projectPresets=projectPresets.filter(item=>{const key=JSON.stringify([item.template.project_id,item.template.project_bundle_id,item.template.experiment_id||item.template.name,item.template.params]);if(seen.has(key))return false;seen.add(key);return true;});
-  $('project-preset').replaceChildren(...projectPresets.map((item,i)=>{const option=node('option',item.template.name);option.value=String(i);return option;}));
-  renderScheduling('project-scheduling',{mode:'auto'},0);
-  $('project-run-title').textContent='创建实验 · '+project.name;$('project-run-form').hidden=false;fillProjectPreset();$('project-run-form').scrollIntoView({behavior:'smooth'});
-}
-function fillProjectPreset(){const selectedPreset=projectPresets[Number($('project-preset').value)];if(!selectedPreset)return;$('project-run-name').value=selectedPreset.template.name;$('project-params').value=JSON.stringify(selectedPreset.template.params,null,2);renderProjectParameters();renderTaskResources('project-resources',selectedPreset.template.resources,()=>{});}
-$('project-preset').onchange=fillProjectPreset;
-$('project-run-close').onclick=()=>{$('project-run-form').hidden=true;};
-$('project-run-form').onsubmit=async event=>{
-  event.preventDefault();$('project-run-submit').disabled=true;
-  try{
-    const preset=projectPresets[Number($('project-preset').value)];if(!preset)throw new Error('请选择节点和实验配置。');
-    const spec=JSON.parse(JSON.stringify(preset.template));spec.name=$('project-run-name').value.trim();spec.params=JSON.parse($('project-params').value);
-    spec.resources=readTaskResources('project-resources',spec.resources);
-    applyScheduling(spec,readScheduling('project-scheduling'));
-    if(!spec.params||typeof spec.params!=='object'||Array.isArray(spec.params))throw new Error('参数必须是 JSON 对象。');
-    const result=await api('/api/jobs',{request_id:requestId(),spec,tag_ids:projectRunTagIds});notify(`已提交 ${result.ids.length} 个实验。系统会按所选算力策略匹配节点。`);showView('experiments');await refresh();
-  }catch(error){notify('提交失败：'+error.message);}finally{$('project-run-submit').disabled=false;}
 };
 $('spec').value='';
 $('demo-template').onclick=demoTemplate;
@@ -391,8 +335,8 @@ const importPhases={'Discovering entry and parameters without running source':'�
 const busyImports=new Set(['scanning','saving','building','browsing']);
 const copy=value=>JSON.parse(JSON.stringify(value));
 function importMessage(message){$('import-status').textContent=message;$('import-status').hidden=!message;}
-function importBusy(busy){importPolling=busy;for(const form of [$('import-source-form'),$('import-review-form')])for(const input of form.querySelectorAll('input,select,textarea,button'))input.disabled=busy;if(!busy&&importDraft)$('import-delete-experiment').disabled=importDraft.experiments.length<=1;}
-function setImportStep(step){['source','review','publish'].forEach(name=>$('import-step-'+name).classList.toggle('active',name===step));}
+function importBusy(busy){importPolling=busy;for(const form of [$('import-source-form'),$('import-review-form')])for(const input of form.querySelectorAll('input,select,textarea,button'))input.disabled=busy;if(!busy&&importDraft)$('import-delete-experiment').disabled=importDraft.experiments.length<=1;updateProjectImportControls();}
+function setImportStep(step){showProjectImportStep(step==='review'?'parameters':step);}
 function updateImportJSON(){if(!importDraft||importJsonDirty)return;$('import-project-json').value=JSON.stringify(importDraft.project,null,2);$('import-harness-json').value=JSON.stringify(importDraft.harness,null,2);$('import-experiments-json').value=JSON.stringify(importDraft.experiments,null,2);}
 function draftChanged(){aiSuggestion=null;$('import-ai-preview').hidden=true;if(!$('import-reviewed').disabled)$('import-reviewed').checked=false;updateImportJSON();}
 async function loadImportHistory(){
@@ -407,10 +351,9 @@ async function loadImportHistory(){
 }
 async function openImport(id){
   if(importPolling){notify('当前导入操作仍在进行，完成后可打开另一份草稿。');return;}
-  showView('projects');$('import-wizard').hidden=false;$('import-review-form').hidden=true;if(importJob?.id!==id){$('import-sample-log').value='';$('import-ai-instructions').value='';$('import-ai-source').checked=false;}importBusy(true);
+  showView('projects');openProjectImport();$('import-review-form').hidden=true;if(importJob?.id!==id){$('import-sample-log').value='';$('import-ai-instructions').value='';$('import-ai-source').checked=false;}importBusy(true);
   try{let job=await api('/api/local/imports/item?id='+encodeURIComponent(id));importJob=job;importDraft=null;job=await waitImportJob(job);if(job.draft)renderImportDraft(job.draft);if(job.status==='selected')$('import-source').value=job.source;}
   catch(error){importMessage('读取导入记录失败：'+error.message);}finally{importBusy(false);}
-  $('import-wizard').scrollIntoView({behavior:'smooth',block:'start'});
 }
 async function waitImportJob(job){
   const id=job.id;importJob=job;
@@ -422,7 +365,7 @@ async function waitImportJob(job){
     await new Promise(resolve=>setTimeout(resolve,900));if(!token)throw new Error('管理令牌已清除，请重新连接。');
     job=await api('/api/local/imports/item?id='+encodeURIComponent(id));importJob=job;
   }
-  if(job.status==='published'){setImportStep('publish');notify('项目已加入算法库。勾选目标算力机并分发，节点安装完成后即可创建实验。');await refresh();}
+  if(job.status==='published'){setImportStep('publish');notify('项目已加入算法库。打开项目即可选择节点分发，再创建实验。');await refresh();}
   await loadImportHistory();return job;
 }
 function renderImportExperiment(){
@@ -469,7 +412,7 @@ function renderImportDraft(draft){
   }
   if(!$('import-assets').children.length)$('import-assets').append(node('p','未自动识别数据目录。若算法需要外部数据，请在高级项目配置的 assets 中添加路径。','muted'));
   $('import-modules').value=(project.runtime?.imports||[]).join('\n');$('import-requirements').value=(project.runtime?.requirements||[]).join('\n');
-  objectFields($('import-resource-fields'),project.resources||{},(key,value)=>{project.resources[key]=value;draftChanged();},{cpu:{type:'number'},ram_mb:{type:'integer'},gpu_memory_mb:{type:'integer'},exclusive:{description:'不勾选时允许共享；独占只约束本实验台任务，不限制其他用户的程序。'}},{cpu:'CPU 核心预算',ram_mb:'内存预算 (MiB)',gpu_memory_mb:'显存预算 (MiB)',exclusive:'在本实验台内独占 GPU'});
+  objectFields($('import-resource-fields'),project.resources||{},(key,value)=>{project.resources[key]=value;draftChanged();},{cpu:{type:'number',min:0.1,max:4096},ram_mb:{type:'integer',min:64,max:16777216},gpu_memory_mb:{type:'integer',min:0,max:1048576},exclusive:{description:'不勾选时允许共享；独占只约束本实验台任务，不限制其他用户的程序。'}},{cpu:'CPU 核心预算',ram_mb:'内存预算 (MiB)',gpu_memory_mb:'显存预算 (MiB)',exclusive:'在本实验台内独占 GPU'});
   $('import-resume-status').textContent=harness.resume?.supported?'续训：使用配置中的原生续训命令':'续训：未启用，原算法没有配置原生续训入口';
   $('import-file-summary').textContent=preview?`代码 ${preview.source_files} 个文件 · 数据 ${preview.asset_files} 个文件 · 共 ${((preview.source_bytes+preview.asset_bytes)/1024/1024).toFixed(1)} MiB${preview.truncated?'（下方显示部分文件）':''}`:'保存草稿后检查分发文件。';
   $('import-file-preview').replaceChildren(...(preview?.files||[]).map(file=>{const row=node('div');row.append(node('span',file.path),node('span',(file.bytes/1024).toFixed(1)+' KiB'));return row;}));
@@ -480,8 +423,8 @@ async function startImport(entry){
   try{const body={source:$('import-source').value.trim()};if(entry)body.entry=entry;const job=await waitImportJob(await api('/api/local/imports/start',body));if(job.draft)renderImportDraft(job.draft);}
   catch(error){importMessage('读取失败：'+error.message);}finally{importBusy(false);}
 }
-$('import-local').onclick=async()=>{showView('projects');if(localImportAvailable===null)await loadImportHistory();if(!localImportAvailable){notify('请在管理端本机打开页面以选择源代码文件夹，当前浏览器可上传已有项目包。');return;}$('import-wizard').hidden=false;$('import-wizard').scrollIntoView({behavior:'smooth'});};
-$('import-close').onclick=()=>{$('import-wizard').hidden=true;};
+$('import-local').onclick=async()=>{showView('projects');if(localImportAvailable===null)await loadImportHistory();if(!localImportAvailable){notify('请在管理端本机打开页面以选择源代码文件夹，当前浏览器可上传已有项目包。');return;}openProjectImport();};
+$('import-close').onclick=()=>$('import-dialog').close();
 $('import-source-form').onsubmit=event=>{event.preventDefault();void startImport();};
 $('import-entry').onchange=()=>void startImport($('import-entry').value);
 $('import-browse').onclick=async()=>{importDraft=null;$('import-review-form').hidden=true;importBusy(true);setImportStep('source');try{const job=await waitImportJob(await api('/api/local/imports/browse',{}));if(job.status==='selected')$('import-source').value=job.source;}catch(error){importMessage('选择文件夹失败：'+error.message);}finally{importBusy(false);}};
@@ -502,16 +445,16 @@ $('import-apply-json').onclick=()=>{
 };
 async function saveImport(publish){
   if(!importDraft||!importJob)return;
-  if($('import-source').value.trim()!==importDraft.project.source){importMessage('根目录已改变。请先点击“读取入口和参数”，生成这个目录的配置，再保存。');return;}
-  for(const input of $('import-review-form').querySelectorAll('input,select,textarea')){if(input.id!=='import-reviewed'&&!input.checkValidity()){input.reportValidity();return;}}
-  if(importJsonDirty){importMessage('请先点击“应用 JSON 修改”，确认高级配置与表单一致。');return;}
-  if(publish&&!$('import-reviewed').checked){importMessage('请核对配置并勾选确认，再加入项目库。');return;}
-  importBusy(true);
+  if($('import-source').value.trim()!==importDraft.project.source){showProjectImportStep('source');importMessage('根目录已改变。请先点击“读取入口和参数”，生成这个目录的配置，再保存。');return;}
+  for(const input of $('import-review-form').querySelectorAll('input,select,textarea')){if(input.id!=='import-reviewed'&&!input.checkValidity()){revealProjectImportInput(input);input.reportValidity();return;}}
+  if(importJsonDirty){showProjectImportStep('metrics');importMessage('请先点击“应用 JSON 修改”，确认高级配置与表单一致。');return;}
+  if(publish&&!$('import-reviewed').checked){showProjectImportStep('publish');importMessage('请核对配置并勾选确认，再加入项目库。');return;}
+  const returnStep=projectImportStep;importBusy(true);
   try{
     let job=await waitImportJob(await api('/api/local/imports/save',{id:importJob.id,project:importDraft.project,harness:importDraft.harness,experiments:importDraft.experiments}));
     if(job.status!=='ready')throw new Error(job.error||'配置尚未保存成功，请检查上方信息。');
-    if(job.draft)renderImportDraft(job.draft);
-    if(publish){job=await waitImportJob(await api('/api/local/imports/publish',{id:job.id,reviewed:true}));if(job.status==='published'){$('import-review-form').hidden=true;setImportStep('publish');$('project-library').scrollIntoView({behavior:'smooth'});}}
+    if(job.draft){renderImportDraft(job.draft);showProjectImportStep(returnStep);}
+    if(publish){job=await waitImportJob(await api('/api/local/imports/publish',{id:job.id,reviewed:true}));if(job.status==='published'){$('import-review-form').hidden=true;setImportStep('publish');finishProjectImport(job);}}
     else importMessage('草稿已保存，文件列表已重新检查。可稍后从“导入草稿与进度”继续。');
   }catch(error){importMessage('保存或发布失败：'+error.message);}finally{importBusy(false);}
 }
@@ -582,7 +525,7 @@ $('import-command').oninput=()=>{importDraft.harness.command=lines($('import-com
 function renderImportAssets(){
   const assets=importDraft.project.assets||{};$('import-assets').replaceChildren();
   for(const [alias,asset] of Object.entries(assets)){const box=node('div',undefined,'asset-group'),heading=node('div',undefined,'section-title');heading.append(node('h4','数据资源 · '+alias),smallButton('移除目录',()=>{delete assets[alias];renderImportAssets();draftChanged();},true));box.append(heading);
-    const fields=node('div',undefined,'form-grid');fields.append(editField('本机数据目录',asset.path,value=>{asset.path=value;draftChanged();}),editField('包含文件（每行一个文件名或通配符）',(asset.include||['**/*']).join('\n'),value=>{asset.include=lines(value);draftChanged();},{rows:2}));
+    const fields=node('div',undefined,'form-grid');fields.append(editField('本机数据目录',asset.path,value=>{asset.path=value;draftChanged();}),editField('包含文件（每行一个文件名或通配符）',(asset.include||['**/*']).join('\n'),value=>{asset.include=lines(value);draftChanged();},{rows:2}));fields.children[0].children[0].required=true;
     box.append(fields,node('p',`参数中可填写 {assets.${alias}}，运行时替换为部署后的数据路径。`,'muted'));$('import-assets').append(box);
   }
   if(!Object.keys(assets).length)$('import-assets').append(node('p','点击“添加数据目录”，填写需要一同分发的数据路径。项目内部已包含的数据可以直接使用。','muted'));
@@ -772,4 +715,4 @@ $('matrix-export-config').onclick=()=>{try{const payload=matrixPayload();delete 
 $('matrix-import').onclick=()=>$('matrix-file').click();$('matrix-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>2*1024*1024)throw new Error('配置文件不能超过 2 MiB');const value=JSON.parse((await file.text()).replace(/^\uFEFF/,''));if(!value?.spec||!Array.isArray(value.datasets||[])||!value.grid||Array.isArray(value.grid))throw new Error('请选择包含 spec、datasets、grid 的矩阵配置。');delete value.id;delete value.revision;openMatrix(value);inlineFeedback('matrix-feedback','已导入配置，请预览资源与组合，再保存启动。');}catch(error){notify('导入矩阵失败：'+error.message);}finally{event.target.value='';}};
 function markdownCell(value){return String(value??'—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\|/g,'\\|').replace(/[\r\n]+/g,' ');}
 $('export-markdown').onclick=()=>{const jobs=filteredJobs(),keys=[...new Set(jobs.flatMap(job=>Object.keys(job.metrics||{})))].filter(key=>!['step','time','attempt'].includes(key));const headers=['实验','算法','状态','节点',...keys],rows=jobs.map(job=>[job.spec.name,job.spec.algorithm,names[job.state]||job.state,job.node_id||'等待分配',...keys.map(key=>job.metrics?.[key])]);const text=['# 实验结果',`\n导出时间：${new Date().toLocaleString('zh-CN')}；共 ${jobs.length} 次实验。指标为最近一次回传值。\n`,'| '+headers.map(markdownCell).join(' | ')+' |','| '+headers.map(()=>'---').join(' | ')+' |',...rows.map(row=>'| '+row.map(markdownCell).join(' | ')+' |'),'\n## 实验参数\n',...jobs.map(job=>'### '+markdownCell(job.spec.name)+'\n\n```json\n'+JSON.stringify(job.spec.params,null,2).replace(/```/g,'\\u0060\\u0060\\u0060')+'\n```\n')].join('\n');downloadContent(text,'实验结果.md','text/markdown;charset=utf-8');};
-initializeRecordTools();initializeNodeTemplateTools();showView(location.hash.slice(1));refresh();setInterval(()=>{void refresh();if(token&&currentView==='matrices'){void loadMatrices();if(matrixResultId&&!$('matrix-result').hidden)void showMatrixResults(matrixResultId,false);}},5000);setInterval(updateTimers,1000);
+initializeRecordTools();initializeNodeTemplateTools();initializeProjectTools();showView(location.hash.slice(1));refresh();setInterval(()=>{void refresh();if(token&&currentView==='matrices'){void loadMatrices();if(matrixResultId&&!$('matrix-result').hidden)void showMatrixResults(matrixResultId,false);}},5000);setInterval(updateTimers,1000);

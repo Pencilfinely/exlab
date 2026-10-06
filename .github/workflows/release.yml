@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.5.6
+        default: v0.5.7
 permissions:
   contents: write
 env:
@@ -32,7 +32,9 @@ jobs:
       - run: node tests/test_resource_ui.js
       - run: node --check expman/static/records.js
       - run: node --check expman/static/templates.js
+      - run: node --check expman/static/projects.js
       - run: node tests/test_records_ui.js
+      - run: node tests/test_projects_ui.js
       - run: node --check expman/static/mobile/mobile.js
       - run: node --check expman/static/mobile/access.js
       - run: node tests/test_mobile_ui.js

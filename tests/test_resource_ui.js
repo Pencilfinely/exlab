@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../expman/static/app.js'), 'utf8');
+const projectsSource = fs.readFileSync(path.join(__dirname, '../expman/static/projects.js'), 'utf8');
 const clone = value => JSON.parse(JSON.stringify(value));
 function fragment(start, end) {
   const begin = source.indexOf(start), finish = source.indexOf(end, begin);
@@ -167,16 +168,17 @@ check('confirmation requires matching revisions and explicitly refers to the sav
   assert.doesNotMatch(env.$('node-resource-sync').textContent, /已确认/);
 });
 
-check('single-experiment submission uses resource overrides without editing the project template', async () => {
+check('single-experiment payload uses resource overrides without editing the project template', () => {
   const template = {name: 'Original', params: {seed: 1}, resources: {gpu_memory_mb: 6000, cpu: 2, ram_mb: 8192, exclusive: true}};
   const env = context({projectPresets: [{template}], requestId: () => 'request', applyScheduling() {}, readScheduling() {}, showView() {}, refresh: async () => {}});
   const original = clone(template); env.$('project-preset').value = '0'; env.$('project-run-name').value = 'Shared'; env.$('project-params').value = '{"seed":42}';
   env.renderTaskResources('project-resources', template.resources, () => {});
   change(env.$('project-resources').resourceInputs.exclusive, 'shared');
   change(env.$('project-resources').resourceInputs.gpu_memory_mb, 8000);
-  let submitted; env.api = async (_path, payload) => { submitted = payload; return {ids: ['job']}; };
-  env.load("$('project-run-form').onsubmit=", "$('spec').value='';");
-  await env.$('project-run-form').onsubmit({preventDefault() {}});
+  env.projectCurrentDraft = () => ({spec: template}); env.activeLibraryProject = () => ({});
+  const begin = projectsSource.indexOf('function readProjectRunDraft('), end = projectsSource.indexOf('async function submitProjectRun(', begin);
+  assert.ok(begin >= 0 && end > begin); vm.runInContext(projectsSource.slice(begin, end), env);
+  const submitted = env.readProjectRunDraft();
   assert.deepEqual(clone(submitted.spec.resources), {...original.resources, gpu_memory_mb: 8000, exclusive: false});
   assert.deepEqual(template, original);
 });

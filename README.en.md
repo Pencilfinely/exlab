@@ -7,7 +7,9 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.6. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.6 release notes](docs/RELEASE-0.5.6.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
+**Desktop version: 0.5.7. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.7 release notes](docs/RELEASE-0.5.7.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
+
+The algorithm library now supports search, deployment filters, bounded pagination and import timestamps. A five-step import opens node deployment when complete. Project dialogs provide experiment forms, allocation previews and matrix conversion, retaining inputs within the current page when switching presets or closing and reopening.
 
 Experiment and matrix lists now have bounded scrolling, pagination, creation and completion timestamps, and searchable colored labels. Worker templates open as forms for editing parameters, previewing allocation, submitting experiments, or creating matrices.
 
@@ -60,11 +62,11 @@ Workers initiate connections to the controller and need no inbound worker port.
 
 ### 3. Import and run an algorithm in the same window
 
-1. Open **Algorithm Projects → Import algorithm** and choose the original root folder. Select the discovered main.py or other supported original entry.
-2. Review fixed parameters, separate experiment presets, datasets, extra dependencies and resource budgets in the page. Add or edit presets without opening several JSON files.
-3. Review the selected-file preview and **publish to the project library**. This records a fixed version of the code, data and configuration; it does not start training.
-4. Select online workers on the project card and **deploy**. Workers automatically prepare code, data and the Docker environment. Wait for installation to succeed.
-5. Choose **Create experiment**, select a preset and edit parameters. Submit a short test first, then follow progress, logs, metrics and result files in **Experiments**.
+1. Open **Algorithm Projects → 导入文件夹 (Import folder)**, choose the original root folder and discover its entry and parameters. Select the original main.py or another supported entry.
+2. Review entry and parameters, data and environment, then metric collection. Add experiment presets and save a draft at any step.
+3. Review the summary and selected files in **检查与发布 (Review and publish)**, then add the immutable snapshot to the library.
+4. The deployment dialog opens immediately. Select workers and deploy; installation progress updates automatically while workers prepare code, data and the Docker environment.
+5. Switch to **创建实验 (Create experiment)**, select a preset and adjust parameters, resources, allocation and tags. Preview and submit a short test, or convert it into a matrix. Follow progress, logs, metrics and result files in **Experiments**.
 
 Experiment matrices combine datasets and parameter values: save the configuration, preview allocation, launch a batch, and export Markdown results. Allocation supports automatic selection, candidate/preferred workers, and a manually selected worker/GPU. Import forms include optional AI advice, and project removal cleans managed deployments while preserving original files. See the [workflow guide (Chinese)](docs/EXPERIMENT-MATRICES.zh-CN.md).
 

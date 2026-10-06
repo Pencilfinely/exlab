@@ -8,6 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, '../expman/static/app.js'), 
 const html = fs.readFileSync(path.join(__dirname, '../expman/static/index.html'), 'utf8');
 const recordsSource = fs.readFileSync(path.join(__dirname, '../expman/static/records.js'), 'utf8');
 const templatesSource = fs.readFileSync(path.join(__dirname, '../expman/static/templates.js'), 'utf8');
+const projectsSource = fs.readFileSync(path.join(__dirname, '../expman/static/projects.js'), 'utf8');
 
 function fragment(start, end) {
   const offset = source.indexOf(start), limit = source.indexOf(end, offset);
@@ -19,7 +20,7 @@ function element(tag = 'div', text) {
     tag, textContent: text === undefined ? '' : String(text), children: [], value: '',
     append(...children) { this.children.push(...children); },
     replaceChildren(...children) { this.children = children; },
-    setAttribute() {}, setCustomValidity(message) { this.validationMessage = message; },
+    classList: {toggle() {}}, setAttribute() {}, setCustomValidity(message) { this.validationMessage = message; },
     reportValidity() { this.reports = (this.reports || 0) + 1; return !this.validationMessage; },
     querySelectorAll() { return []; }, scrollIntoView() {},
   };
@@ -62,7 +63,7 @@ function check(name, callback) { checks.push([name, callback]); }
 check('all static element references exist and original clipboard controls remain', () => {
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
   assert.equal(new Set(ids).size, ids.length, 'HTML IDs must be unique');
-  for (const match of (source+recordsSource+templatesSource).matchAll(/\$\('([^']+)'\)/g)) {
+  for (const match of (source+recordsSource+templatesSource+projectsSource).matchAll(/\$\('([^']+)'\)/g)) {
     if (!match[1].endsWith('-')) assert.ok(ids.includes(match[1]), `Missing element ${match[1]}`);
   }
   for (const text of ['async function writeClipboardText(', 'async function copyDetailText(', "document.execCommand('copy')", "$('copy-live-log').dataset.copyAvailable", "$('copy-detail-state').onclick"]) {
@@ -84,7 +85,7 @@ check('the complete application initializes without runtime errors before login'
     navigator: {}, window: {addEventListener() {}}, URLSearchParams,
     setInterval() {}, requestAnimationFrame() {},
   });
-  vm.runInContext(recordsSource+templatesSource+source, context);
+  vm.runInContext(recordsSource+templatesSource+projectsSource+source, context);
 });
 
 check('text and multiline inputs update immediately with silent input validation', () => {
