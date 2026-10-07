@@ -17,7 +17,7 @@ from tests.test_core import gpu_task, snapshot
 
 
 SPEC = {"name": "base", "backend": "demo", "params": {"steps": 2, "delay": 0}}
-SNAPSHOT = {"allow_demo": True, "policy": {"max_prefetch": 32}, "tags": [], "assets": []}
+SNAPSHOT = {"allow_demo": True, "policy": {"max_prefetch": 32}, "tags": [], "assets": [], "capabilities": ["experiment-results-v1"]}
 
 
 class AllocationTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class AllocationTests(unittest.TestCase):
         task["scheduling"] = {"mode": "manual", "node_ids": ["a"], "gpu_uuids": ["GPU-2"]}
         task = validate_task(task)
         self.assertFalse(eligible(task, snap))  # Old workers cannot enforce it.
-        snap["capabilities"] = ["scheduler-v2"]
+        snap["capabilities"] = ["scheduler-v2", "experiment-results-v1"]
         self.assertTrue(eligible(task, snap))
         self.assertEqual(select_device(task, snap, [])["gpu_uuid"], "GPU-2")
         snap["gpus"][1]["free_mb"] = 0
@@ -83,6 +83,7 @@ class AllocationTests(unittest.TestCase):
         task["resources"]["ram_mb"] = 2048
         task["tags"].append("user-required")
         nodes[0]["mode"] = "drain"
+        nodes[0]["snapshot"]["capabilities"] = []  # Old source metadata is still required to rebind a new destination.
         before = copy.deepcopy(task)
         choice = choose_assignment(task, nodes, {})
         self.assertEqual(choice["node_id"], "b")

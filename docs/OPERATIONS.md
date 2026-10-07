@@ -2,7 +2,7 @@
 
 [简体中文](OPERATIONS.zh-CN.md) · [Back to installation](../README.en.md)
 
-This guide covers the **0.5.6 desktop release**. Start ordinary work through Experiment Center and Experiment Worker. Older terminal entries remain for compatibility and diagnosis. For mobile access, update the controller and follow the [mobile guide](../mobile/README.md).
+This guide covers the desktop code in this repository. Start ordinary work through ExLab Center and ExLab Worker. Older terminal entries remain for compatibility and diagnosis. For mobile access, update the controller and follow the [mobile guide](../mobile/README.md).
 
 ## Enable a previously disabled GPU
 
@@ -98,13 +98,15 @@ Available in Experiment Center and Experiment Worker from **0.3.0-rc.2**. Each a
 **Workers may be updated before Center in a multi-computer deployment.** From 0.4.2, Center is not blocked solely by disconnected nodes without unfinished work or by missing fresh snapshots. Active experiments, unacknowledged commands and registered pending transfers still block installation. If a running older Center is blocked only by disconnected nodes, stop that old management service and manually install the new version using the original data directory.
 
 1. Open the application's status window or tray menu and choose **Check for updates**. The update window shows your current version, the available version and its release notes.
-2. Choose to download the update. The application retrieves the same-role Windows `Setup.exe` from [this project's GitHub Releases](https://github.com/Pencilfinely/exlab/releases) and verifies its published size and SHA-256. A failed check prevents installation; retry the download or use the manual procedure below.
+2. Choose **Download update** to download only, or **Download and queue installation**. The application retrieves the same-role Windows `Setup.exe` from [this project's GitHub Releases](https://github.com/Pencilfinely/exlab/releases) and verifies its published size and SHA-256.
 3. You can leave the downloaded installer staged while work continues. Before installing, pause accepting work, finish experiments and pending uploads, and back up your data directories.
-4. Choose to install the downloaded update. The application checks for work that prevents a safe stop. If it reports busy or cannot establish that stopping is safe, finish the reported work and retry later.
-5. Once the service/agent has stopped safely, the old client exits and the downloaded installer opens. Follow the installer to complete the upgrade. The saved controller data-directory selection, Windows Ubuntu distribution, node configuration and login-startup preference are retained. A worker agent that was running restarts after the update; one that was stopped remains stopped.
+4. Queue installation once. It waits for client operations, experiments and pending uploads to finish, without requiring repeated clicks. Closing the update view keeps the queue; restarting the client restores it. Errors retry with backoff. Cancel pending work from the update view before installation handoff.
+5. Once the service/agent has stopped safely, the old client exits, the installer completes the upgrade automatically and launches the new client. Data-directory selection, Windows Ubuntu distribution, node configuration and preferences are retained. A running worker resumes after updating; a stopped worker follows the optional compute startup preference.
 6. Open the updated application, verify its version, experiment history and worker identity, then resume accepting work.
 
-Updates require your action; checking or downloading alone does not install anything. Preview builds accept newer preview and stable releases; stable builds accept stable releases only. The release metadata and installers must be reachable from the computer through GitHub. SHA-256 detects a download that differs from the published checksum; installers are not code-signed.
+Both automation preferences default to off. **Automatically enable compute after starting the client** is separate from Windows login startup: it prepares Docker and starts the existing worker when the client next opens. Manual deactivation lasts for the current session. **Automatically check, download and queue updates** checks on startup and hourly thereafter, downloads and waits for safe installation. Disabling it cancels pending automatic requests while retaining manual ones. Checking or downloading alone does not install when automatic updates are off. Queued installation does not stop active experiments or change acceptance mode.
+
+Successful installation schedules deletion of that standard-named installer after its process exits, with identity, size and SHA-256 checks. Failed installations retain the package; locked files retry later. Other downloads and experiment data are retained. Preview builds accept newer preview and stable releases; stable builds accept stable releases only. The release metadata and installers must be reachable from the computer through GitHub. SHA-256 detects a download that differs from the published checksum; installers are not code-signed.
 
 ### First upgrade from an older version, Ubuntu and manual installation
 
@@ -146,5 +148,5 @@ Replacing/removing application files and deleting experiment data are separate a
 | No Check for updates entry | Install 0.3.0-rc.2 or later manually; Ubuntu workers use the package/script procedure |
 | Update check or download fails | Check access to GitHub Releases and try again; manual same-role installation remains available |
 | Update size or checksum does not match | Do not run that download; retry and use the checksum published with the intended release |
-| Update is downloaded but installation is blocked | Finish active work and pending uploads, then retry; check the application logs if service state cannot be verified |
+| Update is downloaded but installation is blocked | Queue it once; it waits for active work and pending uploads. Check the queue reason and logs if service state cannot be verified |
 | Center cannot confirm a worker is idle | Check active experiments and pending transfers. If an older Center is blocked only by disconnected nodes, stop its service and manually install 0.4.2 or newer using the original data directory |

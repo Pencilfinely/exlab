@@ -43,6 +43,8 @@ jobs:
       - run: node tests/test_timing_ui.js
       - run: node tests/test_matrix_ui.js
       - run: node tests/test_resource_ui.js
+      - run: node --check expman/static/delivery.js
+      - run: node tests/test_delivery_ui.js
       - run: node tests/test_records_ui.js
       - run: node tests/test_projects_ui.js
       - run: node --check expman/static/mobile/mobile.js

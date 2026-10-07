@@ -162,6 +162,8 @@ def choose_assignment(task, nodes, counts):
         if allowed and node["id"] not in allowed:
             continue
         snapshot = node.get("snapshot", {})
+        if task.get("result_delivery", {}).get("mode") == "lightweight" and "experiment-results-v1" not in snapshot.get("capabilities", []):
+            continue
         if timestamp - node.get("last_seen", 0) > 45 or node.get("mode", "run") != "run":
             continue
         bound = _bind_project(task, snapshot, original)

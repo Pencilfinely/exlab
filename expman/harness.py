@@ -95,6 +95,21 @@ def validate_manifest(value):
             raise ValueError("Metric value refers to an absent regex capture group")
     for path in value.setdefault("artifacts", []):
         _relative(path, "artifact glob", glob=True)
+    results = value.setdefault("result_files", [])
+    if not isinstance(results, list) or len(results) > 1000:
+        raise ValueError("result_files must list explicit experiment JSON files")
+    result_ids, result_paths = set(), set()
+    for item in results:
+        if not isinstance(item, dict) or set(item) - {"experiment_id", "path"}:
+            raise ValueError("result_files entries require experiment_id and path")
+        identity = item.get("experiment_id")
+        if not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", identity):
+            raise ValueError("Invalid result experiment_id")
+        _relative(item.get("path"), "result file")
+        if identity in result_ids or item["path"] in result_paths or not item["path"].endswith(".json"):
+            raise ValueError("Result IDs and explicit JSON files must be unique")
+        result_ids.add(identity)
+        result_paths.add(item["path"])
     resume = value.setdefault("resume", {"supported": False})
     if not isinstance(resume, dict) or not isinstance(resume.get("supported", False), bool):
         raise ValueError("resume.supported must be a boolean")
@@ -420,6 +435,42 @@ def execute(manifest, source, run=None):
         {"command": command, "cwd": str(cwd), "parameters": params, "resuming": run.resuming,
          "resume_supported": resume.get("supported", False)}, ensure_ascii=False, indent=2), encoding="utf-8")
     metrics = _Metrics(manifest, run)
+    published_results = set()
+
+    def publish_results(final=False):
+        def failed(identity, path, message):
+            run.publish_result(identity, {"status": "failed", "failure_stage": "result_registration", "error": message,
+                "evidence": [{"path": path.relative_to(run.output).as_posix(), "kind": "invalid-result-source", "size": path.stat().st_size}],
+                "execution": {"status": "failed", "exit_code": returncode,
+                    "stages": {"training": {"status": "unknown", "exit_code": None}, "test": {"status": "unknown", "exit_code": None}}}})
+        for item in manifest["result_files"]:
+            identity = item["experiment_id"]
+            if identity in published_results:
+                continue
+            path = _safe_path(workspace, item["path"])
+            if path.is_file():
+                if path.stat().st_size > 1024 * 1024:
+                    if final:
+                        failed(identity, path, "Result exceeds 1 MiB; original file retained as evidence, no rerun")
+                    continue
+                try:
+                    with path.open(encoding="utf-8-sig") as stream:
+                        result = json.load(stream)
+                    result = copy.deepcopy(result)
+                    for evidence in result.get("evidence", []):
+                        evidence["path"] = (workspace.relative_to(run.output) / evidence["path"]).as_posix()
+                    run.publish_result(identity, result)
+                    published_results.add(identity)
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    if final:
+                        metrics.warnings.append("Cannot register result " + identity + ": " + str(error))
+                        failed(identity, path, "Cannot register result: " + str(error))
+            elif final:
+                run.publish_result(identity, {"status": "failed", "failure_stage": "result_generation",
+                    "error": "Declared result file missing: " + item["path"],
+                    "execution": {"status": "failed", "exit_code": returncode,
+                        "stages": {"training": {"status": "unknown", "exit_code": None},
+                                   "test": {"status": "not_run", "exit_code": None}}}})
     events = queue.Queue(maxsize=64)
     canceled = threading.Event()
     for name in ("stdout.log", "stderr.log"):
@@ -473,6 +524,7 @@ def execute(manifest, source, run=None):
             now = time.monotonic()
             if now - last_file_poll >= 0.25:
                 metrics.poll_files()
+                publish_results()
                 last_file_poll = now
             if process.poll() is not None and child_exited_at is None:
                 child_exited_at = now
@@ -523,6 +575,7 @@ def execute(manifest, source, run=None):
         for thread in threads:
             thread.join(timeout=2)
     metrics.poll_files(final=True)
+    publish_results(final=True)
     artifacts = []
     for pattern in manifest["artifacts"]:
         for path in _matches(workspace, pattern):

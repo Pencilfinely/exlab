@@ -145,6 +145,8 @@ def validate_task(spec):
     environments = result.setdefault("environments", [])
     command = result.setdefault("command", [])
     result.setdefault("source", None)
+    from .result_protocol import delivery_config
+    result["result_delivery"] = delivery_config(result.get("result_delivery"), result.get("experiment_id", "default"))
     if backend == "docker":
         source = result["source"]
         if not isinstance(source, dict) or not isinstance(source.get("repo"), str):

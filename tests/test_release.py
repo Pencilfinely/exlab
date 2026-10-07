@@ -88,7 +88,10 @@ class EnrollmentHTTPTests(unittest.TestCase):
         pairing = self.request('/api/enroll', admin, payload)
         self.assertNotIn(admin, json.dumps(pairing))
         self.assertEqual(self.request('/api/enroll', admin, payload), pairing)
-        self.assertEqual(self.request('/api/node-info', pairing['token']), {'node_id': 'new-worker', 'paired': True})
+        info = self.request('/api/node-info', pairing['token'])
+        self.assertEqual((info['node_id'], info['paired']), ('new-worker', True))
+        self.assertIn('experiment-results-v1', info['capabilities'])
+        self.assertIn('hub_version', info)
         with self.assertRaises(urllib.error.HTTPError) as failed:
             self.request('/api/enroll', pairing['token'], dict(payload, node_id='other'))
         self.assertEqual(failed.exception.code, 403)
@@ -315,6 +318,10 @@ class ReleaseArchiveTests(unittest.TestCase):
         files = build_release.application_files()
         self.assertIn('README.zh-CN.md', files)
         self.assertIn('expman/launcher.py', files)
+        for name in ('expman/result_delivery.py', 'expman/result_hub.py', 'expman/result_protocol.py',
+                     'expman/transfer_tool.py', 'expman/static/delivery.js', 'examples/lightweight-batch.py',
+                     'docs/LIGHTWEIGHT-RESULTS.zh-CN.md', 'docs/LIGHTWEIGHT-RESULTS-VALIDATION.zh-CN.md'):
+            self.assertIn(name, files)
         self.assertEqual(files['expman/static/favicon.ico'], build_desktop.ICONS['controller'].read_bytes())
         self.assertFalse(any('.runtime' in name or '验证报告' in name or name.endswith('.pairing.json') for name in files))
         for data in files.values():

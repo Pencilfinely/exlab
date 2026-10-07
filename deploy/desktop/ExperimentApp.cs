@@ -76,7 +76,8 @@ namespace ExperimentManagerDesktop {
         internal static string ShortcutName { get { return Title+".lnk"; } }
         internal static string LegacyShortcutName { get { return Worker ? "实验算力.lnk" : "实验台.lnk"; } }
         internal static string Executable { get { return Worker ? "ExLabWorker.exe" : "ExLabCenter.exe"; } }
-        internal static string SettingsRoot { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ExperimentManager", "desktop", Role); } }
+        internal static string SettingsDirectory=null;
+        internal static string SettingsRoot { get { return SettingsDirectory??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ExperimentManager", "desktop", Role); } }
         internal static string SettingsFile { get { return Path.Combine(SettingsRoot, "settings.json"); } }
         internal static string InstanceKey {get{return "Local\\ExperimentManager-"+Role+"-"+(Environment.UserDomainName+"-"+Environment.UserName).Replace('\\','-');}}
         internal static string Arg(string[] args, string key) { for (int i=0; i<args.Length-1; i++) if(args[i]==key) return args[i+1]; return null; }
@@ -99,6 +100,35 @@ namespace ExperimentManagerDesktop {
             try { Write(Path.Combine(SettingsRoot,"last-update.json"),new {
                 time=DateTime.UtcNow.ToString("o"),role=Role,version=Version,stage=stage,status=status,detail=detail }); }
             catch(IOException) { } catch(UnauthorizedAccessException) { }
+        }
+        internal static bool CleanupInstalledPackage() {
+            string receipt=Path.Combine(SettingsRoot,"installer-cleanup.json");
+            using(var guard=new Mutex(false,InstanceKey+"-InstallerCleanup")) {
+                bool acquired;
+                try {acquired=guard.WaitOne(0);}catch(AbandonedMutexException){acquired=true;}
+                if(!acquired)return false;
+                try {
+                    if(!File.Exists(receipt))return true;
+                    var request=Json.Deserialize<InstallerCleanupRequest>(File.ReadAllText(receipt,Encoding.UTF8));
+                    if(!InstallerCleanup.TryDelete(request,Assembly.GetExecutingAssembly().Location,InstallerCleanup.ProcessAlive))return false;
+                    File.Delete(receipt);UpdateReport("installer_cleanup","completed");return true;
+                } finally {guard.ReleaseMutex();}
+            }
+        }
+        internal static void ScheduleInstallerCleanup(string destination) {
+            try {
+                using(var self=Process.GetCurrentProcess()) {
+                    var request=InstallerCleanup.Record(Assembly.GetExecutingAssembly().Location,Version,Worker,
+                        self.Id,self.StartTime.ToUniversalTime().Ticks);
+                    InstallerCleanup.Validate(request,Path.Combine(destination,Executable));
+                    Write(Path.Combine(SettingsRoot,"installer-cleanup.json"),request);
+                }
+                // The installed client can delete the original EXE only after
+                // Windows releases the installer's executable mapping.
+                var cleanup=Process.Start(new ProcessStartInfo(Path.Combine(destination,Executable),"--cleanup-installer") {
+                    WorkingDirectory=destination,UseShellExecute=false,CreateNoWindow=true });
+                if(cleanup!=null)cleanup.Dispose();
+            } catch(Exception ex) {UpdateReport("installer_cleanup","pending",ex.Message);}
         }
         internal static string Quote(string value) {
             // WSL parses leading options itself: leave simple flags unquoted.
@@ -205,6 +235,15 @@ namespace ExperimentManagerDesktop {
                     if(role!=null) using(var reader=new StreamReader(role)) Worker=reader.ReadToEnd().Trim()=="worker";
                     else Worker=File.ReadAllText(Path.Combine(Package,"release-role.json")).Contains("worker");
                 }
+                if(Has(args,"--cleanup-installer")) {
+                    var until=DateTime.UtcNow.AddMinutes(5);
+                    while(DateTime.UtcNow<until) {
+                        try {if(CleanupInstalledPackage())return;}
+                        catch(IOException) { } catch(UnauthorizedAccessException) { }
+                        Thread.Sleep(1000);
+                    }
+                    UpdateReport("installer_cleanup","pending","安装包仍被占用，下次启动客户端后继续清理。 ");return;
+                }
                 if(Has(args,"--self-test")) {
                     // .NET Framework selects at most 128 px from this multi-size
                     // ICO; the 256 px frame remains available to Windows Explorer.
@@ -231,6 +270,7 @@ namespace ExperimentManagerDesktop {
                         startup=startup||DesktopRuntime.AutoStart;
                         string installed=InstallerForm.Install(dataRoot,Arg(args,"--pairing"),Has(args,"--desktop"),startup);
                         Write(Arg(args,"--report")??Path.Combine(SettingsRoot,"install-report.json"),new {status="installed",role=Role,path=installed});
+                        ScheduleInstallerCleanup(installed);
                     } else using(var form=new InstallerForm(args)) Application.Run(form);
                     return;
                 }
@@ -243,7 +283,7 @@ namespace ExperimentManagerDesktop {
                         monitor.IsBackground=true; monitor.Start(); Application.Run(form); show.Set();
                     }
                 }
-            } catch(Exception ex) { if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,Title,MessageBoxButtons.OK,MessageBoxIcon.Error); }
+            } catch(Exception ex) { if(Has(args,"--cleanup-installer")){UpdateReport("installer_cleanup","pending",ex.Message);Environment.ExitCode=1;return;} if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,Title,MessageBoxButtons.OK,MessageBoxIcon.Error); }
         }
     }
 
@@ -284,10 +324,11 @@ namespace ExperimentManagerDesktop {
                     string destination=await Task.Run(()=>Install(dataPath,credential,makeDesktop,autoStart));
                     stage="starting_client";
                     App.UpdateReport(stage,"running",destination);
-                    string startArgs="--after-update"+(App.Worker&&App.Has(args,"--resume-service")?" --background":"");
+                    string startArgs="--after-update"+(App.Worker&&App.Has(args,"--resume-service")?" --background --resume-service":"");
                     var launched=Process.Start(new ProcessStartInfo(Path.Combine(destination,App.Executable),startArgs){WorkingDirectory=destination,UseShellExecute=true});
                     if(launched==null)throw new Exception("新客户端未能启动，请从开始菜单打开客户端。");
                     launched.Dispose();
+                    await Task.Run(()=>App.ScheduleInstallerCleanup(destination));
                     installing=false;Close();
                 } catch(Exception ex) { App.UpdateReport(stage,"failed",ex.Message);status.Text=ex.Message; installing=false;install.Enabled=true; }
             };
@@ -395,7 +436,16 @@ namespace ExperimentManagerDesktop {
         bool startingAfterUpdate;
         bool deactivated;
         CheckBox startup=new CheckBox { Text="登录 Windows 后启动",AutoSize=true };
+        CheckBox autoEnableCompute=new CheckBox { Text="启动客户端后自动启用算力",AutoSize=true };
+        CheckBox autoUpdate=new CheckBox { Text="自动检查、下载并排队安装更新",AutoSize=true };
         CheckBox releaseResources=new CheckBox { Text="退出客户端时自动释放空闲的 Docker 与 WSL",AutoSize=true };
+        Label updateStatus=new Label { AutoSize=true,MaximumSize=new Size(810,0) };
+        internal DesktopUpdateQueue UpdateQueue;
+        internal UpdateRelease AvailableUpdate;
+        internal event Action UpdatesChanged;
+        bool checkingUpdates,pumpingUpdates;
+        DateTime nextAutoCheck=DateTime.MinValue,nextCleanup=DateTime.MinValue;
+        internal string UpdateDetail="";
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
         TextBox data=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
@@ -406,12 +456,21 @@ namespace ExperimentManagerDesktop {
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=5000 };
         internal ClientForm(string[] args) {
             settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
+            UpdateQueueState restored=null;
+            string queueFile=Path.Combine(App.SettingsRoot,"update-queue.json");
+            try {if(File.Exists(queueFile))restored=App.Json.Deserialize<UpdateQueueState>(File.ReadAllText(queueFile,Encoding.UTF8));}
+            catch(Exception ex) {UpdateDetail="更新队列读取失败："+ex.Message;}
+            try {
+                UpdateQueue=new DesktopUpdateQueue(restored,App.Version,state=>App.Write(queueFile,state));
+                if(restored!=null)App.Write(queueFile,UpdateQueue.State);
+            } catch(Exception ex) {UpdateDetail="更新队列读取失败："+ex.Message;UpdateQueue=new DesktopUpdateQueue(null,App.Version,state=>App.Write(queueFile,state));}
+            UpdateQueue.Changed+=NotifyUpdates;
             deactivated=App.Flag(settings,"deactivated");
             startingAfterUpdate=App.Has(args,"--after-update");
             string supplied=App.Arg(args,"--data-root"); if(supplied!=null) { settings["data_root"]=Path.GetFullPath(supplied); App.Write(App.SettingsFile,settings); }
             Text=App.Title; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.FromArgb(246,248,251);
-            var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=6 };
+            var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.Controls.Add(new Label { Text=App.Title,Font=new Font(Font.FontFamily,21,FontStyle.Bold),AutoSize=true });
             layout.Controls.Add(summary);
@@ -441,11 +500,21 @@ namespace ExperimentManagerDesktop {
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
             var preferences=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
             startup.Checked=DesktopRuntime.AutoStart;startup.CheckedChanged+=(s,e)=>{try{DesktopRuntime.AutoStart=startup.Checked;}catch(Exception ex){summary.Text=ex.Message;}};
+            autoEnableCompute.Checked=App.Flag(settings,"auto_enable_compute");
+            autoEnableCompute.CheckedChanged+=(s,e)=>SavePreference("auto_enable_compute",autoEnableCompute.Checked);
+            autoUpdate.Checked=App.Flag(settings,"auto_update");
+            autoUpdate.CheckedChanged+=(s,e)=>{
+                SavePreference("auto_update",autoUpdate.Checked);nextAutoCheck=DateTime.MinValue;
+                if(autoUpdate.Checked&&UpdateQueue.Active&&!UpdateQueue.State.InstallRequested)
+                    UpdateQueue.Enqueue(UpdateQueue.State.Release,true,true);
+                if(!autoUpdate.Checked&&UpdateQueue.State.Automatic&&UpdateQueue.CanCancel)UpdateQueue.Cancel();
+            };
             releaseResources.Checked=!settings.ContainsKey("release_resources")||App.Flag(settings,"release_resources");
             releaseResources.CheckedChanged+=(s,e)=>{settings["release_resources"]=releaseResources.Checked;App.Write(App.SettingsFile,settings);};
-            preferences.Controls.Add(startup);if(App.Worker)preferences.Controls.Add(releaseResources);
+            preferences.Controls.Add(startup);if(App.Worker)preferences.Controls.Add(autoEnableCompute);
+            preferences.Controls.Add(autoUpdate);if(App.Worker)preferences.Controls.Add(releaseResources);
             layout.Controls.Add(preferences);
-            layout.Controls.Add(log); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
+            layout.Controls.Add(updateStatus);layout.Controls.Add(log); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
             Controls.Add(layout);
             tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
@@ -453,7 +522,7 @@ namespace ExperimentManagerDesktop {
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
-            timer.Tick+=(s,e)=>{tray.Icon=trayIcons.TrayIcon;RefreshState();};
+            timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpUpdates();if(!exiting)RefreshState();};
             Shown+=async (s,e)=> {
                 if(startingAfterUpdate)App.UpdateReport("client_start","launched");
                 if(App.Worker) {
@@ -463,9 +532,11 @@ namespace ExperimentManagerDesktop {
                         if(distro.Items.Count==0) throw new Exception("请先安装 WSL2 和 Ubuntu，并在 Ubuntu 中创建普通用户。");
                         string chosen=App.Text(settings,"distribution"); distro.SelectedItem=chosen; if(distro.SelectedIndex<0) distro.SelectedIndex=0;
                     });
-                    if(background&&!deactivated) { StartWorker(); Hide(); } else RefreshState();
+                    if(DesktopLifecycle.ShouldEnableCompute(settings,App.Worker,App.Has(args,"--resume-service")))await StartWorkerAsync(autoEnableCompute.Checked);
+                    else RefreshState();
+                    if(background)Hide();
                 } else if(deactivated)DisplayInactive();else if(background) { await Execute(async()=>{await Controller("controller-start");Hide();}); } else OpenController();
-                timer.Start();
+                timer.Start();NotifyUpdates();await PumpUpdates();
             };
             ResumeLayout(true);
         }
@@ -512,9 +583,52 @@ namespace ExperimentManagerDesktop {
         }
         void CheckUpdates(){
             if(updateDialog!=null){updateDialog.Activate();return;}
-            if(busy){MessageBox.Show("当前操作完成后再检查更新。",App.Title);return;}
             try {using(var dialog=new UpdateForm(this)){updateDialog=dialog;dialog.ShowDialog(this);}}
             finally {updateDialog=null;}
+        }
+        void SavePreference(string name,bool value) {
+            try {settings[name]=value;App.Write(App.SettingsFile,settings);}
+            catch(Exception ex) {summary.Text="设置保存失败："+ex.Message;}
+        }
+        void NotifyUpdates() {
+            if(IsDisposed)return;
+            if(InvokeRequired){BeginInvoke((Action)NotifyUpdates);return;}
+            updateStatus.Text=UpdateQueue.Active||String.IsNullOrEmpty(UpdateDetail)?UpdateQueue.State.Detail:UpdateDetail;
+            if(UpdateQueue.State.Stage=="downloading")updateStatus.Text+=string.Format(" {0:0.0} / {1:0.0} MiB",UpdateQueue.State.Bytes/1048576.0,UpdateQueue.State.Total/1048576.0);
+            if(UpdateQueue.State.Stage=="retry")updateStatus.Text+=" 下次重试："+UpdateQueue.State.NextAttemptUtc.ToLocalTime().ToString("HH:mm:ss");
+            if(UpdatesChanged!=null)UpdatesChanged();
+        }
+        internal async Task CheckForUpdates(bool automatic=false) {
+            if(checkingUpdates)return;checkingUpdates=true;UpdateDetail="正在检查更新…";NotifyUpdates();
+            try {
+                AvailableUpdate=await Task.Run(()=>UpdateService.Check(App.Version,App.Worker));
+                UpdateDetail=AvailableUpdate==null?"已是当前渠道的最新版本。":"发现新版本："+AvailableUpdate.Version;
+                if(automatic&&autoUpdate.Checked&&AvailableUpdate!=null&&!UpdateQueue.Active)UpdateQueue.Enqueue(AvailableUpdate,true,true);
+                nextAutoCheck=DateTime.UtcNow.AddHours(1);
+            } catch(Exception ex) {UpdateDetail="检查更新失败，将稍后重试："+ex.Message;nextAutoCheck=DateTime.UtcNow.AddMinutes(5);}
+            finally {checkingUpdates=false;NotifyUpdates();}
+        }
+        internal void QueueUpdate(bool install) {
+            UpdateQueue.Enqueue(UpdateQueue.State.Release??AvailableUpdate,install,false);NotifyUpdates();
+        }
+        async Task PumpUpdates() {
+            if(pumpingUpdates||exiting)return;pumpingUpdates=true;
+            try {
+                if(DateTime.UtcNow>=nextCleanup) {
+                    nextCleanup=DateTime.UtcNow.AddSeconds(30);
+                    try {await Task.Run(()=>App.CleanupInstalledPackage());}
+                    catch(Exception ex) {UpdateDetail="安装包清理待重试："+ex.Message;NotifyUpdates();}
+                }
+                if(autoUpdate.Checked&&UpdateQueue.Active&&!UpdateQueue.State.InstallRequested)
+                    UpdateQueue.Enqueue(UpdateQueue.State.Release,true,true);
+                if(autoUpdate.Checked&&!UpdateQueue.Active&&DateTime.UtcNow>=nextAutoCheck)await CheckForUpdates(true);
+                await UpdateQueue.Tick(DateTime.UtcNow,busy,
+                    (release,progress,token)=>Task.Run(()=>UpdateService.Download(release,Path.Combine(App.SettingsRoot,"updates"),progress,token)),
+                    ()=>App.Worker?WorkerCommand("update-status"):Controller("controller-update-status"),InstallUpdate,
+                    (release,path)=>Task.Run(()=>UpdateService.ValidateDownloaded(release,path)));
+                if(UpdateQueue.State.Stage=="handoff")FinishUpdateExit();
+            } catch(Exception ex) {UpdateDetail="更新队列等待重试："+ex.Message;NotifyUpdates();}
+            finally {pumpingUpdates=false;}
         }
         internal async Task InstallUpdate(UpdateRelease release,string installer) {
             if(busy)throw new Exception("当前操作尚未完成，请稍后安装。");
@@ -569,7 +683,7 @@ namespace ExperimentManagerDesktop {
                 busy=false;timer.Start();throw new Exception(failure.Message+recovery,failure);
             }
         }
-        internal void FinishUpdateExit(){exiting=true;Close();}
+        internal void FinishUpdateExit(){exiting=true;if(updateDialog!=null)updateDialog.Close();Close();}
         internal void OpenFromTray(){if(App.Worker)ShowStatus();else OpenController();}
         async Task<Dictionary<string,object>> Controller(string action) {
             string root=data.Text; var value=await Task.Run(()=>App.Command(Path.Combine(App.Package,"runtime","python.exe"),"-m","expman.desktop",action,"--root",root));
@@ -601,7 +715,8 @@ namespace ExperimentManagerDesktop {
             });
         }
         async void RefreshState(){if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
-        async void StartWorker(){await Execute(async()=>{if(!await EnsureDocker())return;deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);summary.Text="正在准备算力…";Display(await WorkerCommand("install"));});}
+        async void StartWorker(){await StartWorkerAsync(false);}
+        async Task StartWorkerAsync(bool automatic){await Execute(async()=>{if(!await EnsureDocker(automatic))return;deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);summary.Text="正在准备算力…";Display(await WorkerCommand("install"));});}
         async void OpenGpuSettings(){await Execute(async()=>{
             using(var form=new WorkerGpuForm((action,options)=>WorkerCommand(action,options))) form.ShowDialog(this);
             Display(await WorkerCommand("status"));
@@ -649,10 +764,10 @@ namespace ExperimentManagerDesktop {
                 string path=Path.Combine(App.SettingsRoot,"clipboard.pairing.json");App.Write(path,value);pairing.Text=path;settings["pairing_file"]=path;App.Write(App.SettingsFile,settings);summary.Text="连接凭证已导入，点击“启用算力”。";
             }catch(Exception ex){summary.Text="粘贴失败："+ex.Message;}
         }
-        async Task<bool> EnsureDocker(){
+        async Task<bool> EnsureDocker(bool automatic=false){
             var state=await WorkerCommand("runtime-status");if(App.Flag(state,"docker_ready"))return true;
-            if(background){summary.Text="Docker 未就绪。打开算力客户端并点击“启用算力”以启动 Docker。";Show();return false;}
-            if(MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return false;
+            if(background&&!automatic){summary.Text="Docker 未就绪。打开算力客户端并点击“启用算力”以启动 Docker。";Show();return false;}
+            if(!automatic&&MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return false;
             summary.Text="正在启动 Docker Desktop…";await DesktopRuntime.StartDocker();var watch=Stopwatch.StartNew();
             while(watch.Elapsed<TimeSpan.FromMinutes(2)){await Task.Delay(2000);state=await WorkerCommand("runtime-status");if(App.Flag(state,"docker_ready"))return true;}
             throw new Exception("Docker 尚未就绪。请检查 Docker Desktop 的 Linux containers、所选 Ubuntu 的 WSL 集成，以及本机 Docker context。然后重试。");

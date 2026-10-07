@@ -102,9 +102,13 @@ class MatrixHubMixin:
         return row
 
     def _matrix_jobs(self, identity):
-        return [self._job(row) for row in self.db.execute(
+        jobs = [self._job(row) for row in self.db.execute(
             "SELECT j.* FROM jobs j JOIN matrix_jobs mj ON j.id=mj.job_id "
             "JOIN matrix_runs mr ON mr.id=mj.run_id WHERE mr.matrix_id=? ORDER BY mr.created,mj.ordinal", (identity,))]
+        for job in jobs:
+            job["result_verification"] = {row["experiment_id"]: row["independent"] for row in self.db.execute(
+                "SELECT experiment_id,independent FROM experiment_results WHERE job_id=? AND attempt=?", (job["id"], max(1, job["attempt"])))}
+        return jobs
 
     def _matrix_public(self, row, full=False):
         definition = json.loads(row["definition"])
@@ -332,8 +336,9 @@ def render_report(matrix):
              f"- 配置版本：{matrix['revision']}；启动批次：{len(matrix['runs'])}；实验数：{len(jobs)}",
              "- 状态统计：" + ("，".join(f"{key}: {value}" for key, value in sorted(matrix["states"].items())) or "尚未启动"),
              "", "结果使用每次实验最新回传的指标；缺失值显示为 —。运行中和失败实验的指标不代表最终结果，不跨指标协议排名或求平均。", "",
+             "回传完成与本机独立验收分别记录；待验收或隔离结果仅供查看，不能当作已验收结果。", "",
              "## 实验结果", ""]
-    headers = ["实验 ID", "批次 / 版本", "数据集", "算法", "指标协议", "状态", "节点", "运行秒数"] + keys
+    headers = ["实验 ID", "批次 / 版本", "数据集", "算法", "指标协议", "状态", "独立验收", "节点", "运行秒数"] + keys
     lines += ["| " + " | ".join(map(_cell, headers)) + " |", "| " + " | ".join("---" for _ in headers) + " |"]
     for job, values in zip(jobs, metrics):
         spec = job["spec"]
@@ -347,7 +352,7 @@ def render_report(matrix):
                 duration += "（计时记录不完整）"
         cells = [job["id"], spec.get("matrix_run_id", "") + " / " + str(spec.get("matrix_revision", "")),
                  spec.get("dataset_name"), spec.get("algorithm"), spec.get("metric_protocol"),
-                 job["state"], job.get("node_id"), duration] + [values.get(key) for key in keys]
+                 job["state"], job.get("result_verification") or "尚无结果协议记录", job.get("node_id"), duration] + [values.get(key) for key in keys]
         lines.append("| " + " | ".join(map(_cell, cells)) + " |")
     lines += ["", "## 参数与运行记录", ""]
     for job in jobs:

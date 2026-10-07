@@ -67,11 +67,127 @@ static class UpdateTests {
             AssetUrl = download + name, ChecksumUrl = download + "SHA256SUMS.txt", Size = bytes.Length, Sha256 = Hash(bytes) };
     }
     static void NoPartials(string root) { Assert(Directory.GetFiles(root, "*.part").Length == 0, "A partial download was left behind."); }
+    static async Task QueueTests(string root) {
+        var settings=new Dictionary<string,object>();
+        Assert(!DesktopLifecycle.ShouldEnableCompute(settings,true,false),"Startup enabled compute without opting in.");
+        settings["auto_enable_compute"]=true;
+        Assert(DesktopLifecycle.ShouldEnableCompute(settings,true,false),"Configured startup did not enable compute.");
+        Assert(!DesktopLifecycle.ShouldEnableCompute(settings,false,false),"Center tried to start worker compute.");
+        settings["auto_enable_compute"]="true";
+        Assert(!DesktopLifecycle.ShouldEnableCompute(settings,true,false),"Malformed startup flag enabled compute.");
+        Assert(DesktopLifecycle.ShouldEnableCompute(settings,true,true),"Update handoff lost the running worker's restart choice.");
+        var release=FileRelease(new byte[]{(byte)'M',(byte)'Z',1,2,3});
+        var now=new DateTime(2026,10,7,0,0,0,DateTimeKind.Utc);
+        string persisted="";
+        var json=new JavaScriptSerializer();
+        Action<UpdateQueueState> save=state=>persisted=json.Serialize(state);
+        var queue=new DesktopUpdateQueue(null,"0.3.0-rc.1",save);
+        int downloads=0,probes=0,installs=0,changes=0;
+        queue.Changed=()=>changes++;
+        Func<UpdateRelease,Action<long,long>,CancellationToken,Task<string>> download=(item,progress,token)=>{
+            downloads++;return Task.FromResult(Path.Combine(root,item.AssetName));
+        };
+        bool ready=false;
+        Func<Task<Dictionary<string,object>>> inspect=()=>{
+            probes++;return Task.FromResult(new Dictionary<string,object>{{"ready_for_update",ready},{"detail","Experiment still running"}});
+        };
+        Func<UpdateRelease,string,Task> install=(item,path)=>{
+            installs++;Assert(!queue.CanCancel,"Installation handoff remained cancelable.");return Task.FromResult(0);
+        };
+        queue.Enqueue(release,true,true);
+        queue.Enqueue(release,true,true);
+        await queue.Tick(now,true,download,inspect,install);
+        Assert(downloads==1&&probes==0&&installs==0,"Busy client failed to download independently or stopped work.");
+        Assert(queue.State.Stage=="waiting"&&queue.Active,"Downloaded installation request was lost while busy.");
+        await queue.Tick(now.AddSeconds(6),false,download,inspect,install);
+        Assert(probes==1&&installs==0&&downloads==1,"Readiness wait repeated the download or installed while unsafe.");
+        await queue.Tick(now.AddSeconds(7),false,download,inspect,install);
+        Assert(probes==1,"Wait ignored its scheduled retry time.");
+        var restored=json.Deserialize<UpdateQueueState>(persisted);
+        queue=new DesktopUpdateQueue(restored,"0.3.0-rc.1",save);
+        ready=true;
+        await queue.Tick(now.AddSeconds(12),false,download,inspect,install);
+        Assert(installs==1&&downloads==1&&queue.State.Stage=="handoff","Restart lost a waiting request or duplicated download.");
+        await queue.Tick(now.AddMinutes(1),false,download,inspect,install);
+        Assert(installs==1,"Installer was started repeatedly after handoff.");
+        var updated=new DesktopUpdateQueue(json.Deserialize<UpdateQueueState>(persisted),release.Version,save);
+        Assert(!updated.Active&&updated.State.Stage=="completed","Installed update was queued again on startup.");
+        Assert(changes>0,"Queue changes never reached the UI observer.");
+
+        queue=new DesktopUpdateQueue(null,"0.3.0-rc.1",save);
+        int failedDownloads=0;
+        Func<UpdateRelease,Action<long,long>,CancellationToken,Task<string>> unreliable=(item,progress,token)=>{
+            failedDownloads++;if(failedDownloads==1)throw new IOException("Offline");return download(item,progress,token);
+        };
+        queue.Enqueue(release,false,false);
+        await queue.Tick(now,false,unreliable,inspect,install);
+        Assert(queue.State.Stage=="retry"&&queue.State.Failures==1,"Download error did not remain queued.");
+        await queue.Tick(now.AddSeconds(1),false,unreliable,inspect,install);
+        Assert(failedDownloads==1,"Download retry ignored backoff.");
+        await queue.Tick(now.AddSeconds(31),false,unreliable,inspect,install);
+        Assert(queue.State.Stage=="downloaded"&&installs==1,"Download-only request installed without consent.");
+        queue.Enqueue(release,true,false);
+        queue.Enqueue(release,true,true);
+        Assert(!queue.State.Automatic,"Enabling automatic updates took ownership of a manual request.");
+        int beforeDownload=downloads;
+        await queue.Tick(now.AddMinutes(2),false,download,inspect,(item,path)=>{throw new IOException("Installer cannot start");});
+        Assert(queue.State.Stage=="retry"&&queue.State.Downloaded!=null&&downloads==beforeDownload,"Failed install lost verified download.");
+
+        queue=new DesktopUpdateQueue(null,"0.3.0-rc.1",save);
+        var blocked=new TaskCompletionSource<string>();
+        int activeDownloads=0;
+        Func<UpdateRelease,Action<long,long>,CancellationToken,Task<string>> pending=(item,progress,token)=>{
+            activeDownloads++;token.Register(()=>blocked.TrySetCanceled());return blocked.Task;
+        };
+        queue.Enqueue(release,true,false);
+        var running=queue.Tick(now,false,pending,inspect,install);
+        await queue.Tick(now,false,pending,inspect,install);
+        Assert(activeDownloads==1,"Concurrent polling started duplicate downloads.");
+        queue.Cancel();await running;
+        Assert(!queue.Active&&!queue.InFlight&&queue.State.Stage=="idle","Cancellation resurrected the request.");
+        Assert(json.Deserialize<UpdateQueueState>(persisted).Release==null,"Canceled request persisted as active.");
+        var halfDownloaded=new UpdateQueueState{Release=release,Stage="downloading",InstallRequested=true};
+        Assert(new DesktopUpdateQueue(halfDownloaded,"0.3.0-rc.1",save).State.Stage=="queued","Interrupted download did not recover.");
+
+        queue=new DesktopUpdateQueue(new UpdateQueueState{Release=release,Stage="waiting",InstallRequested=true,
+            Downloaded=Path.Combine(root,release.AssetName)},"0.3.0-rc.1",save);
+        beforeDownload=downloads;ready=false;
+        await queue.Tick(now,false,download,inspect,install,(item,path)=>{throw new InvalidDataException("Cached download changed");});
+        Assert(downloads==beforeDownload+1&&queue.State.Stage=="waiting","Invalid restored cache was not downloaded again.");
+        int handoffs=0;
+        queue=new DesktopUpdateQueue(null,"0.3.0-rc.1",state=>{
+            if(state.Stage=="handoff")throw new IOException("Disk full after installer started");save(state);
+        });
+        queue.Enqueue(release,true,false);ready=true;
+        await queue.Tick(now,false,download,inspect,(item,path)=>{handoffs++;return Task.FromResult(0);});
+        Assert(handoffs==1&&queue.State.Stage=="handoff","Receipt write failure stranded a launched installer.");
+        await queue.Tick(now.AddMinutes(1),false,download,inspect,install);
+        Assert(handoffs==1,"Handoff receipt error launched the installer twice.");
+
+        string installer=Path.Combine(root,release.AssetName),other=Path.Combine(root,"other-setup.exe");
+        byte[] bytes=new byte[]{(byte)'M',(byte)'Z',1,2,3};
+        File.WriteAllBytes(installer,bytes);File.WriteAllBytes(other,bytes);
+        var cleanup=InstallerCleanup.Record(installer,release.Version,false,123,456);
+        string app=Path.Combine(root,"ExLabCenter.exe");
+        Assert(!InstallerCleanup.TryDelete(cleanup,app,(pid,started)=>true)&&File.Exists(installer),"Running installer was deleted.");
+        Assert(InstallerCleanup.TryDelete(cleanup,app,(pid,started)=>false)&&!File.Exists(installer),"Finished installer was not deleted.");
+        Assert(File.Exists(other),"Cleanup removed an unrelated package.");
+        Assert(InstallerCleanup.TryDelete(cleanup,app,(pid,started)=>false),"Cleanup was not idempotent.");
+        File.WriteAllBytes(installer,bytes);cleanup=InstallerCleanup.Record(installer,release.Version,false,123,456);
+        File.WriteAllBytes(installer,new byte[]{(byte)'M',(byte)'Z',9,2,3});
+        Fails<InvalidDataException>(()=>InstallerCleanup.TryDelete(cleanup,app,(pid,started)=>false),"Changed installer was silently deleted.");
+        Assert(File.Exists(installer),"Changed installer did not remain for inspection.");
+        Fails<InvalidDataException>(()=>InstallerCleanup.TryDelete(cleanup,installer,(pid,started)=>false),"Cleanup deleted the running application.");
+        cleanup.Path=other;
+        Fails<InvalidDataException>(()=>InstallerCleanup.TryDelete(cleanup,app,(pid,started)=>false),"Unrelated executable was accepted for cleanup.");
+        File.Delete(installer);File.Delete(other);
+    }
     static int Main(string[] args) {
         try { Run(args[0]); Console.WriteLine("PASS update service: " + assertions + " assertions; semantic versions, channels, exact role assets, HTTPS origins, checksum, truncation, cache finalization and cancellation."); return 0; }
         catch(Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
     static void Run(string root) {
+        QueueTests(root).GetAwaiter().GetResult();
         Assert(DesktopLifecycle.CanExitUnconfiguredWorker("",new string[0]),"Fresh worker without WSL cannot exit.");
         Assert(DesktopLifecycle.CanExitUnconfiguredWorker("",new[]{"docker-desktop","docker-desktop-data"}),"Docker Desktop alone was mistaken for a configured worker.");
         Assert(!DesktopLifecycle.CanExitUnconfiguredWorker("Ubuntu",new string[0]),"Configured worker skipped backend shutdown.");
@@ -246,7 +362,7 @@ try {
     $testSource = Join-Path $testRoot 'UpdateTests.cs'
     $testExe = Join-Path $testRoot 'UpdateTests.exe'
     [IO.File]::WriteAllText($testSource, $harness, (New-Object Text.UTF8Encoding $false))
-    & $compiler /nologo /target:exe /optimize+ /langversion:5 /r:System.Web.Extensions.dll ("/out:" + $testExe) (Join-Path $repoRoot 'deploy/desktop/DesktopUpdates.cs') $testSource
+    & $compiler /nologo /target:exe /optimize+ /langversion:5 /r:System.Web.Extensions.dll ("/out:" + $testExe) (Join-Path $repoRoot 'deploy/desktop/DesktopUpdates.cs') (Join-Path $repoRoot 'deploy/desktop/DesktopUpdateQueue.cs') $testSource
     if ($LASTEXITCODE -ne 0) { throw 'Update service compilation failed.' }
     & $testExe $testRoot
     if ($LASTEXITCODE -ne 0) { throw 'Update service tests failed.' }
@@ -603,7 +719,7 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

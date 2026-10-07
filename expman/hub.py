@@ -34,6 +34,8 @@ from .mobile import MobileHubMixin, initialize as initialize_mobile
 from .centers import CenterHubMixin, initialize as initialize_centers, open_remote
 from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_policies,
                           validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
+from .result_hub import ResultHubMixin, initialize as initialize_results
+from . import result_protocol
 
 
 TERMINAL = frozenset(("succeeded", "canceled", "failed", "paused", "interrupted"))
@@ -192,7 +194,7 @@ def inspect_update_state(db):
                 detail="管理端当前可以安装更新；远端实验继续运行，已保存的操作和文件传输在重启后继续同步", **counts)
 
 
-class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
+class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -270,6 +272,7 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
         initialize_record_tags(self.db)
         initialize_node_policies(self.db)
         initialize_mobile(self.db)
+        initialize_results(self.db)
         with self.lock:
             if 'display_name' not in {row['name'] for row in self.db.execute('PRAGMA table_info(nodes)')}:
                 self.db.execute("ALTER TABLE nodes ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
@@ -433,11 +436,16 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
             self._attach_record_tags(jobs, "job")
             for job in jobs:
                 job.pop("log_tail", None)
+                received = self.db.execute("SELECT COUNT(*),SUM(independent='passed') FROM experiment_results WHERE job_id=? AND attempt=?", (job["id"], max(1, job["attempt"]))).fetchone()
+                job["delivery"] = {"results_received": received[0], "independently_accepted": received[1] or 0}
             nodes = []
             timestamp = now()
             for row in self.db.execute("SELECT * FROM nodes ORDER BY id"):
                 item = dict(row)
                 item["snapshot"] = json.loads(item["snapshot"])
+                delivery = self.db.execute("SELECT value,updated FROM node_delivery_status WHERE node_id=?", (item["id"],)).fetchone()
+                if delivery:
+                    item["snapshot"]["delivery"] = {**json.loads(delivery["value"]), "observed_at": delivery["updated"]}
                 item["online"] = timestamp - item["last_seen"] <= 45
                 item["resource_policy"] = self._node_resource_policy(item["id"])
                 nodes.append(item)
@@ -556,7 +564,8 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
         pending = list(self.db.execute("SELECT id,spec,created FROM jobs WHERE state='queued' AND node_id IS NULL"))
         pending.sort(key=lambda row: (-json.loads(row["spec"])["priority"], row["created"], row["id"]))
         for row in pending:
-            assignment = choose_assignment(json.loads(row["spec"]), nodes, counts)
+            spec = json.loads(row["spec"])
+            assignment = choose_assignment(spec, nodes, counts)
             if assignment is None:
                 continue
             node_id = assignment["node_id"]
@@ -870,6 +879,7 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
             result["events"] = [{**dict(row), "data": json.loads(row["data"])} for row in reversed(events)]
             result["artifacts"] = [dict(row) for row in self.db.execute("SELECT name,size,sha256,uploaded FROM artifacts WHERE job_id=? ORDER BY name,uploaded", (job_id,))]
             result["time"] = now()
+            result.update(self.result_details(job_id))
             return result
 
     def _archive_paths(self, job_id, digest):
@@ -898,18 +908,22 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
             raise APIError(400, "data must be valid base64") from error
         if len(block) > MAX_CHUNK or offset + len(block) > size:
             raise APIError(400, "Chunk exceeds declared size")
-        with self.transaction():
-            self._owned(job_id, node_id)
-            partial, final = self._archive_paths(job_id, digest)
-            existing = self.db.execute("SELECT size FROM uploads WHERE job_id=? AND sha256=?", (job_id, digest)).fetchone()
-            if existing and existing["size"] != size:
-                raise APIError(409, "The same hash was declared with a different size")
+        # Hashing a large completed checkpoint must not hold the controller-wide
+        # transaction/lock and block result receipts, heartbeats or commands.
+        with self._project_upload_guard("artifact:" + job_id + ":" + digest):
+            with self.transaction():
+                self._owned(job_id, node_id)
+                partial, final = self._archive_paths(job_id, digest)
+                existing = self.db.execute("SELECT size FROM uploads WHERE job_id=? AND sha256=?", (job_id, digest)).fetchone()
+                if existing and existing["size"] != size:
+                    raise APIError(409, "The same hash was declared with a different size")
+                self.db.execute("INSERT OR IGNORE INTO uploads VALUES (?,?,?)", (job_id, digest, size))
             if final.exists():
                 if final.stat().st_size != size:
                     raise APIError(409, "Archived size disagrees with request")
-                self.db.execute("INSERT OR IGNORE INTO artifacts VALUES (?,?,?,?,?)", (job_id, name, digest, size, now()))
+                with self.transaction():
+                    self.db.execute("INSERT OR IGNORE INTO artifacts VALUES (?,?,?,?,?)", (job_id, name, digest, size, now()))
                 return {"offset": size, "complete": True}
-            self.db.execute("INSERT OR IGNORE INTO uploads VALUES (?,?,?)", (job_id, digest, size))
             partial.parent.mkdir(parents=True, exist_ok=True)
             current = partial.stat().st_size if partial.exists() else 0
             if current > size:
@@ -934,8 +948,9 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
                 raise APIError(422, "SHA256 verification failed; upload restarts at offset 0")
             final.parent.mkdir(parents=True, exist_ok=True)
             os.replace(partial, final)
-            self.db.execute("INSERT OR IGNORE INTO artifacts VALUES (?,?,?,?,?)", (job_id, name, digest, size, now()))
-            self._event(job_id, "artifact", {"name": name, "sha256": digest, "size": size})
+            with self.transaction():
+                self.db.execute("INSERT OR IGNORE INTO artifacts VALUES (?,?,?,?,?)", (job_id, name, digest, size, now()))
+                self._event(job_id, "artifact", {"name": name, "sha256": digest, "size": size})
             return {"offset": size, "complete": True}
 
     def artifact(self, job_id, digest):
@@ -967,12 +982,14 @@ class Hub(MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin
         with self.lock:
             rows = []
             timing_fields = ["started_at", "finished_at", "elapsed_seconds", "observed_at", "complete"]
-            fields = ["id", "name", "algorithm", "group", "metric_protocol", "node_id", "state", "attempt", "updated"]
+            fields = ["id", "name", "algorithm", "group", "metric_protocol", "node_id", "state", "attempt", "updated", "result_verification"]
             fields += ["timing." + key for key in timing_fields]
             extra = set()
             for record in self.db.execute("SELECT * FROM jobs ORDER BY created,id"):
                 job = self._job(record)
                 result = {key: job.get(key, job["spec"].get(key, "")) for key in fields}
+                result["result_verification"] = _json({str(row["attempt"]) + ":" + row["experiment_id"]: row["independent"]
+                    for row in self.db.execute("SELECT attempt,experiment_id,independent FROM experiment_results WHERE job_id=?", (job["id"],))})
                 for key in timing_fields:
                     result["timing." + key] = job["timing"][key] if job["timing"] is not None else ""
                 flatten(job["spec"]["params"], "params", result)
@@ -1054,8 +1071,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/app.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/app.js": "app.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/app.js", "/delivery.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/app.js": "app.js", "/delivery.js": "delivery.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
@@ -1106,7 +1123,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                                  payload, identities[0] if identities else None))
                 return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
-            required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download") else "admin"
+            required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download",
+                "/api/results", "/api/delivery/poll", "/api/delivery/report", "/api/evidence/upload") else "admin"
             center_routes = ('/api/centers/identity', '/api/centers/snapshot', '/api/centers/file',
                              '/api/centers/handoff', '/api/centers/register')
             if role == 'center' and (path.startswith('/api/local/') or path in
@@ -1146,7 +1164,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 elif path == "/api/ai/settings":
                     self._send(hub.ai_settings())
                 elif path == "/api/node-info":
-                    self._send({"node_id": node_id, "paired": True})
+                    self._send({"node_id": node_id, "paired": True, "hub_version": __version__,
+                        "capabilities": [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY]})
                 elif path == "/api/projects/download":
                     offset = parameter("offset")
                     if not offset.isdigit():
@@ -1161,6 +1180,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     self._send(hub.update_status())
                 elif path == "/api/job":
                     self._send(hub.job(parameter("id")))
+                elif path == "/api/transfers/request":
+                    self._send(hub.transfer_request(parameter("id")))
                 elif path == "/api/results.csv":
                     self._bytes(hub.results_csv(), "text/csv; charset=utf-8", disposition='attachment; filename="results.csv"')
                 elif path == "/api/matrices":
@@ -1211,6 +1232,12 @@ def make_server(hub, host="127.0.0.1", port=8765):
                           "/api/ai/settings": hub.ai_settings, "/api/ai/test": hub.ai_test,
                           "/api/projects/upload": hub.project_upload, "/api/projects/deploy": hub.project_deploy,
                           "/api/projects/delete": hub.project_delete,
+                          "/api/results/verification": hub.verify_result, "/api/evidence/request": hub.request_evidence,
+                          "/api/transfers/migrate": hub.migrate_uploads,
+                          "/api/results": lambda p: hub.receive_result(node_id, p),
+                          "/api/delivery/poll": lambda p: hub.delivery_poll(node_id, p),
+                          "/api/delivery/report": lambda p: hub.delivery_report(node_id, p),
+                          "/api/evidence/upload": lambda p: hub.upload_evidence(node_id, p),
                           "/api/sync": lambda p: hub.sync(node_id, p), "/api/upload": lambda p: hub.upload(node_id, p)}
                 if path.startswith("/api/local/imports/"):
                     imports = hub.project_imports()

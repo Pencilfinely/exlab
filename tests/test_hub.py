@@ -13,7 +13,7 @@ from tests.support import temporary_directory
 
 
 SPEC = {"name": "test", "backend": "demo", "params": {"steps": 2, "delay": 0}}
-SNAPSHOT = {"allow_demo": True, "policy": {"max_prefetch": 4, "cpu_budget": 4, "ram_budget_mb": 8192}, "tags": [], "assets": []}
+SNAPSHOT = {"allow_demo": True, "policy": {"max_prefetch": 4, "cpu_budget": 4, "ram_budget_mb": 8192}, "tags": [], "assets": [], "capabilities": ["experiment-results-v1"]}
 
 
 class HubTests(unittest.TestCase):

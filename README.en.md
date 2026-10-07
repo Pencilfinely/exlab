@@ -7,7 +7,7 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.7. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.7 release notes](docs/RELEASE-0.5.7.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
+**Desktop version: 0.5.8. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.8 release notes](docs/RELEASE-0.5.8.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
 
 The algorithm library now supports search, deployment filters, bounded pagination and import timestamps. A five-step import opens node deployment when complete. Project dialogs provide experiment forms, allocation previews and matrix conversion, retaining inputs within the current page when switching presets or closing and reopening.
 
@@ -83,7 +83,7 @@ For a concrete example, see [Review an unchanged SASRec_Original import](docs/EX
 Publish a project once and let selected workers receive it. Current distribution sends **immutable code/data snapshots through the controller**, with private Git snapshots and Docker environments prepared on each worker. Routine use requires no node-side Git or Docker commands.
 **Direct GitHub/GitLab account integration and third-party registry publishing controls are not implemented.** Publish another version when source or data changes; create another experiment when only learning rate, seed or similar parameters change.
 
-Each experiment has its own configuration and output directory. Console output is saved, existing log files can be configured as metric sources, and models/results return with the experiment.
+New tasks return one result JSON per experiment by default. Models, full logs and training history remain on the worker and can be requested individually. Sequential batches can publish each result before the job ends. Execution, result delivery, evidence delivery and independent acceptance are separate states. Existing queues require a reviewed, explicit migration; see [result protocol and migration](docs/LIGHTWEIGHT-RESULTS.zh-CN.md).
 Task completion and file upload completion may occur at different times. Check pending uploads before shutting down.
 
 The overview, experiment list and details show **cumulative runtime**. Timing starts with execution, freezes when it stops, and accumulates across resumed attempts; queueing, preparation and stopped periods are excluded. Workers persist timing, so closing the page or losing the controller connection does not reset it. Live values are estimates until confirmed by the worker. Details show submission, first start and latest stop times; CSV exports include timing fields. Update both Center and Worker for complete timing support. Old records remain unavailable, and uncertain history is marked incomplete.
@@ -116,6 +116,8 @@ Workers can continue already assigned, cached tasks during a temporary controlle
 **From 0.3.0-rc.2 onward on Windows:** choose **Check for updates** in the application's status window or tray menu. Review the current/new versions and release notes, then download the matching Center or Worker installer. The application checks its size and SHA-256 before installation. You can download while busy and install later, after experiments and pending uploads finish. Installation checks that services can stop safely, exits the old client and opens the new installer. Your data-directory selection, Ubuntu distribution, node configuration and login-startup setting are retained.
 
 Preview versions check for newer previews and stable releases; stable versions check for stable releases only. Ubuntu workers continue to use a downloaded package and the existing script/manual upgrade procedure.
+
+0.5.8 adds optional compute startup for Worker and automatic updates for Center/Worker, both off by default. Updates can be queued once, retry automatically and wait for safe installation; closing the update view or restarting the client keeps the request. Successful installation cleans up its installer. See [queue and preference instructions](docs/OPERATIONS.md).
 
 Never run old and new agents against the same node directory at once. See [Everyday operations](docs/OPERATIONS.md) for upgrading, backups, background controls and troubleshooting.
 Use the application on localhost or a trusted private network; it is not a public multi-tenant service.

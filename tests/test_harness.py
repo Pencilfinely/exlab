@@ -16,6 +16,38 @@ from tests.support import temporary_directory
 
 
 class HarnessTests(unittest.TestCase):
+    def test_declared_batch_results_are_registered_before_the_command_finishes(self):
+        (self.source / "main.py").write_text('''import json, pathlib, os, time
+pathlib.Path('a.tmp').write_text(json.dumps({'status':'succeeded','test_metrics':{'score':0.123456789}}))
+os.replace('a.tmp','a.json')
+time.sleep(1)
+pathlib.Path('b.json').write_text(json.dumps({'status':'succeeded','test_metrics':{'score':0.2}}))
+''', encoding="utf-8")
+        result = []
+        thread = threading.Thread(target=lambda: result.append(self.run_manifest({"schema_version": 1,
+            "command": ["{python}", "main.py"], "result_files": [
+                {"experiment_id": "a", "path": "a.json"}, {"experiment_id": "b", "path": "b.json"}]})))
+        thread.start()
+        try:
+            deadline = time.monotonic() + 3
+            path = self.output / ".exlab/results/attempt-1/a.json"
+            while not path.exists() and time.monotonic() < deadline:
+                time.sleep(0.025)
+            self.assertTrue(path.exists())
+            self.assertTrue(thread.is_alive())
+        finally:
+            thread.join(timeout=5)
+        self.assertEqual(result, [0])
+        self.assertTrue((self.output / ".exlab/results/attempt-1/b.json").is_file())
+
+    def test_malformed_declared_result_is_reported_as_failure_without_reexecuting(self):
+        (self.source / "main.py").write_text("from pathlib import Path\nPath('bad.json').write_text('{broken')\n", encoding="utf-8")
+        self.assertEqual(self.run_manifest({"schema_version": 1, "command": ["{python}", "main.py"],
+            "result_files": [{"experiment_id": "trial", "path": "bad.json"}]}), 0)
+        value = json.loads((self.output / ".exlab/results/attempt-1/trial.json").read_text())
+        self.assertEqual(value["result"]["status"], "failed")
+        self.assertTrue((self.output / "work-attempt-1/bad.json").is_file())
+
     def setUp(self):
         # Linux needs its native temporary filesystem for FIFO/symlink tests;
         # WSL's /mnt/<drive> may not support those even when mkfifo is present.

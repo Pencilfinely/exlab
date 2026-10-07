@@ -1,7 +1,5 @@
 using System;
 using System.Drawing;
-using System.IO;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -9,106 +7,73 @@ namespace ExperimentManagerDesktop {
     sealed class UpdateForm : IconForm {
         readonly ClientForm client;
         readonly Label versions=new Label { AutoSize=true };
-        readonly Label status=new Label { AutoSize=true, MaximumSize=new Size(560,0) };
+        readonly Label status=new Label { AutoSize=true,MaximumSize=new Size(560,0) };
         readonly TextBox notes=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Dock=DockStyle.Fill,BackColor=Color.White };
         readonly ProgressBar progress=new ProgressBar { Dock=DockStyle.Top,Height=18 };
         readonly Button check=new Button { Text="检查更新",AutoSize=true };
-        readonly Button download=new Button { Text="下载更新",AutoSize=true,Enabled=false };
-        readonly Button install=new Button { Text="安装更新",AutoSize=true,Enabled=false };
-        readonly Button cancel=new Button { Text="取消下载",AutoSize=true,Enabled=false };
+        readonly Button download=new Button { Text="下载更新",AutoSize=true };
+        readonly Button install=new Button { Text="下载并排队安装",AutoSize=true };
+        readonly Button cancel=new Button { Text="取消队列",AutoSize=true };
         readonly LinkLabel releaseLink=new LinkLabel { Text="查看 GitHub 发布页",AutoSize=true };
-        UpdateRelease available;
-        string downloaded;
-        bool working,closeWhenIdle;
-        CancellationTokenSource cancellation;
+        bool checking;
 
         internal UpdateForm(ClientForm owner) {
-            client=owner; Text="软件更新 · "+App.Title;
-            Size=new Size(650,520); MinimumSize=new Size(570,440);
-            StartPosition=FormStartPosition.CenterParent; Font=new Font("Microsoft YaHei UI",10);
+            client=owner;Text="软件更新 · "+App.Title;
+            Size=new Size(650,520);MinimumSize=new Size(570,440);StartPosition=FormStartPosition.CenterParent;
+            Font=new Font("Microsoft YaHei UI",10);
             var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
-            for(int i=0;i<4;i++) layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            versions.Text="当前版本："+App.Version;
+            for(int i=0;i<4;i++)layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.Controls.Add(versions);
-            layout.Controls.Add(new Label { Text="可先下载；安装时会检查实验和文件回传，保留已有配置与数据。",AutoSize=true,MaximumSize=new Size(560,0),Margin=new Padding(0,12,0,12) });
-            layout.Controls.Add(notes); layout.Controls.Add(progress); layout.Controls.Add(status);
+            layout.Controls.Add(new Label { Text="排队一次即可：自动下载，等待实验与回传完成后安装。关闭此窗口仍会继续；安装成功后自动删除安装包。",AutoSize=true,MaximumSize=new Size(560,0),Margin=new Padding(0,12,0,12) });
+            layout.Controls.Add(notes);layout.Controls.Add(progress);layout.Controls.Add(status);
             var buttons=new FlowLayoutPanel { AutoSize=true,Dock=DockStyle.Fill,Margin=new Padding(0,12,0,8) };
             buttons.Controls.Add(check);buttons.Controls.Add(download);buttons.Controls.Add(install);buttons.Controls.Add(cancel);
             layout.Controls.Add(buttons);layout.Controls.Add(releaseLink);Controls.Add(layout);
-            ActiveControl=check;
             check.Click+=async(s,e)=>await Check();
-            download.Click+=async(s,e)=>await Download();
-            install.Click+=async(s,e)=>await Install();
-            cancel.Click+=(s,e)=>{if(cancellation!=null)cancellation.Cancel();};
-            releaseLink.LinkClicked+=(s,e)=>System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-                available==null?UpdateService.Repository+"/releases":available.ReleaseUrl){UseShellExecute=true});
-            Shown+=async(s,e)=>await Check();
-            FormClosing+=(s,e)=>{if(working){e.Cancel=true;closeWhenIdle=true;if(cancellation!=null)cancellation.Cancel();}};
-            ResumeLayout(true);
+            download.Click+=(s,e)=>Enqueue(false);
+            install.Click+=(s,e)=>Enqueue(true);
+            cancel.Click+=(s,e)=>{try{client.UpdateQueue.Cancel();}catch(Exception ex){status.Text=ex.Message;}};
+            releaseLink.LinkClicked+=(s,e)=>{
+                var release=client.UpdateQueue.State.Release??client.AvailableUpdate;
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    release==null?UpdateService.Repository+"/releases":release.ReleaseUrl){UseShellExecute=true});
+            };
+            client.UpdatesChanged+=RefreshQueue;
+            Shown+=async(s,e)=>{RefreshQueue();if(!client.UpdateQueue.Active)await Check();};
+            ActiveControl=check;RefreshQueue();ResumeLayout(true);
         }
-
-        void Working(bool value) {
-            working=value; check.Enabled=!value;download.Enabled=!value&&available!=null;
-            install.Enabled=!value&&available!=null&&downloaded!=null;cancel.Enabled=value&&cancellation!=null;
-            if(!value&&closeWhenIdle) Close();
-        }
-
         async Task Check() {
-            if(working)return;available=null;downloaded=null;Working(true);progress.Style=ProgressBarStyle.Marquee;status.Text="正在连接 GitHub 检查更新…";
-            versions.Text="当前版本："+App.Version;notes.Clear();
-            try {
-                var result=await Task.Run(()=>UpdateService.Check(App.Version,App.Worker));
-                available=result;
-                if(result!=null&&downloaded==null) {
-                    string cached=Path.Combine(App.SettingsRoot,"updates",result.AssetName);
-                    try {await Task.Run(()=>UpdateService.ValidateDownloaded(result,cached));downloaded=cached;}
-                    catch(IOException) {} catch(InvalidOperationException) {} catch(System.Security.Cryptography.CryptographicException) {}
-                }
-                versions.Text="当前版本："+App.Version+(result==null?"":"    新版本："+result.Version);
-                // GitHub bodies use LF; the native multiline TextBox needs
-                // Windows line endings to keep headings and paragraphs apart.
-                notes.Text=(result==null?"当前渠道暂无可用的新版本。":result.Notes??"")
-                    .Replace("\r\n","\n").Replace('\r','\n').Replace("\n","\r\n");
-                status.Text=result==null?"已是当前渠道的最新版本。":downloaded==null?"发现新版本，点击“下载更新”。":"已找到下载并校验过的安装包，可以安装更新。";
-            } catch(Exception ex) {status.Text="检查失败："+ex.Message;}
-            finally {progress.Style=ProgressBarStyle.Blocks;progress.Value=0;Working(false);}
+            if(checking)return;checking=true;RefreshQueue();
+            try {await client.CheckForUpdates();}
+            finally {checking=false;RefreshQueue();}
         }
-
-        async Task Download() {
-            if(working||available==null)return;
-            downloaded=null;
-            cancellation=new CancellationTokenSource();Working(true);progress.Value=0;status.Text="正在下载更新…";
-            var token=cancellation.Token;
-            IProgress<Tuple<long,long>> reporter=new Progress<Tuple<long,long>>(value=>{
-                if(IsDisposed||!working)return;
-                progress.Value=value.Item2>0?(int)Math.Min(100,value.Item1*100/value.Item2):0;
-                status.Text=string.Format("正在下载：{0:0.0} / {1:0.0} MiB",value.Item1/1048576.0,value.Item2/1048576.0);
-            });
-            try {
-                downloaded=await Task.Run(()=>UpdateService.Download(available,Path.Combine(App.SettingsRoot,"updates"),
-                    (done,total)=>reporter.Report(Tuple.Create(done,total)),token));
-                progress.Value=100;status.Text="下载完成，文件校验通过。可以安装，或关闭窗口稍后安装。";
-            } catch(OperationCanceledException) {status.Text="下载已取消，可以重新下载。";}
-            catch(Exception ex) {status.Text="下载失败："+ex.Message;}
-            finally {cancellation.Dispose();cancellation=null;Working(false);}
+        void Enqueue(bool installing) {
+            try {client.QueueUpdate(installing);RefreshQueue();}
+            catch(Exception ex) {status.Text=ex.Message;}
         }
-
-        async Task Install() {
-            if(working||available==null||downloaded==null)return;
-            Working(true);status.Text="正在校验安装包并检查实验状态…";
-            try {
-                await client.InstallUpdate(available,downloaded);
-                // The client closes only after the verified installer was started.
-                working=false;Close();client.FinishUpdateExit();
-            } catch(Exception ex) {status.Text="暂时无法安装："+ex.Message;Working(false);}
+        void RefreshQueue() {
+            if(IsDisposed)return;
+            var queue=client.UpdateQueue;var state=queue.State;var release=state.Release??client.AvailableUpdate;
+            versions.Text="当前版本："+App.Version+(release==null?"":"    新版本："+release.Version);
+            string text=release==null?"当前渠道暂无可用的新版本。":release.Notes??"";
+            text=text.Replace("\r\n","\n").Replace('\r','\n').Replace("\n","\r\n");
+            if(notes.Text!=text)notes.Text=text;
+            status.Text=queue.Active?state.Detail:client.UpdateDetail;
+            if(state.Stage=="downloading")status.Text+=string.Format(" {0:0.0} / {1:0.0} MiB",state.Bytes/1048576.0,state.Total/1048576.0);
+            if(state.Stage=="retry")status.Text+=" 下次重试："+state.NextAttemptUtc.ToLocalTime().ToString("HH:mm:ss");
+            progress.Style=checking?ProgressBarStyle.Marquee:ProgressBarStyle.Blocks;
+            progress.Value=state.Total>0?(int)Math.Min(100,state.Bytes*100/state.Total):0;
+            check.Enabled=!checking;
+            download.Enabled=release!=null&&!queue.Active;
+            install.Enabled=release!=null&&(!queue.Active||(!state.InstallRequested&&queue.CanCancel));
+            install.Text=state.Downloaded==null?"下载并排队安装":"排队安装";
+            cancel.Enabled=queue.CanCancel;
         }
-
         protected override void Dispose(bool disposing) {
-            if(disposing&&cancellation!=null)cancellation.Cancel();
+            if(disposing)client.UpdatesChanged-=RefreshQueue;
             base.Dispose(disposing);
         }
     }

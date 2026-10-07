@@ -12,7 +12,7 @@ from tests.support import temporary_directory
 
 
 SPEC = {"name": "timed experiment", "backend": "demo", "params": {"steps": 2, "delay": 0}}
-SNAPSHOT = {"allow_demo": True, "policy": {"max_prefetch": 4, "cpu_budget": 4, "ram_budget_mb": 8192}}
+SNAPSHOT = {"allow_demo": True, "policy": {"max_prefetch": 4, "cpu_budget": 4, "ram_budget_mb": 8192}, "capabilities": ["experiment-results-v1"]}
 
 
 class HubTimingTests(unittest.TestCase):

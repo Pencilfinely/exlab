@@ -30,6 +30,13 @@ TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
 
 
+def _comparable_spec(spec):
+    normalized = common.validate_task(spec)
+    if "result_delivery" not in spec:
+        normalized["result_delivery"]["mode"] = "legacy"
+    return normalized
+
+
 def _new_timing(complete=True):
     return {"started_at": None, "finished_at": None, "elapsed_seconds": 0.0,
             "segment_started_at": None, "last_observed_at": None, "complete": complete}
@@ -57,7 +64,16 @@ def inspect_update_state(db):
     """Read one durable snapshot without opening an Agent or changing task state."""
     records = [json.loads(row[0]) for row in db.execute("SELECT record FROM tasks")]
     acknowledged = dict(db.execute("SELECT job_id,seq FROM report_acks"))
-    pending_uploads = db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "legacy_upload_policy" in tables:
+        pending_uploads = db.execute("SELECT COUNT(*) FROM uploads u LEFT JOIN legacy_upload_policy p "
+            "ON p.job_id=u.job_id AND p.name=u.name AND p.sha=u.sha WHERE u.complete=0 "
+            "AND COALESCE(p.disposition,'automatic')!='retained'").fetchone()[0]
+    else:
+        pending_uploads = db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
+    if "node_results" in tables:
+        pending_uploads += db.execute("SELECT COUNT(*) FROM node_results WHERE status!='delivered'").fetchone()[0]
+        pending_uploads += db.execute("SELECT COUNT(*) FROM node_evidence WHERE transfer_status IN ('queued','uploading','retrying')").fetchone()[0]
     deliveries = db.execute("SELECT value FROM metadata WHERE key='project_deliveries'").fetchone()
     projects = json.loads(deliveries[0]) if deliveries else {}
     counts = {
@@ -212,6 +228,9 @@ class Agent:
                 common.atomic_json(self._output(record) / "STOP", {"reason": "agent restarted"})
                 self._save(record, state="interrupted", _timing_uncertain=True,
                            detail="Agent restarted; demo is not launched again automatically")
+        from .result_delivery import ResultDelivery
+        self.active_legacy_upload = None
+        self.result_delivery = ResultDelivery(self)
 
     def close(self):
         if self.closed:
@@ -233,6 +252,7 @@ class Agent:
             # Installation only writes immutable project snapshots; finish it before
             # releasing agent.lock so another agent cannot install concurrently.
             self.project_delivery.installing["thread"].join()
+        self.result_delivery.close()
         self.db.close()
         if os.name == "nt":
             import msvcrt
@@ -365,6 +385,10 @@ class Agent:
                   "cpu_count": os.cpu_count(), "local_time": time.strftime("%H:%M"),
                   "platform": sys.platform, "docker_available": False}
         result["capabilities"] = ["scheduler-v2", "project-delete-v1", node_policy.CAPABILITY] + (["project-bundle-v1"] if sys.platform == "linux" else [])
+        from . import __version__
+        from . import result_protocol, result_delivery
+        result["agent_version"] = __version__
+        result["capabilities"] += [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY]
         cpus = os.cpu_count()
         if hasattr(os, "sched_getaffinity"):
             try:
@@ -375,8 +399,8 @@ class Agent:
         desired = getattr(self, "resource_policy", None)
         result["resource_policy_revision"] = desired["revision"] if desired else 0
         result["resource_policy_error"] = getattr(self, "resource_policy_error", "")
-        result["pending_uploads"] = (self.db.execute("SELECT COUNT(*) FROM uploads WHERE complete=0").fetchone()[0]
-                                     if hasattr(self, "db") else None)
+        result["pending_uploads"] = inspect_update_state(self.db)["pending_uploads"] if hasattr(self, "db") else None
+        result["delivery"] = result_delivery.telemetry(self.db, getattr(self, "active_legacy_upload", None)) if hasattr(self, "db") else None
         # The controller must not infer a finished archive from a terminal job
         # report: output scanning and uploads happen later in the same tick.
         result["update_quiescent"] = (inspect_update_state(self.db)["ready_for_update"]
@@ -513,12 +537,14 @@ class Agent:
                 record = existing.get(job["id"])
                 if record is None:
                     spec = common.validate_task(job["spec"])
+                    if "result_delivery" not in job["spec"]:
+                        spec["result_delivery"]["mode"] = "legacy"
                     record = {"id": job["id"], "spec": spec, "state": "assigned", "attempt": 1,
                               "seq": 0, "command_ack": 0, "prepared": False, "metrics": {},
                               "_timing": _new_timing()}
                     self._save(record, detail="Persisted on assigned node")
                     existing[record["id"]] = record
-                elif record["spec"] != common.validate_task(job["spec"]):
+                elif _comparable_spec(record["spec"]) != _comparable_spec(job["spec"]):
                     raise ValueError("Hub attempted to change immutable task specification")
                 if job.get("command_id", 0) > record.get("command_ack", 0):
                     self._command(record, job.get("action"), job["command_id"])
@@ -906,6 +932,15 @@ class Agent:
             pass
 
     def _snapshot_files(self, record):
+        from .result_delivery import lightweight
+        if lightweight(self.db, record) is not None:
+            if record["state"] in TERMINAL:
+                if record["spec"]["backend"] == "demo" and _pid_alive(record.get("worker_pid")):
+                    return
+                self.result_delivery.discover_record(record)
+                if not record.get("archive_scanned"):
+                    self._save(record, archive_scanned=True)
+            return
         if record.get("archive_scanned") or record["state"] not in TERMINAL:
             return
         if record["spec"]["backend"] == "demo" and _pid_alive(record.get("worker_pid")):
@@ -942,18 +977,29 @@ class Agent:
     def _uploads(self, chunks=4):
         if not self.online:
             return
+        retry = self.db.execute("SELECT value FROM node_delivery_meta WHERE key='legacy_next_retry_at'").fetchone()
+        if retry and json.loads(retry[0]) > common.now():
+            return
         for job, name, sha, size, path, offset in self.db.execute(
-                "SELECT job_id,name,sha,size,path,offset FROM uploads WHERE complete=0 ORDER BY job_id,name").fetchall():
+                "SELECT u.job_id,u.name,u.sha,u.size,u.path,u.offset FROM uploads u LEFT JOIN legacy_upload_policy p "
+                "ON p.job_id=u.job_id AND p.name=u.name AND p.sha=u.sha WHERE u.complete=0 "
+                "AND COALESCE(p.disposition,'automatic')!='retained' ORDER BY u.job_id,u.name").fetchall():
             if chunks <= 0:
                 break
             base = {"job_id": job, "name": name, "sha256": sha, "size": size}
+            self.active_legacy_upload = {**base, "confirmed_bytes": offset, "total_bytes": size}
             try:
                 url = self.config["hub_url"].rstrip("/") + "/api/upload"
                 response = common.api_request(url, self.config["token"], {**base, "offset": 0, "data": ""})
                 offset = response["offset"]
                 if not isinstance(offset, int) or not 0 <= offset <= size:
                     raise ValueError("Hub returned invalid upload offset")
+                if response.get("complete") and offset != size:
+                    raise ValueError("Incomplete legacy file must not be marked complete")
                 while not response.get("complete") and chunks > 0:
+                    disposition = self.db.execute("SELECT disposition FROM legacy_upload_policy WHERE job_id=? AND name=? AND sha=?", (job, name, sha)).fetchone()
+                    if disposition and disposition[0] == "retained":
+                        break  # Reviewed migration takes effect at the next acknowledged chunk boundary.
                     with open(path, "rb") as stream:
                         stream.seek(offset)
                         block = stream.read(512 * 1024)
@@ -962,19 +1008,38 @@ class Agent:
                     next_offset = response["offset"]
                     if not isinstance(next_offset, int) or not offset <= next_offset <= size:
                         raise ValueError("Hub returned invalid upload offset")
+                    if response.get("complete") and next_offset != size:
+                        raise ValueError("Incomplete legacy file must not be marked complete")
                     if not response.get("complete") and next_offset <= offset:
                         raise ValueError("Upload made no progress")
                     offset = next_offset
                     chunks -= 1
+                    self.active_legacy_upload["confirmed_bytes"] = offset
+                    with self.db:
+                        self.db.execute("UPDATE uploads SET offset=?,complete=? WHERE job_id=? AND name=? AND sha=?",
+                                        (offset, int(bool(response.get("complete"))), job, name, sha))
+                        self.db.execute("INSERT INTO node_delivery_meta VALUES ('last_byte_progress_at',?) "
+                            "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(common.now()),))
                 with self.db:
                     self.db.execute("UPDATE uploads SET offset=?,complete=? WHERE job_id=? AND name=? AND sha=?",
                                     (offset, int(bool(response.get("complete"))), job, name, sha))
+                self.result_delivery._meta(self.db, "legacy_next_retry_at", 0)
+                if response.get("complete"):
+                    self.result_delivery._meta(self.db, "last_file_completed_at", common.now())
             except (OSError, ValueError, RuntimeError, TimeoutError) as error:
-                self.last_error = "Archive sync deferred: " + str(error)[:500]
+                self.last_error = "Archive sync deferred: " + self.result_delivery._error(error)
+                retry_count = self.db.execute("SELECT value FROM node_delivery_meta WHERE key='legacy_retry_count'").fetchone()
+                retry_count = (json.loads(retry_count[0]) if retry_count else 0) + 1
+                for key, value in (("legacy_error", self.last_error), ("legacy_error_at", common.now()),
+                                   ("legacy_retry_count", retry_count), ("legacy_next_retry_at", common.now() + min(30, 2**min(retry_count, 5)))):
+                    self.result_delivery._meta(self.db, key, value)
                 return
+            finally:
+                self.active_legacy_upload = None
 
     def tick(self, stop_requested=None):
         """One durable cycle; losing Hub connectivity never abandons local ownership."""
+        self.result_delivery.start()
         def exiting():
             return stop_requested is not None and stop_requested()
 

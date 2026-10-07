@@ -125,6 +125,57 @@ class Run:
     def finish(self, result):
         _atomic(self.output / "result.json", result)
 
+    def _exchange_path(self, category, experiment_id):
+        if not isinstance(experiment_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", experiment_id):
+            raise ValueError("Experiment ID must use letters, digits, _, . or -")
+        path = self.output / ".exlab" / category / f"attempt-{self.attempt}" / (experiment_id + ".json")
+        candidate = self.output
+        for part in path.relative_to(self.output).parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                raise ValueError("Exchange paths cannot contain symbolic links")
+        return path
+
+    def progress(self, experiment_id, phase, *, complete=False, detail=""):
+        """Publish platform metadata, never an additional uploaded result file."""
+        if not isinstance(phase, str) or len(phase) > 100 or type(complete) is not bool:
+            raise ValueError("Progress requires a phase and boolean complete")
+        value = {"experiment_id": experiment_id, "attempt": self.attempt, "phase": phase,
+                 "complete": complete, "detail": str(detail)[:1000]}
+        _atomic(self._exchange_path("progress", experiment_id), value)
+
+    def evidence(self, file, kind="file"):
+        """Index one closed evidence file; registration does not request an upload."""
+        file = self._regular_output_file(file)
+        before = file.stat()
+        digest = _digest(file)
+        after = file.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError("Evidence changed while computing its identity")
+        return {"path": file.relative_to(self.output).as_posix(), "kind": str(kind)[:100],
+                "size": after.st_size, "sha256": digest}
+
+    def publish_result(self, experiment_id, result):
+        """Atomically finalize one experiment, including during a running batch.
+
+        The Agent binds the envelope to its own job/attempt/node identity. A
+        repeated identical publication reuses the file and completion time.
+        """
+        if not isinstance(result, dict):
+            raise ValueError("Experiment result must be an object")
+        json.dumps(result, allow_nan=False)
+        path = self._exchange_path("results", experiment_id)
+        if path.exists():
+            with path.open(encoding="utf-8") as stream:
+                old = json.load(stream)
+            if old.get("result") != result:
+                raise ValueError("Conflicting final result for this experiment/attempt")
+            return path
+        _atomic(path, {"experiment_id": experiment_id, "attempt": self.attempt,
+                       "completed_at": time.time(), "result": result})
+        self.progress(experiment_id, str(result.get("status", "completed")), complete=True)
+        return path
+
 
 class SharedCacheLock:
     """Cross-process advisory lock for a shared derived-cache directory.

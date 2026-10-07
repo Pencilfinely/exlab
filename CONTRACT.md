@@ -23,6 +23,12 @@ Docker tasks instead use backend=docker, GPU memory >0, source={repo: node-reada
 
 ## Hub API
 
+New submissions default to `result_delivery={mode:lightweight,files:[{experiment_id:default,path:result.json,stream:false}]}`. Explicit streamed JSON files or SDK `Run.publish_result` finalize individual experiments during a batch. Lightweight jobs require a running worker advertising `experiment-results-v1`; existing tasks without this field retain legacy behavior until a reviewed scoped migration. See [the result protocol](docs/LIGHTWEIGHT-RESULTS.zh-CN.md) for the envelope, evidence retention, observability, authenticated endpoints, collector compatibility and rollback boundaries.
+
+Node-only `POST /api/results {sha256,data:base64}` stores an immutable schema-1 experiment envelope and content-addressed artifact. The final identity is project/job/attempt/experiment; identical bytes return the original receipt, different bytes return 409 and persist the conflict. The envelope never hashes itself. 64 KiB is advisory; the transport limit is 1 MiB. Independent verification is pending/quarantined until an explicit admin `POST /api/results/verification` bound to the result SHA with review references. `GET /api/job` exposes per-experiment progress/results, evidence and conflicts separately from job execution state.
+
+Admin `POST /api/evidence/request` selects explicit evidence IDs bound to job/attempt/experiment. Node-only `POST /api/evidence/upload` transfers requested files in resumable 512 KiB chunks. Admin `POST /api/transfers/migrate` creates a scoped dry-run or applies a completed reviewed plan; `GET /api/transfers/request?id=...` reads its durable report. Node-only `/api/delivery/poll` and `/api/delivery/report` carry uploader health/progress and authenticated transfer commands independently of execution sync. These routes never restart execution or accept arbitrary filesystem paths/commands.
+
 Hub class Hub(root), `serve(root, host='127.0.0.1', port=8765)`. Config root/hub.json created by Hub: admin_token plus nodes tokens. `add_node(node_id)` creates token. SQLite persistent jobs & nodes & command flags; threading lock/transactions. Nodes must be explicitly added by an administrator. Tokens never returned to unauthenticated clients. The release controller launcher listens on all local interfaces and persists its selected port.
 
 - GET / serves static/index.html and /app.js, /timing.js, /style.css public. All /api require bearer auth. Browser uses sessionStorage for token. No CORS.

@@ -21,6 +21,7 @@ def gpu_task(memory=4000, exclusive=False):
 
 def snapshot():
     return {"policy": {"max_running": 4}, "tags": [], "assets": [], "profiles": {"torch": IMAGE},
+            "capabilities": ["experiment-results-v1"],
             "allowed_repos": ["https://example.org/repo.git"],
             "free_ram_mb": 32000, "disk_free_mb": 100000,
             "gpus": [{"uuid": "GPU-1", "name": "Test", "total_mb": 16000, "free_mb": 16000,

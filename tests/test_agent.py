@@ -516,6 +516,7 @@ class AgentTests(unittest.TestCase):
 
     def test_archive_upload_recovers_server_offset_after_lost_ack(self):
         record = self.record("succeeded")
+        record["spec"]["result_delivery"]["mode"] = "legacy"
         data = b"experiment-result\n" * 80000
         (self.agent._output(record) / "result.bin").write_bytes(data)
         self.agent._snapshot_files(record)
@@ -537,6 +538,7 @@ class AgentTests(unittest.TestCase):
         self.agent.online = True
         with patch("expman.agent.common.api_request", side_effect=request):
             self.agent._uploads(chunks=8)
+            self.agent.result_delivery._meta(self.agent.db, "legacy_next_retry_at", 0)
             self.agent._uploads(chunks=8)
         self.assertEqual(bytes(received), data)
         self.assertEqual(self.agent.db.execute("SELECT complete FROM uploads").fetchone()[0], 1)

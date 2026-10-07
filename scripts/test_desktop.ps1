@@ -29,7 +29,7 @@ $testRoot = Join-Path $runtimeRoot ('desktop-tests-' + [Guid]::NewGuid().ToStrin
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
-Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms -TypeDefinition @'
+Add-Type -ReferencedAssemblies System.Drawing, System.Windows.Forms, System.Web.Extensions -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
@@ -110,15 +110,36 @@ public static class DesktopGpuSettingsTest {
     }
 }
 public static class DesktopClientControlsTest {
+    static void Render(System.Windows.Forms.Form source,string path) {
+        // Rehost only the layout in a test form. Product Shown handlers start
+        // services and must never run during rendering.
+        var content=source.Controls[0];source.Controls.Remove(content);
+        using(var host=new System.Windows.Forms.Form { Text=source.Text,Size=source.Size,Font=source.Font,
+                BackColor=source.BackColor,ShowInTaskbar=false,StartPosition=System.Windows.Forms.FormStartPosition.Manual,
+                Location=new System.Drawing.Point(-32000,-32000) }) {
+            try {
+                host.Controls.Add(content);host.Show();host.PerformLayout();System.Windows.Forms.Application.DoEvents();
+                using(var bitmap=new System.Drawing.Bitmap(host.Width,host.Height)) {
+                    host.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,host.Width,host.Height));
+                    bitmap.Save(path,System.Drawing.Imaging.ImageFormat.Png);
+                }
+            } finally {host.Controls.Remove(content);source.Controls.Add(content);host.Close();}
+        }
+    }
     static int Buttons(System.Windows.Forms.Control root,string label) {
         int count=root is System.Windows.Forms.Button&&root.Text==label?1:0;
         foreach(System.Windows.Forms.Control child in root.Controls)count+=Buttons(child,label);
         return count;
     }
-    public static void Verify(System.Reflection.Assembly assembly,bool worker) {
+    public static void Verify(System.Reflection.Assembly assembly,bool worker,string root) {
         var staticFlags=System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic;
         var instanceFlags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
         var role=assembly.GetType("ExperimentManagerDesktop.App",true).GetField("Worker",staticFlags);
+        var app=assembly.GetType("ExperimentManagerDesktop.App",true);
+        var settingsRoot=app.GetField("SettingsDirectory",staticFlags);
+        object originalRoot=settingsRoot.GetValue(null);
+        string isolated=System.IO.Path.Combine(root,worker?"worker-settings":"center-settings");
+        settingsRoot.SetValue(null,isolated);
         object original=role.GetValue(null);role.SetValue(null,worker);
         try {
             var type=assembly.GetType("ExperimentManagerDesktop.ClientForm",true);
@@ -135,8 +156,45 @@ public static class DesktopClientControlsTest {
                 var preference=(System.Windows.Forms.CheckBox)type.GetField("releaseResources",instanceFlags).GetValue(form);
                 if(preference.Text.IndexOf("\u9000\u51fa",StringComparison.Ordinal)<0||preference.Text.Contains("\u505c\u7528"))
                     throw new Exception("Automatic exit preference still appears to control explicit deactivation.");
+                var automatic=(System.Windows.Forms.CheckBox)type.GetField("autoUpdate",instanceFlags).GetValue(form);
+                var compute=(System.Windows.Forms.CheckBox)type.GetField("autoEnableCompute",instanceFlags).GetValue(form);
+                if(automatic.Checked||compute.Checked)throw new Exception("Optional automation was enabled by default.");
+                automatic.Checked=true;if(worker)compute.Checked=true;
+                var serializer=new System.Web.Script.Serialization.JavaScriptSerializer();
+                var saved=serializer.Deserialize<System.Collections.Generic.Dictionary<string,object>>(
+                    System.IO.File.ReadAllText(System.IO.Path.Combine(isolated,"settings.json")));
+                if(!(bool)saved["auto_update"]||(worker&&!(bool)saved["auto_enable_compute"]))
+                    throw new Exception("Optional preferences were not saved.");
+                form.PerformLayout();
+                var queue=type.GetField("UpdateQueue",instanceFlags).GetValue(form);
+                var releaseType=assembly.GetType("ExperimentManagerDesktop.UpdateRelease",true);
+                object release=System.Activator.CreateInstance(releaseType,true);
+                releaseType.GetField("Version").SetValue(release,"0.99.0");
+                releaseType.GetField("Sha256").SetValue(release,new string('a',64));
+                releaseType.GetField("Notes").SetValue(release,"Heading\n\nRelease detail");
+                queue.GetType().GetMethod("Enqueue",instanceFlags).Invoke(queue,new object[]{release,true,false});
+                var updateType=assembly.GetType("ExperimentManagerDesktop.UpdateForm",true);
+                using(var update=(System.Windows.Forms.Form)System.Activator.CreateInstance(updateType,instanceFlags,null,new object[]{form},null)) {
+                    var cancel=(System.Windows.Forms.Button)updateType.GetField("cancel",instanceFlags).GetValue(update);
+                    var install=(System.Windows.Forms.Button)updateType.GetField("install",instanceFlags).GetValue(update);
+                    var status=(System.Windows.Forms.Label)updateType.GetField("status",instanceFlags).GetValue(update);
+                    var notes=(System.Windows.Forms.TextBox)updateType.GetField("notes",instanceFlags).GetValue(update);
+                    if(!cancel.Enabled||install.Enabled||String.IsNullOrWhiteSpace(status.Text))throw new Exception("Queued update controls do not show the pending request.");
+                    if(notes.Text!="Heading\r\n\r\nRelease detail")throw new Exception("Update notes lost their paragraph structure.");
+                    update.PerformLayout();
+                    Render(update,System.IO.Path.Combine(root,(worker?"worker":"controller")+"-update.png"));
+                }
+                if(!(bool)queue.GetType().GetProperty("Active",instanceFlags).GetValue(queue,null))
+                    throw new Exception("Closing the update view canceled its persistent queue.");
+                queue.GetType().GetMethod("Cancel",instanceFlags).Invoke(queue,null);
+                Render(form,System.IO.Path.Combine(root,(worker?"worker":"controller")+"-preferences.png"));
             }
-        } finally {role.SetValue(null,original);}
+            using(var restored=(System.Windows.Forms.Form)System.Activator.CreateInstance(type,instanceFlags,null,new object[]{new string[0]},null)) {
+                if(!((System.Windows.Forms.CheckBox)type.GetField("autoUpdate",instanceFlags).GetValue(restored)).Checked||
+                        (worker&&!((System.Windows.Forms.CheckBox)type.GetField("autoEnableCompute",instanceFlags).GetValue(restored)).Checked))
+                    throw new Exception("Preferences did not survive reopening the client.");
+            }
+        } finally {role.SetValue(null,original);settingsRoot.SetValue(null,originalRoot);}
     }
 }
 '@
@@ -162,8 +220,13 @@ try {
         # GPU settings use an isolated command fixture.
         $assembly = [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($executable))
         $app = $assembly.GetType('ExperimentManagerDesktop.App', $true)
-        [DesktopClientControlsTest]::Verify($assembly, $role -eq 'worker')
-        Write-Output "PASS $role controls: one combined stop/release action in window and tray; automatic exit preference is separate."
+        [DesktopClientControlsTest]::Verify($assembly, $role -eq 'worker', $testRoot)
+        $visualRoot = Join-Path $repoRoot '.test-runs'
+        New-Item -ItemType Directory -Path $visualRoot -Force | Out-Null
+        foreach ($view in @('update','preferences')) {
+            Copy-Item -LiteralPath (Join-Path $testRoot ($role + '-' + $view + '.png')) -Destination (Join-Path $visualRoot ('startup-' + $role + '-' + $view + '.png'))
+        }
+        Write-Output "PASS $role controls: combined stop/release, optional automation defaults, persisted preferences, queue survives view closure, rendered controls."
         if ($role -eq 'worker') {
             [DesktopGpuSettingsTest]::Verify($assembly.GetType('ExperimentManagerDesktop.WorkerGpuForm', $true),
                 (Join-Path $runtimeRoot 'gpu-settings-preview.png'))
