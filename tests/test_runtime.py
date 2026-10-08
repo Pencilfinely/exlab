@@ -14,6 +14,44 @@ def reply(data, code=0):
 
 
 class RuntimeTests(unittest.TestCase):
+    def desktop_stopped(self, response, *, probe=None, setup=None, processes=(), kernel='microsoft-standard-WSL2'):
+        with patch.object(runtime.sys, 'platform', 'linux'), \
+                patch.object(Path, 'read_text', side_effect=[kernel, *processes]), \
+                patch.object(Path, 'glob', return_value=[Path('/proc/123/comm')] * len(processes)), \
+                patch.object(runtime, 'read_json', return_value=setup or {}), \
+                patch.dict(runtime.os.environ, {}, clear=True), \
+                patch.object(runtime.shutil, 'which', return_value='/windows/docker.exe'), \
+                patch.object(runtime, 'docker_command', side_effect=probe if isinstance(probe, Exception) else None,
+                             return_value=probe if isinstance(probe, subprocess.CompletedProcess) else reply('', 1)) as docker, \
+                patch.object(runtime.subprocess, 'run', side_effect=response if isinstance(response, Exception) else None,
+                             return_value=response) as windows:
+            result = runtime.docker_desktop_stopped('/worker')
+        return result, docker, windows
+
+    def test_desktop_stopped_requires_explicit_status_and_never_starts_docker(self):
+        for probe in (reply('', 1), FileNotFoundError('WSL integration removed')):
+            with self.subTest(probe=probe):
+                stopped, _, windows = self.desktop_stopped(reply({'Status': 'stopped'}), probe=probe,
+                    setup={'docker_endpoint': 'unix:///saved/docker.sock'})
+                self.assertTrue(stopped)
+                self.assertEqual(windows.call_args.args[0], ['/windows/docker.exe', 'desktop', 'status', '--format', 'json'])
+                self.assertNotIn('DOCKER_CONTEXT', windows.call_args.kwargs['env'])
+                self.assertNotIn('DOCKER_HOST', windows.call_args.kwargs['env'])
+        for response in (reply({'Status': 'running'}), reply({'Status': 'starting'}), reply({}),
+                         reply({'Status': 'stopped'}, 1), reply('invalid json'),
+                         subprocess.TimeoutExpired('docker.exe', 10)):
+            with self.subTest(response=response):
+                self.assertFalse(self.desktop_stopped(response)[0])
+
+    def test_desktop_stopped_cannot_override_live_native_remote_or_non_wsl_engine(self):
+        cases = ({'probe': reply('live-daemon')}, {'processes': ('dockerd\n',)},
+                 {'setup': {'docker_endpoint': 'tcp://remote:2375'}}, {'kernel': 'native-linux'})
+        for options in cases:
+            with self.subTest(options=options):
+                stopped, _, windows = self.desktop_stopped(reply({'Status': 'stopped'}), **options)
+                self.assertFalse(stopped)
+                windows.assert_not_called()
+
     def test_not_running_docker_is_reported_without_starting_a_daemon(self):
         with patch.object(runtime.shutil, 'which', return_value='/usr/bin/docker'), \
                 patch.object(runtime, 'docker_command', side_effect=[reply('unix:///var/run/docker.sock'), reply('', 1)]) as command:

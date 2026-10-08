@@ -381,11 +381,26 @@ def shutdown(service_root=None):
 def _shutdown_step(root, agent):
     """Drain only local work; never sync, accept assignments or launch a task."""
     from .agent import ACTIVE, TERMINAL, _pid_alive, inspect_update_state
+    from .runtime import docker_desktop_stopped
     errors = []
     lingering = 0
     deferred = set()
-    for record in agent.records():
+    records = agent.records()
+    docker_stopped = (not agent.config.get('allow_demo', False)
+                      or any(record['spec']['backend'] == 'docker' for record in records)) and \
+        docker_desktop_stopped(agent.config_path.parent)
+    for record in records:
         try:
+            if docker_stopped and record['spec']['backend'] == 'docker':
+                if record['state'] in ACTIVE:
+                    if record['state'] == 'starting' and not record.get('ever_started') and not record.get('stop_action'):
+                        deferred.add(record['id'])  # Keep an unstarted intent for the next launch.
+                    else:
+                        common.atomic_json(agent._output(record) / 'STOP', {'reason': 'application exiting'})
+                        agent._save(record, state='canceled' if record.get('stop_action') == 'cancel' else 'interrupted',
+                            archive_scanned=False, _timing_uncertain=True,
+                            detail='Docker Desktop is stopped; execution interrupted, local files preserved')
+                continue  # Historical containers cannot be inspected while the engine is off.
             if (record['state'] == 'starting' and record['spec']['backend'] == 'docker'
                     and record.get('container_name') and not record.get('stop_action')):
                 container = agent._inspect(record)
@@ -437,7 +452,7 @@ def _shutdown_step(root, agent):
                         for record in records),
         paused_jobs=sum(record['state'] == 'paused' for record in records),
         interrupted_jobs=sum(record['state'] == 'interrupted' for record in records))
-    if not active and not errors and (not agent.config.get('allow_demo', False)
+    if not docker_stopped and not active and not errors and (not agent.config.get('allow_demo', False)
             or any(record['spec']['backend'] == 'docker' for record in records)):
         try:
             candidate = _candidate(_settings(root).get('config'))
@@ -460,11 +475,17 @@ def _update_containers(candidate, *, execution_only=False):
     if isinstance(endpoint, str) and endpoint.startswith('unix://'):
         environment.pop('DOCKER_CONTEXT', None)
         environment['DOCKER_HOST'] = endpoint
-    reply = subprocess.run(['docker', 'ps', '--all', '--filter', 'label=expman.node=' + candidate['node_id'],
-                            '--filter', 'label=expman.job', '--format', '{{json .}}'],
-                           capture_output=True, text=True, timeout=10, env=environment)
-    if reply.returncode:
-        raise ValueError('无法核查 Docker 容器，请先恢复 Docker 连接')
+    from .runtime import docker_desktop_stopped
+    try:
+        reply = subprocess.run(['docker', 'ps', '--all', '--filter', 'label=expman.node=' + candidate['node_id'],
+                                '--filter', 'label=expman.job', '--format', '{{json .}}'],
+                               capture_output=True, text=True, timeout=10, env=environment)
+        if reply.returncode:
+            raise RuntimeError('无法核查 Docker 容器，请先恢复 Docker 连接')
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        if docker_desktop_stopped(Path(candidate['path']).parent):
+            return []
+        raise
     active = []
     for line in reply.stdout.splitlines():
         item = json.loads(line)
@@ -861,6 +882,9 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
             raise RuntimeError('The systemd user session is unavailable; use --backend detached')
         settings.update(package_dir=str(installed), python=sys.executable,
                         backend='systemd' if use_systemd else 'detached', version=__version__)
+        if marker.get('role') == 'ubuntu-worker-x64':
+            from .worker_update import write_launcher
+            write_launcher(root, installed, sys.executable)
         launch = root / 'Start-Worker.sh'
         launch.write_text('#!/usr/bin/env sh\nexport PYTHONPATH=' + shlex.quote(str(installed)) +
             '\nexec ' + shlex.quote(sys.executable) + ' -m expman.worker_service start --service-root ' +

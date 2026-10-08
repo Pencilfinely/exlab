@@ -11,7 +11,12 @@ from tests import test_agent
 
 
 class WorkerShutdownTests(unittest.TestCase):
-    setUp = test_agent.AgentTests.setUp
+    def setUp(self):
+        test_agent.AgentTests.setUp(self)
+        proof = patch('expman.runtime.docker_desktop_stopped', return_value=False)
+        proof.start()
+        self.addCleanup(proof.stop)
+
     tearDown = test_agent.AgentTests.tearDown
     record = test_agent.AgentTests.record
     docker_spec = test_agent.AgentTests.docker_spec
@@ -192,6 +197,72 @@ class WorkerShutdownTests(unittest.TestCase):
                 patch('expman.agent.subprocess.run'), patch.object(service, '_update_containers', return_value=[]):
             self.assertTrue(service._shutdown_step(self.service_root, self.agent))
         self.assertEqual(self.agent.records()[0]['state'], 'interrupted')
+
+    def test_confirmed_stopped_docker_allows_idle_exit_and_preserves_history(self):
+        self.owner()
+        record = self.record('succeeded', self.docker_spec())
+        self.agent._save(record, container_name='historical-container', ever_started=True)
+        self.checkpoint(record)
+        before = self.agent.records()
+        with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                patch.object(self.agent, '_inspect') as inspect, \
+                patch.object(service, '_update_containers') as scan:
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+        self.assertEqual(self.agent.records(), before)
+        self.assertTrue(self.agent._checkpoint(record))
+        inspect.assert_not_called()
+        scan.assert_not_called()
+
+    def test_stopped_docker_preserves_unstarted_intent_and_marks_lost_execution_once(self):
+        self.owner()
+        original = []
+        for index, state in enumerate(('starting', 'running'), 1):
+            self.job_id = str(index) * 32
+            record = self.record(state, self.docker_spec())
+            self.agent._save(record, container_name=f'expman-{self.job_id}-1', ever_started=state == 'running')
+            self.checkpoint(record)
+            original.append(copy.deepcopy(record))
+        with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                patch.object(self.agent, '_exec') as execute:
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+            saved = self.agent.records()
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+            self.assertEqual(self.agent.records(), saved)
+        self.assertEqual(saved[0], original[0])
+        self.assertEqual(saved[1]['state'], 'interrupted')
+        self.assertEqual(saved[1]['seq'], original[1]['seq'] + 1)
+        self.assertFalse(saved[1]['archive_scanned'])
+        self.assertTrue(self.agent._checkpoint(saved[1]))
+        self.assertTrue((self.agent._output(saved[1]) / 'STOP').exists())
+        execute.assert_not_called()
+
+    def test_confirmed_stopped_docker_allows_shutdown_of_empty_compute_node(self):
+        self.owner()
+        self.agent.config['allow_demo'] = False
+        with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                patch.object(service, '_update_containers') as scan:
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+        scan.assert_not_called()
+
+    def test_stopped_docker_keeps_cancel_and_marks_unobserved_stop_time_as_uncertain(self):
+        from expman.agent import _new_timing
+        self.owner()
+        record = self.record('starting', self.docker_spec())
+        record['_timing'] = _new_timing()
+        with patch('expman.agent.common.now', return_value=10):
+            self.agent._save(record, state='running', ever_started=True, container_name='owned-container')
+        with patch('expman.agent.common.now', return_value=15):
+            self.agent._command(record, 'cancel', 3)
+        with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                patch('expman.agent.common.now', return_value=100):
+            self.assertTrue(service._shutdown_step(self.service_root, self.agent))
+        saved = self.agent.records()[0]
+        self.assertEqual(saved['state'], 'canceled')
+        self.assertEqual(saved['command_ack'], 3)
+        self.assertFalse(saved['_timing']['complete'])
+        self.assertIsNone(saved['_timing']['finished_at'])
+        self.assertEqual(saved['_timing']['elapsed_seconds'], 5)
 
     def test_shutdown_with_multiple_missing_historical_containers_can_finish_repeatedly(self):
         self.owner()

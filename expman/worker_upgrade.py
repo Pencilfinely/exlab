@@ -205,14 +205,14 @@ def run_existing(candidate, input_fn=input, print_fn=print, runner=None):
             print_fn("Another worker acquired the lock. / 原代理仍占用运行目录。")
 
 
-def main():
+def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", help="Original node config path; skips automatic selection")
     parser.add_argument("--list", action="store_true", help="Read-only configuration discovery")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         candidates = discover_configs()
         if args.list:

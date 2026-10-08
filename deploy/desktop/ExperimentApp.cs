@@ -765,12 +765,10 @@ namespace ExperimentManagerDesktop {
             }catch(Exception ex){summary.Text="粘贴失败："+ex.Message;}
         }
         async Task<bool> EnsureDocker(bool automatic=false){
-            var state=await WorkerCommand("runtime-status");if(App.Flag(state,"docker_ready"))return true;
-            if(background&&!automatic){summary.Text="Docker 未就绪。打开算力客户端并点击“启用算力”以启动 Docker。";Show();return false;}
-            if(!automatic&&MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return false;
-            summary.Text="正在启动 Docker Desktop…";await DesktopRuntime.StartDocker();var watch=Stopwatch.StartNew();
-            while(watch.Elapsed<TimeSpan.FromMinutes(2)){await Task.Delay(2000);state=await WorkerCommand("runtime-status");if(App.Flag(state,"docker_ready"))return true;}
-            throw new Exception("Docker 尚未就绪。请检查 Docker Desktop 的 Linux containers、所选 Ubuntu 的 WSL 集成，以及本机 Docker context。然后重试。");
+            return await DesktopRuntime.EnsureDocker(()=>WorkerCommand("runtime-status"),
+                state=>automatic||MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",
+                    App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)==DialogResult.Yes,
+                DesktopRuntime.StartDocker,message=>summary.Text=message);
         }
         void ReleaseWorkerHold(){
             if(workerHold!=null){try{if(!workerHold.HasExited)workerHold.Kill();}catch(InvalidOperationException){}workerHold.Dispose();workerHold=null;}heldDistribution="";

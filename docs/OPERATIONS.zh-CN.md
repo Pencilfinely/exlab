@@ -144,9 +144,49 @@ bash Install-Worker.sh \
 
 2026-10-07 的隔离验收：相关 Python 回归 97 项（95 通过、2 项平台条件跳过）；原生更新/安装测试 249 个断言通过；Center 与 Worker 均编译并验证开关默认值、设置保存与恢复、关闭更新窗口不取消队列，窗口布局已渲染检查。队列测试使用模拟下载与安装委托，没有连接真实发布、升级运行中的服务或修改科研任务。
 
-### 旧版首次升级、Ubuntu 与手动安装
+### Ubuntu：一条命令更新与可选自动更新
 
-**0.3.0-rc.1 及更早版本没有“检查更新”入口。**先手动下载安装当前版本一次，之后 Windows 版本即可使用上面的应用内流程。Ubuntu 算力端继续下载新版包并使用已有脚本。手动升级 Windows 也适用以下步骤：
+0.5.9 起，Ubuntu Worker 直接使用[本项目 GitHub Releases](https://github.com/Pencilfinely/exlab/releases) 的 `ubuntu-worker-x64.zip` 和 `SHA256SUMS.txt`。首次从旧版升级需下载并解压含新更新入口的包一次；之后使用原服务目录中生成的稳定入口，不需要每次手动下载安装包，也不需要连接其他机器。
+
+在新版解压目录中，以原普通用户运行（不要 sudo）：
+
+```bash
+bash Update-Worker.sh --service-root /data/experiment-manager-a6000/client
+```
+
+若旧节点一直由终端前台运行、尚未安装后台服务，需要先正常退出旧代理，再在新版解压目录安装一次，复用原身份：
+
+```bash
+bash Install-Worker.sh \
+  --service-root /data/experiment-manager-a6000/client \
+  --config /data/experiment-manager-a6000/worker/node.ready.json
+```
+
+已有旧代理仍占用运行目录时，更新会明确提示到原终端正常退出；不会强杀 Docker 实验。已安装后台的节点使用原服务目录更新即可。
+
+安装后入口位于原服务目录，以后只需：
+
+```bash
+# 检查、下载、等待空闲、安装；保留原来运行或停止的选择
+bash /data/experiment-manager-a6000/client/Update-Worker.sh
+
+# 开启自动更新（默认关闭，需要 systemd 用户会话）
+bash /data/experiment-manager-a6000/client/Update-Worker.sh --auto enable
+
+# 查看状态，或关闭自动更新
+bash /data/experiment-manager-a6000/client/Update-Worker.sh --status
+bash /data/experiment-manager-a6000/client/Update-Worker.sh --auto disable
+```
+
+省略 `--service-root` 时使用 `~/.local/share/experiment-manager/client`。同一台 A6000 上多个 worker 必须使用各自原服务目录，定时器与更新状态独立，不会合并节点或切换 Docker 地址。`--check` 只检查发布信息；`--run-existing` 保留旧版前台复用配置的启动方式。
+
+自动更新每小时检查同渠道新版本，等待实验和待回传完成后安装；已下载更新每分钟检查安装条件，网络或安装失败按退避时间重试。手动命令在等待期间保持终端运行，Ctrl+C 后保留缓存与更新状态，再运行同一命令可继续。自动更新依赖现有 systemd 用户会话；注销或重启后的持续运行取决于原用户服务/linger 设置。一条命令手动更新也支持 detached 后台。
+
+状态与缓存保存在原服务目录的 `updates/`，安装前验证包大小、SHA-256、Ubuntu 角色、版本、路径及完整文件清单。配置、数据库、检查点和镜像不被覆盖；更新前运行的代理安装后恢复启动，原来停止的保持停止。安装失败尝试恢复原后台代码，交接中断后下次运行继续。旧版尚无新更新入口时，仍需先手动下载新包一次。
+
+### 旧版首次升级与手动安装
+
+**0.3.0-rc.1 及更早版本没有“检查更新”入口。**先手动下载安装当前版本一次，之后 Windows 版本即可使用上面的应用内流程。Ubuntu 0.5.9 起使用上面的一条命令更新流程；更早版本先手动下载新包一次。手动升级 Windows 也适用以下步骤：
 
 打开新版客户端不代表后台代理或主控已经更新。如果新版窗口仍连接 rc.1 后台，
 “安全停止检查”可能一直超时：旧后台不支持该请求，继续等待同步不会解决。
@@ -160,7 +200,7 @@ bash Install-Worker.sh \
 5. 确认历史实验、节点身份和项目安装状态，再恢复接单。
 
 不能仅更新网页就使旧算力代理具备新分发功能。项目卡片显示需更新时，更新那台机器的算力软件。
-不要同时运行同一身份的两个代理。**Update-Worker.cmd / Update-Worker.sh** 会配合已经下载的新版包复用原算力配置，本身不会检查 GitHub 或下载安装包。
+不要同时运行同一身份的两个代理。Windows 的 **Update-Worker.cmd** 仍是已下载新版包的前台复用配置入口；Ubuntu **Update-Worker.sh** 从 0.5.9 起提供检查、下载与后台安装，可用 `--run-existing` 回到旧前台方式。
 
 卸载/替换应用与删除实验数据是两件事。先确认备份，再自行决定是否清理数据；不要通过删除 Docker 虚拟磁盘解决应用升级问题。
 

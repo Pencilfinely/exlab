@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 from .common import read_json
 
@@ -56,6 +57,54 @@ def docker_status(worker_root=None, *, prefer_saved=False):
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         result['detail'] = str(error)[:300]
     return result
+
+
+def docker_desktop_stopped(worker_root=None):
+    """Prove a WSL engine is stopped; a failed Docker connection alone cannot."""
+    if sys.platform != 'linux':
+        return False
+    try:
+        if 'microsoft' not in Path('/proc/sys/kernel/osrelease').read_text().lower():
+            return False
+        saved = read_json(Path(worker_root) / 'setup-state.json', {}) if worker_root else {}
+        if not isinstance(saved, dict):
+            return False
+        endpoint = saved.get('docker_endpoint') or os.environ.get('DOCKER_HOST')
+        if endpoint and (not isinstance(endpoint, str) or not endpoint.startswith('unix:///')
+                         or any(c.isspace() for c in endpoint)):
+            return False
+        if not endpoint and os.environ.get('DOCKER_CONTEXT'):
+            return False
+        # Docker Desktop being off says nothing about a separate native daemon
+        # in Ubuntu. Preserve that environment if one exists.
+        for process in Path('/proc').glob('[0-9]*/comm'):
+            try:
+                if process.read_text().strip() == 'dockerd':
+                    return False
+            except FileNotFoundError:
+                pass  # The process exited while enumerating /proc.
+        try:
+            probe = docker_command(['info', '--format', '{{.ID}}'], endpoint, timeout=5)
+            if probe.returncode == 0:
+                return False
+        except (OSError, subprocess.SubprocessError):
+            pass  # The WSL CLI can disappear with Docker Desktop integration.
+        executable = shutil.which('docker.exe')
+        if not executable:
+            standard = Path('/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe')
+            if not standard.is_file():
+                return False
+            executable = str(standard)
+        environment = dict(os.environ)
+        environment.pop('DOCKER_CONTEXT', None)
+        environment.pop('DOCKER_HOST', None)
+        reply = subprocess.run([executable, 'desktop', 'status', '--format', 'json'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=environment)
+        state = json.loads(reply.stdout) if reply.returncode == 0 else None
+        status = state.get('Status') if isinstance(state, dict) else None
+        return isinstance(status, str) and status.strip().lower() == 'stopped'
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return False
 
 
 def other_user_processes(proc_root='/proc'):

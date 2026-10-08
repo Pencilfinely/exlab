@@ -110,7 +110,11 @@ Successful installation schedules deletion of that standard-named installer afte
 
 ### First upgrade from an older version, Ubuntu and manual installation
 
-**0.3.0-rc.1 and earlier have no Check for updates entry.** Download the current version manually once; future Windows releases can then use the application workflow above. Ubuntu workers continue to use downloaded packages and the existing scripts. Use this procedure for manual Windows upgrades as well:
+Ubuntu 0.5.9 and later use the project's GitHub `ubuntu-worker-x64.zip` and `SHA256SUMS.txt`. Download and extract a package containing the new updater once when upgrading an older background installation, then run `bash Update-Worker.sh --service-root /path/to/original/client`. If the old node only uses a foreground terminal and has no installed background service, first exit the old agent normally and run `bash Install-Worker.sh --service-root /path/to/original/client --config /path/to/original/node.ready.json` from the new package once. The update command waits for experiments and uploads, installs verified code, and preserves the original running/stopped choice, configuration, GPU policy, Docker endpoint and data.
+
+After installation, use the stable `/path/to/original/client/Update-Worker.sh`: no arguments checks/downloads/installs; `--check` only checks; `--status` reads saved state; `--auto enable` opts into hourly checks and safe updates through a systemd user timer; `--auto disable` opts out. Automatic updates default off. Waiting installations retry every minute, failures back off, and interrupted handoffs resume. Multiple nodes need separate original service directories and get separate timers. Without a systemd user session, the manual command still supports detached workers. Login/logout/reboot availability follows the existing user session/linger configuration. Ctrl+C preserves the manual update's cache and state; repeat the same command to continue. `--run-existing` retains the old foreground launcher. Updates never rebuild training images or re-pair a node.
+
+**0.3.0-rc.1 and earlier have no Check for updates entry.** Download the current version manually once; future Windows releases can then use the application workflow above. Ubuntu versions before 0.5.9 need this initial manual download too. Use this procedure for manual Windows upgrades as well:
 
 Opening a newer client does not update an already running backend. If it still
 connects to an rc.1 worker or controller, the safe-stop check can time out because
@@ -126,7 +130,7 @@ to run the new software with the existing node configuration.
 5. Verify experiment history, node identity and project status, then resume accepting work.
 
 Updating a web page alone cannot upgrade an old worker's distribution protocol. Upgrade that computer's worker application when the project card requests it.
-Do not run two agents with one identity. **Update-Worker.cmd / Update-Worker.sh** reuse existing worker configuration with a package you have already downloaded; they do not check GitHub or download a release themselves.
+Do not run two agents with one identity. Windows **Update-Worker.cmd** remains the foreground configuration-reuse entry for downloaded packages. Ubuntu **Update-Worker.sh** checks, downloads and installs from 0.5.9 onward; use `--run-existing` for the legacy foreground behavior.
 
 Replacing/removing application files and deleting experiment data are separate actions. Keep backups before deciding whether to remove data. Do not delete Docker virtual disks to perform an application upgrade.
 

@@ -31,6 +31,21 @@ namespace ExperimentManagerDesktop {
                 Process.Start(new ProcessStartInfo(executable){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden});
             });
         }
+        internal static async Task<bool> EnsureDocker(Func<Task<Dictionary<string,object>>> inspect,
+                Func<Dictionary<string,object>,bool> confirmStart,Func<Task> start,Action<string> progress,
+                Func<Task> delay=null,TimeSpan? timeout=null) {
+            var state=await inspect();
+            if(App.Flag(state,"docker_ready"))return true;
+            // Manual activation is allowed even when this client originally
+            // launched with --background at Windows login.
+            if(!confirmStart(state))return false;
+            progress("正在启动 Docker Desktop…");await start();var watch=Stopwatch.StartNew();
+            while(watch.Elapsed<(timeout??TimeSpan.FromMinutes(2))) {
+                if(delay==null)await Task.Delay(2000);else await delay();
+                state=await inspect();if(App.Flag(state,"docker_ready"))return true;
+            }
+            throw new IOException("Docker 尚未就绪。请检查 Docker Desktop 的 Linux containers、所选 Ubuntu 的 WSL 集成，以及本机 Docker context。然后重试。");
+        }
         internal static bool CanShutdownAll(string distribution,IEnumerable<string> running) {
             foreach(string name in running)if(name.Length>0&&!name.Equals(distribution,StringComparison.OrdinalIgnoreCase)&&
                     !name.Equals("docker-desktop",StringComparison.OrdinalIgnoreCase)&&!name.Equals("docker-desktop-data",StringComparison.OrdinalIgnoreCase))return false;

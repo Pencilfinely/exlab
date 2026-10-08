@@ -21,6 +21,9 @@ from tests.support import temporary_directory
 
 class UpdateReadinessTests(unittest.TestCase):
     def setUp(self):
+        proof = patch('expman.runtime.docker_desktop_stopped', return_value=False)
+        proof.start()
+        self.addCleanup(proof.stop)
         self.temporary = temporary_directory()
         self.folder = Path(self.temporary.__enter__())
         self.service_root = self.folder / 'client'
@@ -389,6 +392,38 @@ class UpdateReadinessTests(unittest.TestCase):
             db.execute('DELETE FROM metadata')
             db.execute('INSERT INTO tasks VALUES (?,?)', ('a' * 32, '{}'))
         self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+
+    def test_confirmed_stopped_docker_allows_update_install_and_stop_without_changing_data(self):
+        database = self.worker_database()
+        self.record(database)
+        before = database.read_bytes(), self.config_path.read_bytes()
+        for failure in (FileNotFoundError('docker'), subprocess.TimeoutExpired('docker', 10),
+                        subprocess.CompletedProcess([], 1, '', 'Docker is not running')):
+            with self.subTest(failure=failure), patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                    patch.object(worker_service, '_require_linux'), \
+                    patch.object(worker_service.subprocess, 'run',
+                        side_effect=failure if isinstance(failure, Exception) else None, return_value=failure):
+                self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
+                self.assertTrue(worker_service.stop_for_update(self.service_root)['ready_for_update'])
+                self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
+        self.assertEqual((database.read_bytes(), self.config_path.read_bytes()), before)
+
+    def test_stopped_docker_preserves_pending_work_and_uncertain_or_invalid_status_still_blocks(self):
+        database = self.worker_database()
+        self.record(database, state='ready', seq=2)
+        with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                patch.object(worker_service.subprocess, 'run', side_effect=FileNotFoundError('docker')):
+            self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
+        self.record(database)
+        with patch('expman.runtime.docker_desktop_stopped', return_value=False), \
+                patch.object(worker_service.subprocess, 'run', side_effect=FileNotFoundError('docker')):
+            self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertFalse(worker_service.install_status(self.service_root)['ready_for_install'])
+        with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
+                patch.object(worker_service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}\n', '')):
+            self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertFalse(worker_service.install_status(self.service_root)['ready_for_install'])
 
     def test_tick_boundary_rechecks_work_and_never_signals_processes(self):
         database = self.worker_database()

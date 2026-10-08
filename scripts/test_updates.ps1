@@ -418,6 +418,32 @@ static class InstallProbeTests {
     static Dictionary<string,object> Installed(Dictionary<string,object> stopped,string version="0.4.0") {
         var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
     }
+    static void ComputeActivation() {
+        int probes=0,starts=0,confirmations=0,delays=0;
+        bool ready=DesktopRuntime.EnsureDocker(
+            ()=>Task.FromResult(new Dictionary<string,object>{{"docker_ready",++probes>=3}}),
+            state=>{confirmations++;return true;},()=>{starts++;return Task.FromResult(0);},message=>{},
+            ()=>{delays++;return Task.FromResult(0);}).GetAwaiter().GetResult();
+        Assert(ready&&probes==3&&starts==1&&confirmations==1&&delays==2,
+            "Explicit compute activation did not start Docker and wait for WSL readiness.");
+        ready=DesktopRuntime.EnsureDocker(
+            ()=>Task.FromResult(new Dictionary<string,object>{{"docker_ready",true}}),
+            state=>{throw new Exception("Ready Docker requested startup consent.");},
+            ()=>{throw new Exception("Ready Docker was started again.");},message=>{}).GetAwaiter().GetResult();
+        Assert(ready,"Already-ready Docker prevented compute activation.");
+        starts=0;
+        ready=DesktopRuntime.EnsureDocker(
+            ()=>Task.FromResult(new Dictionary<string,object>{{"docker_ready",false}}),state=>false,
+            ()=>{starts++;return Task.FromResult(0);},message=>{}).GetAwaiter().GetResult();
+        Assert(!ready&&starts==0,"Canceled Docker startup still enabled compute.");
+        bool timedOut=false;
+        try {
+            DesktopRuntime.EnsureDocker(
+                ()=>Task.FromResult(new Dictionary<string,object>{{"docker_ready",false}}),state=>true,
+                ()=>{starts++;return Task.FromResult(0);},message=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();
+        } catch(IOException){timedOut=true;}
+        Assert(timedOut&&starts==1,"Unavailable Docker was incorrectly accepted after startup timeout.");
+    }
     static void WorkerCompletion() {
         string package="/mnt/c/Package with spaces/\u7b97\u529b";
         foreach(string backend in new[]{"detached","systemd"}) {
@@ -669,7 +695,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();UnifiedWorkerRelease();MemoryRelease();
+            WorkerCompletion();InstallerWiring();ComputeActivation();UnifiedWorkerRelease();MemoryRelease();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
