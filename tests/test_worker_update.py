@@ -195,7 +195,8 @@ class UbuntuUpdateLifecycleTests(unittest.TestCase):
         agent.db.commit()
         agent.close()
         self.original = {path: path.read_bytes() for path in self.config_path.parent.rglob('*') if path.is_file()}
-        release = update.select_release([published('0.5.10')], '0.5.9')
+        target_version = service.__version__
+        release = update.select_release([published(target_version)], '0.5.9')
         release['sha256'] = 'a' * 64
         entries = [(Path('worker_service.py'), b'# immutable verified worker\n'),
                    (Path('worker_update.py'), b'# immutable verified updater\n')]
@@ -204,7 +205,7 @@ class UbuntuUpdateLifecycleTests(unittest.TestCase):
             service._write_status(self.root, status='stopped', pid=None, process_identity=None, online=False)
         def spawned(root, settings):
             service._write_status(root, status='offline', pid=5678, process_identity='new',
-                version='0.5.10', online=False, update_stop_protocol=2, update_stop_process_identity='new')
+                version=target_version, online=False, update_stop_protocol=2, update_stop_process_identity='new')
         def invoke(package, root, action, *options):
             if action == 'install':
                 self.assertEqual(options, ('--no-start', '--backend', 'detached', '--config', str(self.config_path)))
@@ -221,7 +222,7 @@ class UbuntuUpdateLifecycleTests(unittest.TestCase):
                 update._save(self.root, release=release, before_settings=None, before_unit=None, automatic=automatic)
                 common.atomic_json(self.root / 'updates/settings.json', {'enabled': automatic})
                 with patch.object(service, '_require_linux'), patch.object(service, '_systemd_available', return_value=False), \
-                        patch.object(service, '_installation_payload', return_value=(entries, {'role': update.ROLE, 'version': '0.5.10'}, 'verified-code')), \
+                        patch.object(service, '_installation_payload', return_value=(entries, {'role': update.ROLE, 'version': target_version}, 'verified-code')), \
                         patch.object(Path, 'home', return_value=self.home), \
                         patch.object(service, '_process_identity', side_effect=lambda pid: 'old' if pid == 1234 else 'new'), \
                         patch.object(service.os, 'kill', side_effect=killed) as stop, \
@@ -230,7 +231,7 @@ class UbuntuUpdateLifecycleTests(unittest.TestCase):
                         patch.object(update, '_invoke', side_effect=invoke):
                     result = update._apply(self.root, self.package, release)
                 self.assertEqual(result['phase'], 'completed')
-                self.assertEqual(service._settings(self.root)['version'], '0.5.10')
+                self.assertEqual(service._settings(self.root)['version'], target_version)
                 self.assertEqual(service._settings(self.root)['config'], self.before['config'])
                 self.assertEqual(service._settings(self.root)['node_id'], 'a6000')
                 stop.assert_called_once()

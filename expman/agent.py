@@ -402,6 +402,8 @@ class Agent:
         from . import __version__
         from . import result_protocol, result_delivery
         result["agent_version"] = __version__
+        from .runtime_observation import CAPABILITY as RUNTIME_CAPABILITY
+        result["capabilities"].append(RUNTIME_CAPABILITY)
         result["capabilities"] += [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY]
         cpus = os.cpu_count()
         if hasattr(os, "sched_getaffinity"):
@@ -481,9 +483,12 @@ class Agent:
         self.resource_policy_error = ""
 
     def _report(self, record):
+        from .runtime_observation import validate as validate_runtime
         report = {key: record.get(key, default) for key, default in (
             ("id", None), ("seq", 0), ("state", "assigned"), ("detail", ""),
             ("attempt", 1), ("metrics", {}), ("command_ack", 0), ("log_tail", ""))}
+        if (record.get("runtime") or {}).get("attempt") == record["attempt"]:
+            report["runtime"] = validate_runtime(record["runtime"], record["attempt"])
         # The server limit is bytes, not characters (Chinese logs can use 3 bytes/character).
         report["log_tail"] = report["log_tail"].encode("utf-8")[-16000:].decode("utf-8", errors="ignore")
         timing = record.get("_timing")
@@ -931,8 +936,11 @@ class Agent:
                 if common.now() - self.log_checked.get(record["id"], 0) < 10:
                     return
                 self.log_checked[record["id"]] = common.now()
-                logs = self._exec(["docker", "logs", "--tail", "40", record["container_name"]], timeout=5)
-                tail = (logs.stdout + logs.stderr)[-16000:]
+                from .runtime_observation import observe
+                observation, tail = observe(self, record, common.now())
+                self._save(record, runtime=observation)
+                if tail is None:
+                    return  # Preserve the last log, with an explicit observation error.
             else:
                 path = self._output(record) / f"attempt-{record['attempt']}.log"
                 if not path.is_file():

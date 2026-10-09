@@ -258,6 +258,8 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                 self.db.execute("ALTER TABLE jobs ADD COLUMN log_tail TEXT NOT NULL DEFAULT ''")
             if "timing" not in columns:
                 self.db.execute("ALTER TABLE jobs ADD COLUMN timing TEXT")
+            if "runtime" not in columns:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN runtime TEXT")
             project_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(projects)")}
             if "bundle_id" not in project_columns:
                 self.db.execute("ALTER TABLE projects ADD COLUMN bundle_id TEXT NOT NULL DEFAULT ''")
@@ -414,6 +416,7 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
         result["spec"] = json.loads(result["spec"])
         result["metrics"] = json.loads(result["metrics"])
         result["timing"] = json.loads(result["timing"]) if result["timing"] is not None else None
+        result["runtime"] = json.loads(result["runtime"]) if result.get("runtime") else None
         result.pop("resume_after_attempt", None)
         return result
 
@@ -436,6 +439,8 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             self._attach_record_tags(jobs, "job")
             for job in jobs:
                 job.pop("log_tail", None)
+                if job.get("runtime"):
+                    job["runtime"].pop("diagnostics", None)
                 received = self.db.execute("SELECT COUNT(*),SUM(independent='passed') FROM experiment_results WHERE job_id=? AND attempt=?", (job["id"], max(1, job["attempt"]))).fetchone()
                 job["delivery"] = {"results_received": received[0], "independently_accepted": received[1] or 0}
             nodes = []
@@ -621,12 +626,19 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                     raise APIError(400, "log_tail must be a string of at most 16 KiB UTF-8")
                 command_ack = _integer(report.get("command_ack", 0), "command_ack", 0, row["command_id"])
                 timing = _timing(report["timing"]) if "timing" in report else None
-                checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing))
+                runtime = None
+                if "runtime" in report:
+                    from .runtime_observation import validate as validate_runtime
+                    try:
+                        runtime = validate_runtime(report["runtime"], attempt)
+                    except (ValueError, TypeError, OverflowError) as error:
+                        raise APIError(400, "Invalid runtime observation") from error
+                checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime))
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (now(), _json(snapshot), node_id))
             for digest, revision, status, detail in project_checked:
                 self.db.execute("UPDATE project_deployments SET status=?,detail=?,updated=? WHERE digest=? AND node_id=? AND revision=?", (status, detail, now(), digest, node_id, revision))
             ack = {}
-            for report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing in checked:
+            for report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime in checked:
                 row = self._owned(report["id"], node_id)
                 # Commands are acknowledged independently of report sequence.
                 if command_ack > row["command_ack"]:
@@ -650,6 +662,8 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                     # a stale running sample to continue ticking after a transition.
                     serialized_timing = _json({**timing, "received_at": timestamp}) if timing is not None else None
                     self.db.execute("UPDATE jobs SET state=?,detail=?,attempt=?,seq=?,metrics=?,updated=?,resume_after_attempt=?,log_tail=?,timing=? WHERE id=?", (state, detail, attempt, seq, _json(metrics), timestamp, None if resume or cancel else row["resume_after_attempt"], row["log_tail"] if log_tail is None else log_tail, serialized_timing, row["id"]))
+                    self.db.execute("UPDATE jobs SET runtime=? WHERE id=?",
+                                    (_json({**runtime, "received_at": timestamp}) if runtime is not None else None, row["id"]))
                     if state != row["state"] or attempt != row["attempt"]:
                         self._event(row["id"], "state", {"state": state, "detail": detail, "attempt": attempt})
                     if _json(metrics) != row["metrics"] or attempt != row["attempt"] and metrics:
@@ -1071,8 +1085,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/app.js", "/delivery.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/app.js": "app.js", "/delivery.js": "delivery.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/runtime.js", "/app.js", "/delivery.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/runtime.js": "runtime.js", "/app.js": "app.js", "/delivery.js": "delivery.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")

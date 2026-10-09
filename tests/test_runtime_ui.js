@@ -1,0 +1,18 @@
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const ui=require('../expman/static/runtime.js');
+const base={state:'running',attempt:1};
+assert.match(ui.describe(base,1000),/未提供运行诊断/);
+const job={...base,runtime:{attempt:1,observed_at:1000,received_at:1000,container:{status:'running'},log:{changed_at:10}}};
+assert.match(ui.describe(job,1000),/未变化/);
+assert.match(ui.describe(job,1100),/已过期/);
+assert.match(ui.describe({...job,state:'succeeded'},1100),/^$/);
+assert.match(ui.describe({...job,runtime:{...job.runtime,container:{status:'paused'}}},1000),/已被暂停/);
+assert.match(ui.describe({...job,runtime:{...job.runtime,log:{error:'timeout'}}},1000),/上次成功/);
+assert.match(ui.describe({...job,runtime:{...job.runtime,attempt:0}},1000),/未提供/);
+const html=fs.readFileSync('expman/static/index.html','utf8');
+assert.ok(html.indexOf('src="/runtime.js"')<html.indexOf('src="/app.js"'));
+assert.ok(html.includes('id="runtime-status"')&&html.includes('id="runtime-evidence"'));
+const hub=fs.readFileSync('expman/hub.py','utf8');
+assert.ok(hub.includes('"/runtime.js": "runtime.js"'));
+console.log('runtime UI: 10 assertions passed');
