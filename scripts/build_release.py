@@ -43,6 +43,11 @@ def application_files(root=ROOT):
             files[path.relative_to(root).as_posix()] = path.read_bytes()
     for name in ('README.md', 'README.en.md', 'README.zh-CN.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CONTRACT.md', 'docs/OPERATIONS.md', 'docs/OPERATIONS.zh-CN.md', 'docs/ALGORITHM-INTEGRATION.md', 'docs/ALGORITHM-INTEGRATION.zh-CN.md', 'docs/SASREC-ADAPTATION-WALKTHROUGH.zh-CN.md', 'docs/EXTERNAL-HARNESS.md', 'docs/EXTERNAL-HARNESS.zh-CN.md', 'docs/RELEASE-0.3.0-rc.1.md'):
         files[name] = (root / name).read_bytes()
+    for name in ('py-spy-0.4.2-linux-x64.bin', 'py-spy-LICENSE.txt'):
+        source = root / 'expman/vendor' / name
+        if source.is_symlink():
+            raise ValueError('Sampler payload cannot be a symlink')
+        files['expman/vendor/' + name] = source.read_bytes()
     files['expman/static/favicon.ico'] = (root / 'expman/static/favicon.ico').read_bytes()
     files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
     files['docs/EXPERIMENT-MATRICES.zh-CN.md'] = (root / 'docs/EXPERIMENT-MATRICES.zh-CN.md').read_bytes()

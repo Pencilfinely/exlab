@@ -894,7 +894,9 @@ def _installation_payload():
     package = Path(__file__).resolve().parent
     entries = [(path.relative_to(package), path.read_bytes()) for path in sorted(package.rglob('*'))
                if path.is_file() and '__pycache__' not in path.parts and path.suffix in
-               ('.py', '.js', '.html', '.css')]
+               ('.py', '.js', '.html', '.css') or
+               path.is_file() and path.relative_to(package).as_posix() in
+               ('vendor/py-spy-0.4.2-linux-x64.bin', 'vendor/py-spy-LICENSE.txt')]
     identity = hashlib.sha256()
     marker = _release_role() or {'role': 'ubuntu-worker-x64', 'version': __version__}
     identity.update(json.dumps(marker, sort_keys=True).encode('utf-8') + b'\0')

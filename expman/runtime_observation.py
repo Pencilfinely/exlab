@@ -135,4 +135,6 @@ def observe(agent, record, timestamp):
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 diag["errors"][name] = error_code(error)
         value["diagnostics"] = diag
+        from .python_stack_observation import observe as observe_stack
+        observe_stack(agent, record, value, timestamp)
     return value, tail

@@ -404,6 +404,8 @@ class Agent:
         result["agent_version"] = __version__
         from .runtime_observation import CAPABILITY as RUNTIME_CAPABILITY
         result["capabilities"].append(RUNTIME_CAPABILITY)
+        from .python_stack_observation import CAPABILITY as STACK_CAPABILITY
+        result["capabilities"].append(STACK_CAPABILITY)
         result["capabilities"] += [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY]
         cpus = os.cpu_count()
         if hasattr(os, "sched_getaffinity"):

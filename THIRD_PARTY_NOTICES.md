@@ -17,3 +17,10 @@ The SASRec adapter calls user-provided algorithm code. No external SASRec
 implementation, private research repository, dataset or trained model is bundled
 in the public source repository or the three release ZIPs. Users retain
 responsibility for the licenses of the projects and datasets they choose to run.
+
+The worker includes the Linux x64 py-spy 0.4.2 executable (MIT), exclusively for
+bounded, nonblocking Python stack observations of an owned training container.
+License: expman/vendor/py-spy-LICENSE.txt. Upstream: https://github.com/benfred/py-spy
+Official PyPI wheel SHA256: aeb0323409199c785f730645e9f4bb7a7b9ca2c481f2c331a55642b5d13fa52f
+Executable SHA256: 9b4d1f39b2a47ae44f4c6a46f615dcc0287d7755beba5065f32391951e07d594
+No package download occurs on a worker while collecting an observation.
