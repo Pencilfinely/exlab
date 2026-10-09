@@ -95,12 +95,12 @@ An offline worker does not silently cause a duplicate copy of its experiment to 
 
 Available in Experiment Center and Experiment Worker from **0.3.0-rc.2**. Each application updates its own role; update both if both are installed on the same computer.
 
-**Workers may be updated before Center in a multi-computer deployment.** From 0.4.2, Center is not blocked solely by disconnected nodes without unfinished work or by missing fresh snapshots. Active experiments, unacknowledged commands and registered pending transfers still block installation. If a running older Center is blocked only by disconnected nodes, stop that old management service and manually install the new version using the original data directory.
+**Update each application independently while Docker experiments continue.** Windows Center, Windows Worker and Ubuntu Worker hand off only management processes during manual and automatic updates. Durable queues and pending transfers resume after restart. Worker uses this admission policy from 0.5.10; older entries may still require an initial manual management handoff using the new package.
 
 1. Open the application's status window or tray menu and choose **Check for updates**. The update window shows your current version, the available version and its release notes.
 2. Choose **Download update** to download only, or **Download and queue installation**. The application retrieves the same-role Windows `Setup.exe` from [this project's GitHub Releases](https://github.com/Pencilfinely/exlab/releases) and verifies its published size and SHA-256.
-3. You can leave the downloaded installer staged while work continues. Before installing, pause accepting work, finish experiments and pending uploads, and back up your data directories.
-4. Queue installation once. It waits for client operations, experiments and pending uploads to finish, without requiring repeated clicks. Closing the update view keeps the queue; restarting the client restores it. Errors retry with backoff. Cancel pending work from the update view before installation handoff.
+3. Install while Docker experiments run. Only ongoing local client operations, environment preparation and project configuration writes delay the handoff. Updates preserve Docker and WSL resources and do not require queues or pending transfers to finish.
+4. Queue installation once. It downloads, hands off management and installs automatically. Closing the view or restarting the client retains the request. Errors retry with backoff; cancel before installation handoff if needed.
 5. Once the service/agent has stopped safely, the old client exits, the installer completes the upgrade automatically and launches the new client. Data-directory selection, Windows Ubuntu distribution, node configuration and preferences are retained. A running worker resumes after updating; a stopped worker follows the optional compute startup preference.
 6. Open the updated application, verify its version, experiment history and worker identity, then resume accepting work.
 
@@ -110,7 +110,7 @@ Successful installation schedules deletion of that standard-named installer afte
 
 ### First upgrade from an older version, Ubuntu and manual installation
 
-Ubuntu 0.5.9 and later use the project's GitHub `ubuntu-worker-x64.zip` and `SHA256SUMS.txt`. Download and extract a package containing the new updater once when upgrading an older background installation, then run `bash Update-Worker.sh --service-root /path/to/original/client`. If the old node only uses a foreground terminal and has no installed background service, first exit the old agent normally and run `bash Install-Worker.sh --service-root /path/to/original/client --config /path/to/original/node.ready.json` from the new package once. The update command waits for experiments and uploads, installs verified code, and preserves the original running/stopped choice, configuration, GPU policy, Docker endpoint and data.
+Ubuntu 0.5.9 and later use the project's GitHub `ubuntu-worker-x64.zip` and `SHA256SUMS.txt`. Download and extract a package containing the new updater once when upgrading an older installation, then run `bash Update-Worker.sh --service-root /path/to/original/client`. From 0.5.10, the command hands off management while Docker experiments continue. The original running/stopped choice, configuration, GPU policy, Docker endpoint, queues and data are retained. A foreground-only node must first exit its old management agent and install the background service with the original configuration.
 
 After installation, use the stable `/path/to/original/client/Update-Worker.sh`: no arguments checks/downloads/installs; `--check` only checks; `--status` reads saved state; `--auto enable` opts into hourly checks and safe updates through a systemd user timer; `--auto disable` opts out. Automatic updates default off. Waiting installations retry every minute, failures back off, and interrupted handoffs resume. Multiple nodes need separate original service directories and get separate timers. Without a systemd user session, the manual command still supports detached workers. Login/logout/reboot availability follows the existing user session/linger configuration. Ctrl+C preserves the manual update's cache and state; repeat the same command to continue. `--run-existing` retains the old foreground launcher. Updates never rebuild training images or re-pair a node.
 
@@ -123,8 +123,8 @@ resolve this. Stop the old backend, exit the tray client, then run the downloade
 installer as below. After installing a worker, choose **Start background agent**
 to run the new software with the existing node configuration.
 
-1. Pause accepting work and finish active experiments and pending uploads.
-2. Stop the old controller/agent in its client, then exit that client from the system tray. For a terminal deployment, press Ctrl+C in its old window. The installer refuses to replace a running same-role client; this is not a hot upgrade.
+1. Hand off only the old management process. In the new Ubuntu package, run `bash Client-Worker.sh stop-for-update --service-root /path/to/original/client` and wait for `running: false`. Retain the configuration and data directory; do not use `shutdown` or `deactivate` for an update handoff.
+2. Exit the old same-role client after its management service stops. A foreground agent can exit with Ctrl+C while Docker containers continue. Older Windows tray Exit may stop experiments: keep its Ubuntu terminal open through migration and close only the old ExLabWorker.exe/ExperimentWorker.exe UI process in Task Manager after confirming the management agent stopped. Preserve Docker Desktop and wsl.exe processes.
 3. Back up controller and worker data directories.
 4. Install the new package for the same role. Select the original controller directory and original Windows Ubuntu distribution. A unique existing node configuration is reused automatically; choose by node name/path when several are found.
 5. Verify experiment history, node identity and project status, then resume accepting work.
@@ -152,5 +152,5 @@ Replacing/removing application files and deleting experiment data are separate a
 | No Check for updates entry | Install 0.3.0-rc.2 or later manually; Ubuntu workers use the package/script procedure |
 | Update check or download fails | Check access to GitHub Releases and try again; manual same-role installation remains available |
 | Update size or checksum does not match | Do not run that download; retry and use the checksum published with the intended release |
-| Update is downloaded but installation is blocked | Queue it once; it waits for active work and pending uploads. Check the queue reason and logs if service state cannot be verified |
-| Center cannot confirm a worker is idle | Check active experiments and pending transfers. If an older Center is blocked only by disconnected nodes, stop its service and manually install 0.4.2 or newer using the original data directory |
+| Update is downloaded but installation is blocked | It waits for current local preparation or configuration writes, not Docker experiments or queued transfers. Inspect the queue reason; old entries need one manual management handoff |
+| Center cannot confirm a worker is idle | Current Center permits remote experiments, disconnected nodes and queued transfers. Stop an older local management service and install the new version using the original data directory |

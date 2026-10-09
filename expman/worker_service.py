@@ -23,7 +23,8 @@ import uuid
 from . import __version__, common
 from .launcher import InstanceLock
 from .pairing import validate_pairing
-from .update_protocol import UPDATE_STOP_PROTOCOL, manual_stop_required, supports_update_stop
+from .update_protocol import (UPDATE_STOP_PROTOCOL, manual_stop_required,
+                              preserves_worker_experiments, supports_update_stop)
 from .worker_setup import private_connection, private_write
 from .worker_upgrade import _candidate, agent_is_running, discover_configs
 
@@ -497,8 +498,8 @@ def _update_containers(candidate, *, execution_only=False):
     return active
 
 
-def update_status(service_root=None):
-    """Inspect persisted work and Docker without constructing or recovering an Agent."""
+def update_status(service_root=None, *, preserve_experiments=True):
+    """Inspect whether management can hand off without changing durable work."""
     root = _root(service_root)
     result = {'running': False, 'status': 'unknown', 'ready_for_update': False}
     try:
@@ -507,8 +508,9 @@ def update_status(service_root=None):
             return manual_stop_required(result, worker=True)
         if result.get('status') in ('starting', 'preparing', 'stopping', 'external_running', 'shutting_down', 'exit_failed'):
             return dict(result, ready_for_update=False, detail='代理正在准备、停止或由旧入口运行，请完成后重试')
-        if result['running'] and (not result.get('online') or time.time() - result.get('updated_at', 0) > 45):
-            return dict(result, ready_for_update=False, detail='代理尚未确认与管理端同步，请恢复连接并等待同步完成')
+        if not preserve_experiments and result['running'] and (not result.get('online')
+                or time.time() - result.get('updated_at', 0) > 45):
+            return dict(result, ready_for_update=False, detail='代理尚未确认同步，请恢复连接后检查显卡')
         settings = _settings(root)
         config_path = settings.get('config')
         if not config_path:
@@ -524,16 +526,39 @@ def update_status(service_root=None):
             from .agent import inspect_update_state
             with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
                 db.execute('BEGIN')
-                counts = inspect_update_state(db)
+                counts = inspect_update_state(db, preserve_experiments=preserve_experiments)
             if not counts['ready_for_update']:
-                return dict(result, **counts, detail='仍有待执行实验、待扫描文件、未确认报告或文件回传，请完成后重试')
+                detail = ('仍有无法接回的本机进程实验或无法识别的任务状态，请先完成该操作' if preserve_experiments
+                          else '检查显卡前请等待本机实验、任务和回传完成')
+                return dict(result, **counts, detail=detail)
+            if (preserve_experiments and result['running'] and result.get('update_stop_protocol') != UPDATE_STOP_PROTOCOL
+                    and (counts['active_preparations'] or counts['active_project_operations'])):
+                return dict(result, **{**counts, 'ready_for_update': False},
+                            detail='正在准备实验或写入项目配置，完成当前操作后交接；Docker 实验继续运行')
+            if (preserve_experiments and result['running'] and any(counts[key] for key in
+                    ('active_jobs', 'pending_reports', 'pending_archives', 'pending_uploads', 'pending_projects'))
+                    and not preserves_worker_experiments(result)):
+                return manual_stop_required(result, worker=True)
+            if (preserve_experiments and result['running'] and result.get('update_stop_protocol') == 1
+                    and (common.read_json(config_path).get('allow_demo', False) or counts['queued_process_jobs'])
+                    and any(counts[key] for key in ('active_jobs', 'pending_reports', 'pending_archives', 'pending_uploads', 'pending_projects'))):
+                # A legacy tick could admit a host demo between the snapshot
+                # and SIGTERM. Only Docker-only nodes can use this migration.
+                return manual_stop_required(result, worker=True)
         elif result['running']:
             return dict(result, ready_for_update=False, detail='代理数据库缺失，无法核查实验状态')
-        containers = _update_containers(candidate)
-        if containers:
-            return dict(result, ready_for_update=False, active_containers=len(containers),
-                        detail=f'{len(containers)} 个受管 Docker 容器尚未退出，请等待实验完成')
-        return {**result, **counts, 'ready_for_update': True, 'detail': '实验和文件回传已完成，可以安装更新'}
+        if not preserve_experiments:
+            # Physical GPU verification reuses this service admission API, but
+            # must retain its idle requirement and inspect the selected daemon.
+            containers = _update_containers(candidate)
+            if containers:
+                return dict(result, ready_for_update=False, active_containers=len(containers),
+                            detail='检查显卡前请等待受管 Docker 实验退出')
+            return {**result, **counts, 'ready_for_update': True, 'detail': '本机实验和回传已完成，可以检查显卡'}
+        # Installing management software never touches Docker or its runtime.
+        # Its availability and running containers cannot gate the handoff.
+        return {**result, **counts, 'ready_for_update': True, 'preserve_experiments': True,
+                'detail': '可以交接管理代理并安装更新；Docker 实验继续运行，队列和文件回传在重启后接续'}
     except (OSError, ValueError, RuntimeError, sqlite3.Error, KeyError, TypeError, subprocess.SubprocessError) as error:
         try:
             detail = _redact(root, str(error))[:300]
@@ -543,7 +568,7 @@ def update_status(service_root=None):
 
 
 def install_status(service_root=None):
-    """Manual installation may preserve queued work once every old process exits."""
+    """Only the old local management owner must exit before application replacement."""
     from .desktop import _lock_is_held
     root = _root(service_root)
     result = {'running': False, 'status': 'unknown', 'ready_for_install': False}
@@ -552,7 +577,7 @@ def install_status(service_root=None):
         if (result['running'] or result['status'] in ('starting', 'preparing', 'stopping', 'shutting_down')
                 or _lock_is_held(root / 'supervisor.lock')):
             return dict(result, ready_for_install=False,
-                        detail='旧代理或准备进程尚未退出，请完成保存退出后再安装')
+                        detail='旧管理代理或准备进程尚未退出，请交接管理进程后再安装；Docker 实验可以继续运行')
         settings = _settings(root)
         if not settings.get('config'):
             return dict(result, ready_for_install=True, detail='没有运行中的旧代理，可以安装')
@@ -561,29 +586,41 @@ def install_status(service_root=None):
             return dict(result, ready_for_install=False, detail='无法读取原节点配置，不能确认运行中的实验')
         if agent_is_running(candidate['root']):
             return dict(result, running=True, ready_for_install=False, detail='原节点代理仍在运行，请先退出')
-        live = _update_containers(candidate, execution_only=True)
-        if live:
-            return dict(result, ready_for_install=False, active_containers=len(live),
-                        detail=f'{len(live)} 个受管容器仍在运行，请先保存并停止实验')
         return dict(result, ready_for_install=True,
-                    detail='旧代理及实验已退出，可以安装；原实验队列和待回传数据将保留')
+                    preserve_experiments=True,
+                    detail='旧管理代理已退出，可以安装；Docker 实验、原队列和待回传数据保留')
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
         return dict(result, ready_for_install=False, detail='无法核查安装条件：' + _redact(root, str(error))[:300])
 
 
-def stop_for_update(service_root=None):
-    """Request an idle tick-boundary stop, without sending SIGTERM or changing tasks."""
+def stop_for_update(service_root=None, *, preserve_experiments=True):
+    """Stop management between ticks; use the published process-only stop for migration."""
     _require_linux()
     root = _root(service_root)
     with InstanceLock(root / 'control.lock'):
-        result = update_status(root)
+        result = update_status(root, preserve_experiments=preserve_experiments)
         if not result['ready_for_update'] or not result['running']:
             return result
-        request_id = uuid.uuid4().hex
         state = common.read_json(root / 'status.json', {})
+        if not _owned_process(state):
+            return dict(result, ready_for_update=False, detail='管理代理所有权已变化，请重试')
+        # Keep a Windows-owned WSL attachment alive across this short handoff.
+        # The new agent clears it after its first tick; abandoned updates expire.
+        if preserve_experiments:
+            private_write(root / 'update-hold.json', dict(pid=state['pid'],
+                          process_identity=state['process_identity'], expires=time.time() + 300))
+        # Protocol 1 cannot acknowledge a busy cooperative stop. The published
+        # supervisor's normal stop preserves Docker and durable intent instead.
+        if preserve_experiments and result.get('update_stop_protocol') == 1 and preserves_worker_experiments(result):
+            _write_status(root, status='stopping', online=False,
+                detail='正在交接旧管理代理；Docker 实验继续运行，任务和回传队列保留')
+            os.kill(state['pid'], signal.SIGTERM)
+            return dict(result, status='stopping', preserve_experiments=True)
+        request_id = uuid.uuid4().hex
         request_path = root / 'update-request.json'
         private_write(request_path, dict(request_id=request_id, pid=state.get('pid'),
-                      process_identity=state.get('process_identity'), expires=time.time() + 35))
+                      process_identity=state.get('process_identity'), expires=time.time() + 35,
+                      preserve_experiments=preserve_experiments))
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             reply = common.read_json(root / 'update-result.json', {})
@@ -593,8 +630,20 @@ def stop_for_update(service_root=None):
         current = common.read_json(request_path, {})
         if current.get('request_id') == request_id:
             request_path.unlink(missing_ok=True)
+        (root / 'update-hold.json').unlink(missing_ok=True)
         return dict(result, ready_for_update=False,
-                    detail='安全停止检查超时，尚未安装更新；请待同步完成后重试。旧版本请手动退出后安装。')
+                    detail='管理代理交接检查超时，尚未安装更新；请待当前操作完成后重试。')
+
+
+def _update_pending(root):
+    request = common.read_json(root / 'update-request.json', {})
+    owner = common.read_json(root / 'status.json', {})
+    if common.read_json(root / 'update-result.json', {}).get('request_id') == request.get('request_id'):
+        return False
+    return bool(request.get('request_id') and request.get('preserve_experiments') is True
+                and request.get('expires', 0) > time.time()
+                and request.get('pid') == owner.get('pid')
+                and request.get('process_identity') == owner.get('process_identity'))
 
 
 def _update_stop_at_boundary(root, agent):
@@ -608,10 +657,22 @@ def _update_stop_at_boundary(root, agent):
     prior = common.read_json(root / 'update-result.json', {})
     if prior.get('request_id') == request['request_id']:
         return False
-    if agent.preparation or agent.project_delivery.installing:
+    if request.get('preserve_experiments') is True:
+        # Finish the already-owned operation without admitting another one.
+        # Agent.tick is fenced while this request is outstanding.
+        if agent.preparation:
+            agent._poll_preparation()
+        operation = agent.project_delivery.installing
+        if operation and operation['done'].is_set():
+            agent.project_delivery.tick()
+        if agent.preparation or agent.project_delivery.installing:
+            return False
+        result = update_status(root)
+    elif agent.preparation or agent.project_delivery.installing:
         result = dict(ready_for_update=False, detail='代理正在准备实验或安装项目，请完成后重试')
     else:
-        result = update_status(root)
+        # Older clients request an idle stop; retain that protocol's contract.
+        result = update_status(root, preserve_experiments=False)
     # Stop acceptance is the last operation before leaving this loop; no sync,
     # launch or preparation can happen between the check and Agent.close().
     latest = common.read_json(root / 'update-request.json', {})
@@ -619,7 +680,7 @@ def _update_stop_at_boundary(root, agent):
         return False
     accepted = result['ready_for_update']
     if accepted:
-        _write_status(root, status='stopping', detail='已确认空闲，正在安全停止以安装更新')
+        _write_status(root, status='stopping', detail='正在交接管理代理以安装更新；Docker 实验继续运行')
     private_write(root / 'update-result.json', dict(result, request_id=request['request_id'],
                   status='stopping' if accepted else owner.get('status', 'online')))
     return accepted
@@ -657,8 +718,8 @@ def hold(service_root=None):
     """Keep a foreground WSL client attached while its worker is active.
 
     Windows owns the foreground wsl.exe handle. This watcher never starts,
-    stops or signals an agent and exits when the worker has stopped. Only one
-    watcher is needed per installed client, including after reopening its UI.
+    stops or signals an agent. A bounded update receipt keeps WSL attached until
+    the new agent takes over. Only one watcher is needed per installed client.
     """
     _require_linux()
     root = _root(service_root)
@@ -674,6 +735,8 @@ def hold(service_root=None):
             current = status(root)
             if current.get('running'):
                 pass
+            elif 0 < common.read_json(root / 'update-hold.json', {}).get('expires', 0) - time.time() <= 300:
+                pass  # Preserve WSL through an acknowledged management update.
             elif current.get('status') in ('starting', 'preparing', 'stopping', 'shutting_down') and time.monotonic() < grace:
                 pass
             else:
@@ -696,7 +759,7 @@ def _run_agent(root, config_path):
                 continue
             if _update_stop_at_boundary(root, agent):
                 return
-            snapshot = agent.tick(stop_requested=lambda: _shutdown_requested(root))
+            snapshot = agent.tick(stop_requested=lambda: _shutdown_requested(root) or _update_pending(root))
             if _shutdown_requested(root):
                 continue
             online = bool(snapshot['online'])
@@ -710,6 +773,9 @@ def _run_agent(root, config_path):
                 counts[state] = counts.get(state, 0) + 1
             _write_status(root, status='online' if online else 'offline', online=online,
                           detail=detail, jobs=counts)
+            held_owner = common.read_json(root / 'update-hold.json', {})
+            if held_owner.get('pid') != os.getpid():
+                (root / 'update-hold.json').unlink(missing_ok=True)
             if detail != previous:
                 print(detail, flush=True)
                 previous = detail

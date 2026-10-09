@@ -1,7 +1,8 @@
-"""Ubuntu releases are verified, installed at idle boundaries and retried durably."""
+"""Verified Ubuntu updates hand off management and retry durably."""
 import hashlib
 import io
 import json
+import signal
 from pathlib import Path
 import stat
 import subprocess
@@ -161,20 +162,80 @@ class UbuntuUpdateLifecycleTests(unittest.TestCase):
         self.temporary.__exit__(None, None, None)
 
     def assert_data_preserved(self):
-        self.assertEqual({path: path.read_bytes() for path in self.config_path.parent.rglob('*') if path.is_file()}, self.original)
+        # SQLite may create transient WAL reader-coordination files even for a
+        # mode=ro connection. Compare the database and all durable files.
+        temporary = {'node.sqlite3-wal', 'node.sqlite3-shm'}
+        self.assertEqual({path: path.read_bytes() for path in self.config_path.parent.rglob('*')
+                          if path.is_file() and path.name not in temporary},
+                         {path: data for path, data in self.original.items() if path.name not in temporary})
 
     def save_queue(self, **values):
         update._save(self.root, release=self.release, target_version='0.5.9', **values)
 
-    def test_running_work_waits_without_stopping_or_installing(self):
+    def test_local_configuration_write_waits_without_stopping_or_installing(self):
         self.save_queue(automatic=False)
-        with patch.object(service, 'update_status', return_value={'ready_for_update': False, 'detail': '实验仍在运行'}), \
+        with patch.object(service, 'update_status', return_value={'ready_for_update': False, 'detail': '项目配置正在写入'}), \
                 patch.object(service, 'stop_for_update') as stop, patch.object(update, '_invoke') as invoke:
             result = update._apply(self.root, self.package, self.release)
         self.assertEqual(result['phase'], 'waiting')
         stop.assert_not_called()
         invoke.assert_not_called()
         self.assert_data_preserved()
+
+    def test_manual_and_automatic_busy_docker_handoff_install_and_restore_management(self):
+        from expman.agent import Agent
+        common.atomic_json(self.config_path, {**self.config, 'allow_demo': False})
+        (self.data / 'node.sqlite3').unlink()
+        agent = Agent(self.config_path)
+        for identity, state in (('a' * 32, 'running'), ('b' * 32, 'ready')):
+            record = dict(id=identity, state=state, spec={'backend': 'docker'}, seq=2,
+                          attempt=1, container_name='expman-' + identity + '-1', archive_scanned=False)
+            agent.db.execute('INSERT INTO tasks VALUES (?,?)', (identity, json.dumps(record)))
+        agent.db.execute("INSERT INTO uploads(job_id,name,sha,size,path,offset,complete) VALUES (?,'result','digest',30,'path',11,0)", ('a' * 32,))
+        agent.db.commit()
+        agent.close()
+        self.original = {path: path.read_bytes() for path in self.config_path.parent.rglob('*') if path.is_file()}
+        release = update.select_release([published('0.5.10')], '0.5.9')
+        release['sha256'] = 'a' * 64
+        entries = [(Path('worker_service.py'), b'# immutable verified worker\n'),
+                   (Path('worker_update.py'), b'# immutable verified updater\n')]
+        def killed(pid, sig):
+            self.assertEqual((pid, sig), (1234, signal.SIGTERM))
+            service._write_status(self.root, status='stopped', pid=None, process_identity=None, online=False)
+        def spawned(root, settings):
+            service._write_status(root, status='offline', pid=5678, process_identity='new',
+                version='0.5.10', online=False, update_stop_protocol=2, update_stop_process_identity='new')
+        def invoke(package, root, action, *options):
+            if action == 'install':
+                self.assertEqual(options, ('--no-start', '--backend', 'detached', '--config', str(self.config_path)))
+                return service.install(root, config=str(self.config_path), backend='detached', start_now=False)
+            if action == 'start':
+                return service.start(root)
+            self.assertEqual(action, 'status')
+            return service.status(root)
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                service._save_settings(self.root, self.before)
+                service._write_status(self.root, status='offline', pid=1234, process_identity='old',
+                    version='0.5.8', online=False, update_stop_protocol=1, update_stop_process_identity='old')
+                update._save(self.root, release=release, before_settings=None, before_unit=None, automatic=automatic)
+                common.atomic_json(self.root / 'updates/settings.json', {'enabled': automatic})
+                with patch.object(service, '_require_linux'), patch.object(service, '_systemd_available', return_value=False), \
+                        patch.object(service, '_installation_payload', return_value=(entries, {'role': update.ROLE, 'version': '0.5.10'}, 'verified-code')), \
+                        patch.object(Path, 'home', return_value=self.home), \
+                        patch.object(service, '_process_identity', side_effect=lambda pid: 'old' if pid == 1234 else 'new'), \
+                        patch.object(service.os, 'kill', side_effect=killed) as stop, \
+                        patch.object(service, '_spawn_supervisor', side_effect=spawned) as start, \
+                        patch.object(service, '_update_containers', side_effect=AssertionError('Docker must not be controlled')), \
+                        patch.object(update, '_invoke', side_effect=invoke):
+                    result = update._apply(self.root, self.package, release)
+                self.assertEqual(result['phase'], 'completed')
+                self.assertEqual(service._settings(self.root)['version'], '0.5.10')
+                self.assertEqual(service._settings(self.root)['config'], self.before['config'])
+                self.assertEqual(service._settings(self.root)['node_id'], 'a6000')
+                stop.assert_called_once()
+                start.assert_called_once()
+                self.assert_data_preserved()
 
     def test_installs_real_immutable_service_files_and_keeps_stopped_worker_stopped(self):
         entries = [(Path('worker_service.py'), b'# new immutable code\n'), (Path('worker_update.py'), b'# new updater\n')]

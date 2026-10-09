@@ -338,7 +338,7 @@ namespace ExperimentManagerDesktop {
         }
         internal static string Install(string dataPath,string credential,bool makeDesktop,bool autoStart) {
             Mutex active;
-            if(Mutex.TryOpenExisting(App.InstanceKey,out active)) {active.Dispose();throw new Exception("此客户端已经运行。升级前请在原客户端中停止主控或代理，再从托盘菜单退出客户端，然后点击安装。已有 Docker 实验不会因此停止。");}
+            if(Mutex.TryOpenExisting(App.InstanceKey,out active)) {active.Dispose();throw new Exception("此客户端已经运行。请通过客户端更新入口交接管理服务，或只退出旧管理代理和同角色客户端后安装；Docker 实验和待回传数据保留。");}
             using(var payload=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppPayload")) using(var zip=new ZipArchive(payload,ZipArchiveMode.Read)) {
                 var role=zip.GetEntry("release-role.json"); string version;
                 using(var reader=new StreamReader(role.Open())) version=App.Text(App.Json.Deserialize<Dictionary<string,object>>(reader.ReadToEnd()),"version");
@@ -646,7 +646,7 @@ namespace ExperimentManagerDesktop {
                         throw new Exception("安装包版本或角色不匹配，请重新下载。");
                 } finally {if(File.Exists(report))File.Delete(report);}
                 var ready=App.Worker?await WorkerCommand("update-status"):await Controller("controller-update-status");
-                if(!App.Flag(ready,"ready_for_update"))throw new Exception(App.Text(ready,"detail","实验或文件回传尚未完成。"));
+                if(!App.Flag(ready,"ready_for_update"))throw new Exception(App.Text(ready,"detail","管理服务尚未完成当前操作，请稍后交接。"));
                 wasRunning=App.Flag(ready,"running");
                 resumeWorkerAfterUpdate=resumeWorkerAfterUpdate||(App.Worker&&wasRunning);
                 stopRequested=true;

@@ -367,15 +367,16 @@ class WorkerShutdownTests(unittest.TestCase):
         self.agent.close()
         with patch.object(service, '_update_containers', return_value=[]):
             self.assertTrue(service.install_status(self.service_root)['ready_for_install'])
-            self.assertFalse(service.update_status(self.service_root)['ready_for_update'])
+            self.assertTrue(service.update_status(self.service_root)['ready_for_update'])
 
-    def test_manual_install_blocks_live_processes_and_containers(self):
+    def test_manual_install_blocks_local_manager_but_preserves_running_containers(self):
         self.owner()
         with patch.object(service, '_process_identity', return_value='owned-identity'):
             self.assertFalse(service.install_status(self.service_root)['ready_for_install'])
         self.agent.close()
-        with patch.object(service, '_update_containers', return_value=['live-owned-container']):
-            self.assertFalse(service.install_status(self.service_root)['ready_for_install'])
+        with patch.object(service, '_update_containers', side_effect=AssertionError('Docker must be preserved')) as docker:
+            self.assertTrue(service.install_status(self.service_root)['ready_for_install'])
+            docker.assert_not_called()
 
     def test_recovered_created_container_does_not_start_when_exit_arrives_during_probe(self):
         self.owner()

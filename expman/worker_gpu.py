@@ -140,7 +140,7 @@ def _enable_stopped(root, identity, expected_path):
         path, candidate, config = _configuration(root)
         if path != expected_path:
             raise ValueError('所选节点配置已改变，请重新打开显卡设置。')
-        ready = service.update_status(root)
+        ready = service.update_status(root, preserve_experiments=False)
         if ready['running'] or not ready['ready_for_update']:
             raise RuntimeError(ready['detail'])
         with InstanceLock(Path(candidate['root']) / 'agent.lock'):
@@ -180,14 +180,14 @@ def gpu_enable(service_root=None, *, gpu):
         raise ValueError('请选择有效的显卡 UUID。')
     root = service._root(service_root)
     path, _, _ = _configuration(root)
-    before = service.update_status(root)
+    before = service.update_status(root, preserve_experiments=False)
     if not before['ready_for_update']:
         raise RuntimeError('当前无法检查显卡：' + before['detail'].replace('安装更新', '启用显卡'))
     was_running = before['running']
     result = None
     try:
         if was_running:
-            stopped = service.stop_for_update(root)
+            stopped = service.stop_for_update(root, preserve_experiments=False)
             if not stopped['ready_for_update']:
                 raise RuntimeError(stopped['detail'])
             deadline = time.monotonic() + 15

@@ -60,7 +60,7 @@ def _docker_timestamp(value):
         return None
 
 
-def inspect_update_state(db):
+def inspect_update_state(db, *, preserve_experiments=False):
     """Read one durable snapshot without opening an Agent or changing task state."""
     records = [json.loads(row[0]) for row in db.execute("SELECT record FROM tasks")]
     acknowledged = dict(db.execute("SELECT job_id,seq FROM report_acks"))
@@ -84,7 +84,21 @@ def inspect_update_state(db):
         "pending_uploads": pending_uploads,
         "pending_projects": sum(item["status"] not in ("installed", "failed", "deleted", "delete_failed") for item in projects.values()),
     }
-    return {"ready_for_update": not any(counts.values()), **counts}
+    if not preserve_experiments:
+        return {"ready_for_update": not any(counts.values()), **counts}
+    # Docker execution, queues, acknowledgments and resumable transfers are
+    # durable across a management-process replacement. Host demo processes
+    # cannot be reattached, so their active execution remains a blocker.
+    active_processes = sum(record["state"] in ACTIVE and record["spec"]["backend"] != "docker"
+                           for record in records)
+    unknown = sum(record["state"] not in TERMINAL | ACTIVE | {"assigned", "preparing", "ready"}
+                  for record in records)
+    return {**counts, "active_process_jobs": active_processes, "unknown_jobs": unknown,
+            "queued_process_jobs": sum(record["state"] not in TERMINAL | ACTIVE
+                                       and record["spec"]["backend"] != "docker" for record in records),
+            "active_preparations": sum(record["state"] == "preparing" for record in records),
+            "active_project_operations": sum(item["status"] in ("installing", "deleting") for item in projects.values()),
+            "ready_for_update": not (active_processes or unknown)}
 
 
 def _pid_alive(pid):

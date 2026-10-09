@@ -89,7 +89,7 @@ static class UpdateTests {
         };
         bool ready=false;
         Func<Task<Dictionary<string,object>>> inspect=()=>{
-            probes++;return Task.FromResult(new Dictionary<string,object>{{"ready_for_update",ready},{"detail","Experiment still running"}});
+            probes++;return Task.FromResult(new Dictionary<string,object>{{"ready_for_update",ready},{"active_jobs",3},{"pending_uploads",2},{"detail","Management handoff"}});
         };
         Func<UpdateRelease,string,Task> install=(item,path)=>{
             installs++;Assert(!queue.CanCancel,"Installation handoff remained cancelable.");return Task.FromResult(0);

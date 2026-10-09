@@ -39,7 +39,7 @@ class WorkerGpuTests(unittest.TestCase):
         self.receipt_uuid = self.gpu
         self.ready = dict(running=False, status='stopped', ready_for_update=True, detail='ready')
         self.patchers = [patch.object(service, '_require_linux'),
-                         patch.object(service, 'update_status', side_effect=lambda *a: dict(self.ready)),
+                         patch.object(service, 'update_status', side_effect=lambda *a, **kw: dict(self.ready)),
                          patch.object(worker_gpu.subprocess, 'run', side_effect=self.command),
                          patch.object(os, 'getuid', return_value=1000, create=True),
                          patch.object(os, 'getgid', return_value=1000, create=True)]
@@ -150,7 +150,7 @@ class WorkerGpuTests(unittest.TestCase):
                         patch.object(service, 'stop_for_update', return_value={**self.ready, 'status': 'stopping'}) as stop, \
                         patch.object(service, 'start', return_value={'status': 'starting', 'running': False}) as start:
                     result = self.enable()
-                stop.assert_called_once_with(self.root)
+                stop.assert_called_once_with(self.root, preserve_experiments=False)
                 start.assert_called_once_with(self.root)
                 self.assertEqual(result['status'], 'failed' if fail else 'succeeded')
 

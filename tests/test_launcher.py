@@ -35,7 +35,7 @@ class LauncherLifecycleTests(unittest.TestCase):
                 self.fail('CLI did not become ready')
             self.assertTrue(status['managed'])
             self.assertEqual(status['version'], __version__)
-            self.assertEqual(status['update_stop_protocol'], 1)
+            self.assertEqual(status['update_stop_protocol'], 2)
             self.assertEqual(common.read_json(root / 'desktop-process.json')['pid'], process.pid)
             yield process, status
         finally:

@@ -27,7 +27,7 @@ namespace ExperimentManagerDesktop {
             layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
             for(int i=0;i<4;i++)layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.Controls.Add(versions);
-            layout.Controls.Add(new Label { Text="排队一次即可：自动下载，等待实验与回传完成后安装。关闭此窗口仍会继续；安装成功后自动删除安装包。",AutoSize=true,MaximumSize=new Size(560,0),Margin=new Padding(0,12,0,12) });
+            layout.Controls.Add(new Label { Text="排队一次即可：自动下载并交接管理服务，Docker 实验继续运行，队列和回传在重启后接续。关闭此窗口仍会继续；安装成功后自动删除安装包。",AutoSize=true,MaximumSize=new Size(560,0),Margin=new Padding(0,12,0,12) });
             layout.Controls.Add(notes);layout.Controls.Add(progress);layout.Controls.Add(status);
             var buttons=new FlowLayoutPanel { AutoSize=true,Dock=DockStyle.Fill,Margin=new Padding(0,12,0,8) };
             buttons.Controls.Add(check);buttons.Controls.Add(download);buttons.Controls.Add(install);buttons.Controls.Add(cancel);

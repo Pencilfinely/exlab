@@ -83,6 +83,10 @@ class AgentTests(unittest.TestCase):
         sent = []
 
         def request(url, token, payload, **kwargs):
+            # Result delivery also retries in background threads. Its traffic
+            # must not be mistaken for the two report synchronization attempts.
+            if not url.endswith('/api/sync'):
+                raise OSError('Hub offline for background result delivery')
             sent.append(copy.deepcopy(payload))
             if len(sent) == 1:
                 raise OSError("Server committed, response was lost")
@@ -331,6 +335,34 @@ class AgentTests(unittest.TestCase):
             self.agent._reconcile(record)
         self.assertEqual(record["state"], "running")
         self.assertEqual(calls, [["docker", "inspect", record["container_name"]]])
+
+    def test_management_restart_keeps_docker_attempts_queue_and_report_ack_state(self):
+        running = self.record("running", self.docker_spec())
+        running.update(container_name=f"expman-{self.job_id}-1", ever_started=True)
+        self.agent._save(running)
+        ready = copy.deepcopy(running)
+        ready.update(id="b" * 32, state="ready", container_name=None, ever_started=False)
+        self.agent._save(ready)
+        self.agent.db.execute("INSERT INTO report_acks VALUES (?,?)", (running["id"], 0))
+        self.agent.db.commit()
+        before = self.agent.records()
+        config = self.config.read_bytes()
+        with patch.object(self.agent, "_exec") as docker:
+            self.agent.close()
+            docker.assert_not_called()
+        self.agent = Agent(self.config)
+        self.assertEqual(self.agent.records(), before)
+        self.assertEqual(self.config.read_bytes(), config)
+        self.assertEqual(self.agent.db.execute("SELECT seq FROM report_acks WHERE job_id=?", (running["id"],)).fetchone()[0], 0)
+        container = {"State": {"Running": True, "Status": "running"},
+                     "Config": {"Labels": {"expman.job": running["id"], "expman.node": "test"}}}
+        resumed = next(item for item in self.agent.records() if item["id"] == running["id"])
+        with patch.object(self.agent, "_exec", return_value=subprocess.CompletedProcess([], 0, json.dumps([container]), "")) as docker:
+            self.agent._reconcile(resumed)
+            docker.assert_called_once_with(["docker", "inspect", running["container_name"]], check=False)
+        self.assertEqual((resumed["attempt"], resumed["container_name"], resumed["state"]),
+                         (running["attempt"], running["container_name"], "running"))
+        self.assertEqual(next(item for item in self.agent.records() if item["id"] == ready["id"])["state"], "ready")
 
     def test_docker_unknown_container_owner_is_never_stopped(self):
         record = self.record("running", self.docker_spec())

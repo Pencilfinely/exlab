@@ -7,7 +7,7 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.9. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.9 release notes](docs/RELEASE-0.5.9.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
+**Desktop version: 0.5.10. Monitor APK: 0.5.2.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.10 release notes](docs/RELEASE-0.5.10.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. Desktop shortcuts use the ExLab names; see the [0.5.2 release](docs/RELEASE-0.5.2.md).
 
 The algorithm library now supports search, deployment filters, bounded pagination and import timestamps. A five-step import opens node deployment when complete. Project dialogs provide experiment forms, allocation previews and matrix conversion, retaining inputs within the current page when switching presets or closing and reopening.
 
@@ -111,9 +111,9 @@ Workers can continue already assigned, cached tasks during a temporary controlle
 
 ## Existing deployments and everyday use
 
-**Upgrading from 0.3.0-rc.1 or earlier:** download and install this release manually; those versions have no in-app update entry. Finish tasks and pending uploads, stop the old controller/agent in its client and exit that client from its tray before installing the same-role package.
+**Upgrading from 0.3.0-rc.1 or earlier:** download and install this release manually once. Exit only the old management process and same-role client, retaining Docker experiments and pending transfers. If an old entry still requires an idle worker, use the new package's management handoff command; see the operations guide.
 
-**From 0.3.0-rc.2 onward on Windows:** choose **Check for updates** in the application's status window or tray menu. Review the current/new versions and release notes, then download the matching Center or Worker installer. The application checks its size and SHA-256 before installation. You can download while busy and install later, after experiments and pending uploads finish. Installation checks that services can stop safely, exits the old client and opens the new installer. Your data-directory selection, Ubuntu distribution, node configuration and login-startup setting are retained.
+**From 0.3.0-rc.2 onward on Windows:** choose **Check for updates** in the application's status window or tray menu. Download the matching Center or Worker installer and verify its size and SHA-256. From 0.5.10, manual and automatic updates hand off only management processes; Docker experiments continue, and queues and transfers resume after restart. Data-directory selection, Ubuntu distribution, node configuration and startup preferences are retained.
 
 Preview versions check for newer previews and stable releases; stable versions check for stable releases only. From 0.5.9, Ubuntu workers check, download and install verified GitHub packages with `bash Update-Worker.sh` in their original service directory. Use `--auto enable` to opt into hourly safe updates through a systemd user timer. Upgrade to a package containing this new entry once; later updates reuse the same command. Experiments, uploads, node identity, GPU policy and Docker endpoints are preserved. See [Ubuntu update instructions](docs/OPERATIONS.md).
 

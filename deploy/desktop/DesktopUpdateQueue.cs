@@ -93,7 +93,7 @@ namespace ExperimentManagerDesktop {
                     cacheValidated = true;
                     request.Bytes = request.Total = request.Release.Size;
                     request.Failures = 0; request.Stage = request.InstallRequested ? "waiting" : "downloaded";
-                    request.Detail = request.InstallRequested ? "下载已完成，等待实验与回传完成后自动安装。" : "下载已完成并校验，可排队安装。";
+                    request.Detail = request.InstallRequested ? "下载已完成，将交接管理服务并安装；Docker 实验继续运行。" : "下载已完成并校验，可排队安装。";
                     Save();
                 }
                 if(!request.InstallRequested) return;

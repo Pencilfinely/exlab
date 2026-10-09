@@ -359,7 +359,8 @@ def _restart_and_verify(package, root, release):
     deadline = time.monotonic() + 35
     while True:
         result = _invoke(package, root, 'status')
-        if result.get('running') is True and same_version(result.get('version'), release['version']):
+        if (result.get('running') is True and result.get('status') in ('online', 'offline')
+                and same_version(result.get('version'), release['version'])):
             return
         if result.get('status') in ('failed', 'exit_failed') or time.monotonic() >= deadline:
             raise RuntimeError('新版 worker 启动未确认: ' + result.get('detail', '请查看 worker.log'))
@@ -427,7 +428,7 @@ def _apply(root, package, release):
                      detail='已安装相同或更新版本；原更新队列已完成，保留当前后台')
     ready = service.update_status(root)
     if ready.get('ready_for_update') is not True:
-        return _save(root, phase='waiting', detail=ready.get('detail', '等待实验与回传完成'),
+        return _save(root, phase='waiting', detail=ready.get('detail', '等待当前管理操作完成后交接'),
                      manual_stop_required=ready.get('manual_stop_required', False) or ready.get('status') == 'external_running')
     if common.read_json(root / 'updates' / 'settings.json', {}).get('enabled') is not True and state.get('automatic'):
         return _save(root, phase='paused', detail='自动更新已关闭；已下载安装包保留')
@@ -440,7 +441,7 @@ def _apply(root, package, release):
             raise RuntimeError('无法备份原 systemd 用户服务，尚未停止代理')
         before_unit = unit.read_text(encoding='utf-8')
     _save(root, phase='stopping', before_settings=before, before_unit=before_unit, resume_service=resume, manual_stop_required=False,
-          detail='正在等待代理在空闲边界停止')
+          detail='正在交接管理代理；Docker 实验继续运行，任务队列和待回传数据保留')
     stopped = service.stop_for_update(root)
     if stopped.get('ready_for_update') is not True:
         return _save(root, phase='waiting', detail=stopped.get('detail', '安全停止未完成'))

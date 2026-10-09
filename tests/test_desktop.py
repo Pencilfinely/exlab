@@ -261,7 +261,7 @@ class DesktopTests(unittest.TestCase):
     def test_update_status_and_cooperative_stop_leave_controller_data_intact(self):
         self.serve()
         identity = common.read_json(self.root / 'hub.json')
-        self.assertEqual(desktop.controller_status(self.root)['update_stop_protocol'], 1)
+        self.assertEqual(desktop.controller_status(self.root)['update_stop_protocol'], 2)
         self.assertTrue(desktop.controller_update_status(self.root)['ready_for_update'])
         result = desktop.controller_stop_for_update(self.root)
         self.assertTrue(result['ready_for_update'])

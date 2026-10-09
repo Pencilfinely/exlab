@@ -407,6 +407,29 @@ class WorkerServiceTests(unittest.TestCase):
             self.assertEqual(service.hold(self.root), 0)
             status.assert_not_called()
 
+    def test_session_holder_keeps_wsl_alive_across_bounded_update_handoff(self):
+        common.atomic_json(self.root / 'update-hold.json', {'expires': time.time() + 30})
+        snapshots = iter([{'running': False, 'status': 'stopped'},
+                          {'running': False, 'status': 'starting'},
+                          {'running': True, 'status': 'online'},
+                          {'running': False, 'status': 'stopped'}])
+        def state(root):
+            current = next(snapshots)
+            if current['running']:
+                (self.root / 'update-hold.json').unlink()
+            return current
+        with patch.object(service, '_require_linux'), patch.object(service, 'status', side_effect=state), \
+                patch.object(service.time, 'sleep') as sleep, patch.object(service.os, 'kill') as kill:
+            self.assertEqual(service.hold(self.root), 0)
+        self.assertEqual(sleep.call_count, 3)
+        kill.assert_not_called()
+        common.atomic_json(self.root / 'update-hold.json', {'expires': time.time() - 1})
+        with patch.object(service, '_require_linux'), \
+                patch.object(service, 'status', return_value={'running': False, 'status': 'stopped'}), \
+                patch.object(service.time, 'sleep') as sleep:
+            self.assertEqual(service.hold(self.root), 0)
+            sleep.assert_not_called()
+
     @unittest.skipUnless(sys.platform == 'linux' and getattr(os, 'geteuid', lambda: 0)() != 0,
                          'Linux same-user process lifecycle fixture')
     def test_real_owned_process_status_and_stop_leave_unrelated_process_alive(self):

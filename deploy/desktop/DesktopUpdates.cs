@@ -31,7 +31,7 @@ namespace ExperimentManagerDesktop {
                     state.TryGetValue("ready_for_install",out ready)&&ready is bool&&(bool)ready)return;
             string detail=state.ContainsKey("detail")?Convert.ToString(state["detail"]):"无法确认旧后台已安全停止。";
             throw new InvalidOperationException(detail+"\n"+(worker?
-                "请先保存并停止实验，再停止旧代理并从托盘退出，然后重试安装。待回传数据会保留。":
+                "请通过客户端更新入口交接旧管理代理并退出客户端，再重试安装；Docker 实验和待回传数据保留。":
                 "请在旧实验台的“状态与日志”窗口点击“停止主控”，再从托盘退出并重试安装。")+
                 " 新版本不会直接连接仍在运行的旧后台。");
         }

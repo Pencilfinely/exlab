@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sqlite3
 import subprocess
+import signal
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -42,7 +44,8 @@ class UpdateReadinessTests(unittest.TestCase):
         return self.config_path.parent / 'runtime/node.sqlite3'
 
     def record(self, database, **changes):
-        record = dict(id='a' * 32, state='succeeded', seq=1, archive_scanned=True)
+        record = dict(id='a' * 32, state='succeeded', seq=1, archive_scanned=True,
+                      spec={'backend': 'docker'})
         record.update(changes)
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (record['id'], json.dumps(record)))
@@ -65,7 +68,8 @@ class UpdateReadinessTests(unittest.TestCase):
             with self.subTest(version=version):
                 self.assertFalse(supports_update_stop({'version': version}))
         self.assertTrue(supports_update_stop({'version': '0.4.0', 'update_stop_protocol': 1}))
-        for protocol in (None, True, '1', 2):
+        self.assertTrue(supports_update_stop({'version': '0.5.10', 'update_stop_protocol': 2}))
+        for protocol in (None, True, '1', 3):
             with self.subTest(protocol=protocol):
                 self.assertFalse(supports_update_stop({'version': '0.3.0rc2', 'update_stop_protocol': protocol}))
 
@@ -82,7 +86,7 @@ class UpdateReadinessTests(unittest.TestCase):
             self.assertFalse(result['ready_for_update'])
             self.assertTrue(result['manual_stop_required'])
             self.assertEqual(result['backend_version'], '0.3.0rc1')
-            self.assertIn('停用并释放资源', result['detail'])
+            self.assertIn('只退出原管理代理', result['detail'])
             self.assertNotIn('同步', result['detail'])
             docker.assert_not_called()
             sleep.assert_not_called()
@@ -126,7 +130,7 @@ class UpdateReadinessTests(unittest.TestCase):
             self.assertFalse(result['ready_for_update'])
             self.assertTrue(result['manual_stop_required'])
             self.assertEqual(result['backend_version'], '0.3.0rc1')
-            self.assertIn('停用并释放资源', result['detail'])
+            self.assertIn('停止原主控管理服务', result['detail'])
             opener.assert_not_called()
             sleep.assert_not_called()
         self.assertFalse(center.exists())
@@ -335,35 +339,33 @@ class UpdateReadinessTests(unittest.TestCase):
         finally:
             hub.close()
 
-    def test_worker_blocks_active_unknown_unscanned_unacknowledged_and_uploading_tasks(self):
+    def test_worker_preserves_docker_queue_unscanned_unacknowledged_and_uploading_tasks(self):
         database = self.worker_database()
-        cases = ({'state': 'assigned'}, {'state': 'running'}, {'state': 'unrecognized'},
+        cases = ({'state': 'assigned'}, {'state': 'running'}, {'state': 'ready'},
                  {'archive_scanned': False}, {'seq': 2})
         with patch.object(worker_service, '_update_containers') as docker:
             for changes in cases:
                 with self.subTest(changes=changes):
                     self.record(database, **changes)
-                    self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+                    self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
             docker.assert_not_called()
         self.record(database)
         with closing(sqlite3.connect(database)) as db, db:
             db.execute("INSERT INTO uploads(job_id,name,sha,size,path,complete) VALUES (?,'result','digest',3,'path',0)", ('a' * 32,))
         result = worker_service.update_status(self.service_root)
-        self.assertFalse(result['ready_for_update'])
+        self.assertTrue(result['ready_for_update'])
         self.assertEqual(result['pending_uploads'], 1)
 
-    def test_worker_only_allows_complete_acknowledged_archives_and_no_live_containers(self):
+    def test_worker_update_and_manual_install_do_not_probe_or_change_docker(self):
         database = self.worker_database()
         self.record(database, state='paused')
         before = self.config_path.read_bytes()
-        with patch.object(worker_service, '_update_containers', return_value=[]):
+        with patch.object(worker_service, '_update_containers', side_effect=AssertionError('Docker must be preserved')) as docker:
             ready = worker_service.update_status(self.service_root)
+            self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
+            docker.assert_not_called()
         self.assertTrue(ready['ready_for_update'])
         self.assertEqual(self.config_path.read_bytes(), before)
-        with patch.object(worker_service, '_update_containers', return_value=['orphaned-container']):
-            blocked = worker_service.update_status(self.service_root)
-        self.assertFalse(blocked['ready_for_update'])
-        self.assertEqual(blocked['active_containers'], 1)
 
     def test_docker_probe_preserves_endpoint_and_only_reads_owned_containers(self):
         self.worker_database()
@@ -380,14 +382,22 @@ class UpdateReadinessTests(unittest.TestCase):
         for response in (subprocess.CompletedProcess([], 1, '', 'unavailable'),
                          subprocess.CompletedProcess([], 0, '{}\n', '')):
             with patch.object(worker_service.subprocess, 'run', return_value=response):
-                self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+                self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
 
     def test_worker_project_preparation_and_corrupt_database_block_update(self):
         database = self.worker_database()
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('INSERT INTO metadata VALUES (?,?)', ('project_deliveries', '{"digest":{"status":"installing"}}'))
             self.assertFalse(inspect_worker(db)['ready_for_update'])
-        self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+        # A stopped agent can resume this durable installation; a live writer
+        # must finish its owned operation before the handoff is accepted.
+        self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
+        worker_service._write_status(self.service_root, pid=1234, process_identity='identity',
+            status='offline', online=False, version='0.5.10', update_stop_protocol=2,
+            update_stop_process_identity='identity')
+        with patch.object(worker_service, '_process_identity', return_value='identity'):
+            self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertEqual(worker_service.update_status(self.service_root)['active_project_operations'], 1)
         with closing(sqlite3.connect(database)) as db, db:
             db.execute('DELETE FROM metadata')
             db.execute('INSERT INTO tasks VALUES (?,?)', ('a' * 32, '{}'))
@@ -408,22 +418,22 @@ class UpdateReadinessTests(unittest.TestCase):
                 self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
         self.assertEqual((database.read_bytes(), self.config_path.read_bytes()), before)
 
-    def test_stopped_docker_preserves_pending_work_and_uncertain_or_invalid_status_still_blocks(self):
+    def test_docker_unavailable_or_invalid_does_not_block_management_software_updates(self):
         database = self.worker_database()
         self.record(database, state='ready', seq=2)
         with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
                 patch.object(worker_service.subprocess, 'run', side_effect=FileNotFoundError('docker')):
-            self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
             self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
         self.record(database)
         with patch('expman.runtime.docker_desktop_stopped', return_value=False), \
                 patch.object(worker_service.subprocess, 'run', side_effect=FileNotFoundError('docker')):
-            self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
-            self.assertFalse(worker_service.install_status(self.service_root)['ready_for_install'])
+            self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
         with patch('expman.runtime.docker_desktop_stopped', return_value=True), \
                 patch.object(worker_service.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '{}\n', '')):
-            self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
-            self.assertFalse(worker_service.install_status(self.service_root)['ready_for_install'])
+            self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
+            self.assertTrue(worker_service.install_status(self.service_root)['ready_for_install'])
 
     def test_tick_boundary_rechecks_work_and_never_signals_processes(self):
         database = self.worker_database()
@@ -445,6 +455,112 @@ class UpdateReadinessTests(unittest.TestCase):
         reply = common.read_json(self.service_root / 'update-result.json')
         self.assertTrue(reply['ready_for_update'])
         self.assertEqual(reply['status'], 'stopping')
+
+    def live_worker(self, version='0.5.10', protocol=2):
+        worker_service._write_status(self.service_root, pid=1234, process_identity='identity',
+            status='offline', online=False, version=version, update_stop_protocol=protocol,
+            update_stop_process_identity='identity')
+        state = common.read_json(self.service_root / 'status.json')
+        common.atomic_json(self.service_root / 'status.json', {**state, 'updated_at': time.time() - 3600})
+
+    def test_offline_worker_handoff_keeps_running_docker_queue_and_pending_transfers(self):
+        database = self.worker_database()
+        self.record(database, state='running', seq=4, archive_scanned=False)
+        self.record(database, id='b' * 32, state='ready', seq=2)
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute("INSERT INTO uploads(job_id,name,sha,size,path,offset,complete) VALUES (?,'result','digest',30,'path',11,0)", ('a' * 32,))
+            db.execute("INSERT INTO metadata VALUES ('project_deliveries','{\"digest\":{\"status\":\"downloading\"}}')")
+        before = database.read_bytes(), self.config_path.read_bytes()
+        self.live_worker()
+        agent = SimpleNamespace(preparation=None, project_delivery=SimpleNamespace(installing=None))
+        with patch.object(worker_service, '_process_identity', return_value='identity'), \
+                patch.object(worker_service, '_require_linux'), \
+                patch.object(worker_service, '_update_containers', side_effect=AssertionError('Docker control forbidden')), \
+                patch.object(worker_service.os, 'kill') as killed, \
+                patch.object(worker_service.time, 'sleep', side_effect=lambda _: worker_service._update_stop_at_boundary(self.service_root, agent)):
+            ready = worker_service.update_status(self.service_root)
+            self.assertTrue(ready['ready_for_update'], ready)
+            self.assertEqual((ready['active_jobs'], ready['pending_uploads'], ready['pending_projects']), (2, 1, 1))
+            stopped = worker_service.stop_for_update(self.service_root)
+            self.assertTrue(stopped['ready_for_update'], stopped)
+            self.assertEqual(stopped['status'], 'stopping')
+            killed.assert_not_called()
+        self.assertEqual((database.read_bytes(), self.config_path.read_bytes()), before)
+        self.assertTrue(common.read_json(self.service_root / 'update-request.json')['preserve_experiments'])
+        self.assertTrue((self.service_root / 'update-hold.json').exists())
+
+    def test_published_legacy_worker_uses_owned_process_only_stop_with_busy_docker(self):
+        database = self.worker_database()
+        self.record(database, state='running', seq=4)
+        before = database.read_bytes(), self.config_path.read_bytes()
+        for version in ('0.4.3', '0.5.9'):
+            with self.subTest(version=version):
+                self.live_worker(version, 1)
+                with patch.object(worker_service, '_process_identity', return_value='identity'), \
+                        patch.object(worker_service, '_require_linux'), \
+                        patch.object(worker_service, '_update_containers', side_effect=AssertionError('Docker control forbidden')), \
+                        patch.object(worker_service.os, 'kill') as killed:
+                    stopped = worker_service.stop_for_update(self.service_root)
+                    self.assertTrue(stopped['ready_for_update'], stopped)
+                    self.assertEqual(stopped['status'], 'stopping')
+                    killed.assert_called_once_with(1234, signal.SIGTERM)
+                self.assertFalse((self.service_root / 'update-request.json').exists())
+                self.assertEqual((database.read_bytes(), self.config_path.read_bytes()), before)
+        self.live_worker('9.9.9', 1)
+        with patch.object(worker_service, '_process_identity', return_value='identity'), \
+                patch.object(worker_service, '_require_linux'), patch.object(worker_service.os, 'kill') as killed:
+            self.assertTrue(worker_service.stop_for_update(self.service_root)['manual_stop_required'])
+            killed.assert_not_called()
+        self.record(database, state='ready', spec={'backend': 'demo'})
+        self.live_worker('0.5.9', 1)
+        with patch.object(worker_service, '_process_identity', return_value='identity'), \
+                patch.object(worker_service, '_require_linux'), patch.object(worker_service.os, 'kill') as killed:
+            self.assertTrue(worker_service.stop_for_update(self.service_root)['manual_stop_required'])
+            killed.assert_not_called()
+
+    def test_active_host_process_and_unknown_state_cannot_claim_preserved_execution(self):
+        database = self.worker_database()
+        for changes in ({'state': 'running', 'spec': {'backend': 'demo'}}, {'state': 'unknown'}):
+            with self.subTest(changes=changes):
+                self.record(database, **changes)
+                self.assertFalse(worker_service.update_status(self.service_root)['ready_for_update'])
+
+    def test_gpu_verification_retains_idle_requirement_while_software_updates_preserve_docker(self):
+        from expman import worker_gpu
+        database = self.worker_database()
+        self.record(database, state='running')
+        self.assertTrue(worker_service.update_status(self.service_root)['ready_for_update'])
+        self.assertFalse(worker_service.update_status(self.service_root, preserve_experiments=False)['ready_for_update'])
+        with patch.object(worker_service, '_require_linux'), patch.object(worker_service, 'stop_for_update') as stop, \
+                patch.object(worker_gpu, '_verify') as verify:
+            with self.assertRaisesRegex(RuntimeError, '检查显卡前'):
+                worker_gpu.gpu_enable(self.service_root, gpu='GPU-738c5e76-1914-9b77-77df-7a57a48b996c')
+            stop.assert_not_called()
+            verify.assert_not_called()
+
+    def test_pending_handoff_fences_new_work_and_finishes_owned_preparation_first(self):
+        database = self.worker_database()
+        self.record(database, state='preparing')
+        self.live_worker()
+        request = dict(request_id='handoff', pid=1234, process_identity='identity',
+                       expires=time.time() + 35, preserve_experiments=True)
+        common.atomic_json(self.service_root / 'update-request.json', request)
+        done = threading.Event()
+        delivery = SimpleNamespace(installing={'done': done})
+        agent = SimpleNamespace(preparation=object(), project_delivery=delivery, _poll_preparation=lambda: None)
+        def finish_install():
+            delivery.installing = None
+        delivery.tick = finish_install
+        with patch.object(worker_service, '_process_identity', return_value='identity'):
+            self.assertTrue(worker_service._update_pending(self.service_root))
+            self.assertFalse(worker_service._update_stop_at_boundary(self.service_root, agent))
+            self.assertFalse((self.service_root / 'update-result.json').exists())
+            self.record(database, state='ready')
+            agent.preparation = None
+            done.set()
+            self.assertTrue(worker_service._update_stop_at_boundary(self.service_root, agent))
+            self.assertIsNone(delivery.installing)
+            self.assertFalse(worker_service._update_pending(self.service_root))
 
 
 if __name__ == '__main__':
