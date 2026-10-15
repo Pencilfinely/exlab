@@ -27,7 +27,7 @@ from .common import atomic_json, read_json, safe_child, sha256_file
 from .pairing import validate_origin
 
 MAX_SNAPSHOT = 64 * 1024 * 1024
-FILE_KEY = re.compile(r'(?:projects/[0-9a-f]{64}\.zip|archives/[0-9a-f]{32}/[0-9a-f]{64})')
+FILE_KEY = re.compile(r'(?:projects/[0-9a-f]{64}\.zip|archives/[0-9a-f]{32}/[0-9a-f]{64}|execution-checkpoints/[0-9a-f]{32}/[0-9a-f]{64})')
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -227,6 +227,11 @@ class CenterHubMixin:
                             raise APIError(409, '归档文件缺失，不能生成完整主控副本')
                         manifest[key] = dict(sha256=row['sha256'], size=row['size'])
                     self.center_file_manifest = manifest
+                    for row in self.db.execute('SELECT DISTINCT job_id,sha256,manifest FROM execution_checkpoint_uploads WHERE complete=1'):
+                        key = f'execution-checkpoints/{row["job_id"]}/{row["sha256"]}'
+                        if not safe_child(self.root, key).is_file():
+                            raise APIError(409, '执行检查点缺失，不能生成完整主控副本')
+                        manifest[key] = dict(sha256=row['sha256'], size=json.loads(row['manifest'])['size'])
                 if scratch.stat().st_size > MAX_SNAPSHOT:
                     raise APIError(413, '实验数据库超过当前同步上限 64 MiB')
                 raw = scratch.read_bytes()

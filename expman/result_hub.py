@@ -57,8 +57,8 @@ def independent_status(summary):
 class ResultHubMixin:
     def _result_identity(self, node_id, job_id, attempt, experiment_id):
         from .hub import _integer
-        row = self._owned(job_id, node_id)
         _integer(attempt, "attempt", 1)
+        row = self._execution_result_owner(node_id, job_id, attempt)
         protocol.identifier(experiment_id)
         maximum = max(1, row["attempt"]) + int(row["resume_after_attempt"] is not None)
         if attempt > maximum:
@@ -229,14 +229,16 @@ class ResultHubMixin:
             raise error(400, "Select 1..100 explicit evidence IDs")
         with self.transaction():
             row = self._find_job(job)
-            self._capable_node(row["node_id"], protocol.EVIDENCE_CAPABILITY)
+            previous_owner = self.db.execute("SELECT node_id FROM execution_owners WHERE job_id=? AND first_attempt<=? AND (last_attempt IS NULL OR last_attempt>=?) ORDER BY generation DESC LIMIT 1", (job, attempt, attempt)).fetchone()
+            owner_id = previous_owner[0] if previous_owner else row["node_id"]
+            self._capable_node(owner_id, protocol.EVIDENCE_CAPABILITY)
             for identity in identities:
                 item = self.db.execute("SELECT * FROM evidence_catalog WHERE job_id=? AND attempt=? AND experiment_id=? AND evidence_id=?", (job, attempt, experiment, protocol.identifier(identity))).fetchone()
                 if item is None:
                     raise error(404, "Evidence ID does not belong to the selected execution")
                 if item["availability"] not in ("available", "pending"):
                     raise error(410, "Evidence unavailable: " + item["availability"])
-            result = self._delivery_command(payload.get("request_id"), row["node_id"], "evidence",
+            result = self._delivery_command(payload.get("request_id"), owner_id, "evidence",
                        {"job_id": job, "attempt": attempt, "experiment_id": experiment, "evidence_ids": identities})
             for identity in identities:
                 self.db.execute("UPDATE evidence_catalog SET transfer_status=CASE WHEN transfer_status='delivered' THEN transfer_status ELSE 'queued' END WHERE job_id=? AND attempt=? AND experiment_id=? AND evidence_id=?", (job, attempt, experiment, identity))

@@ -25,6 +25,7 @@ import time
 import urllib.parse
 
 from . import common, scheduler, node_policy
+from . import compute_policy
 
 TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
@@ -223,6 +224,12 @@ class Agent:
         self.prep_mutex = threading.Lock()
         self.log_checked = {}
         self.mode = self._meta("hub_mode", "run")
+        self.compute_policy = None
+        saved_compute = self._meta("compute_policy", {})
+        if saved_compute.get("node_id") == self.config["node_id"]:
+            self.compute_policy = compute_policy.validate(saved_compute["value"]) if saved_compute.get("value") else None
+        self.power_checked = 0
+        self.power_status = None
         self.resource_policy = None
         self.resource_policy_error = ""
         saved_policy = self._meta("resource_policy", {})
@@ -245,6 +252,8 @@ class Agent:
         from .result_delivery import ResultDelivery
         self.active_legacy_upload = None
         self.result_delivery = ResultDelivery(self)
+        from .execution_transfer import ExecutionTransfer
+        self.execution_transfer = ExecutionTransfer(self)
 
     def close(self):
         if self.closed:
@@ -266,6 +275,7 @@ class Agent:
             # Installation only writes immutable project snapshots; finish it before
             # releasing agent.lock so another agent cannot install concurrently.
             self.project_delivery.installing["thread"].join()
+        self.execution_transfer.close()
         self.result_delivery.close()
         self.db.close()
         if os.name == "nt":
@@ -398,7 +408,8 @@ class Agent:
                   "disk_free_mb": shutil.disk_usage(self.root).free // (1024 * 1024),
                   "cpu_count": os.cpu_count(), "local_time": time.strftime("%H:%M"),
                   "platform": sys.platform, "docker_available": False}
-        result["capabilities"] = ["scheduler-v2", "project-delete-v1", node_policy.CAPABILITY] + (["project-bundle-v1"] if sys.platform == "linux" else [])
+        result["capabilities"] = ["scheduler-v2", "project-delete-v1", node_policy.CAPABILITY,
+                                  compute_policy.CAPABILITY, "execution-state-v1"] + (["project-bundle-v1"] if sys.platform == "linux" else [])
         from . import __version__
         from . import result_protocol, result_delivery
         result["agent_version"] = __version__
@@ -419,6 +430,9 @@ class Agent:
         result["resource_policy_error"] = getattr(self, "resource_policy_error", "")
         result["pending_uploads"] = inspect_update_state(self.db)["pending_uploads"] if hasattr(self, "db") else None
         result["delivery"] = result_delivery.telemetry(self.db, getattr(self, "active_legacy_upload", None)) if hasattr(self, "db") else None
+        if hasattr(self, "execution_transfer"):
+            from .execution_transfer import telemetry
+            result["execution_delivery"] = telemetry(self.db)
         # The controller must not infer a finished archive from a terminal job
         # report: output scanning and uploads happen later in the same tick.
         result["update_quiescent"] = (inspect_update_state(self.db)["ready_for_update"]
@@ -430,7 +444,7 @@ class Agent:
                 result["assets"].append(name)
         # Windows host execution is intentionally demo-only.
         if sys.platform != "linux":
-            return node_policy.apply(result, desired)
+            return self._apply_compute(node_policy.apply(result, desired))
         try:
             self._exec(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=8)
             result["docker_available"] = True
@@ -462,7 +476,40 @@ class Agent:
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             # A failed query never means that all VRAM is available.
             result["gpus"] = []
-        return node_policy.apply(result, desired)
+        return self._apply_compute(node_policy.apply(result, desired))
+
+    def _apply_compute(self, snapshot):
+        remote = getattr(self, "compute_policy", None) or compute_policy.validate({})
+        try:
+            local = common.read_json(self.config_path.parent / "compute-override.json", self.config.get("compute_policy", {}))
+            local = compute_policy.validate(local)
+        except (OSError, ValueError, TypeError, OverflowError):
+            local = compute_policy.validate({"mode": "release", "reason": "本地可用策略无效，请检查配置"})
+        if (remote.get("require_ac") or local.get("require_ac")) and common.now() - getattr(self, "power_checked", 0) > 5:
+            self.power_status = compute_policy.ac_power()
+            self.power_checked = common.now()
+        snapshot["ac_power"] = getattr(self, "power_status", None)
+        snapshot["local_compute_policy"] = local
+        snapshot["compute_policy_revision"] = remote["revision"]
+        result = compute_policy.apply(snapshot, remote)
+        self.last_availability = result["availability"]
+        return result
+
+    def _availability_tick(self, snapshot):
+        availability = snapshot.get("availability", {})
+        if not availability.get("stopping"):
+            return
+        for record in self.records():
+            if record.get("execution_retired") or record["state"] in TERMINAL:
+                continue
+            reason = availability.get("reason", "临时释放算力")
+            if not record.get("resource_release"):
+                self._save(record, resource_release=reason)
+            if record["state"] in ACTIVE:
+                if record.get("stop_at") is None:
+                    self._command(record, "stop", record.get("command_ack", 0))
+            else:
+                self._save(record, state="paused", execution_stopped=True, detail="已归还未启动任务：" + reason)
 
     def _accept_resource_policy(self, value, snapshot):
         if value is None:
@@ -489,6 +536,9 @@ class Agent:
         report = {key: record.get(key, default) for key, default in (
             ("id", None), ("seq", 0), ("state", "assigned"), ("detail", ""),
             ("attempt", 1), ("metrics", {}), ("command_ack", 0), ("log_tail", ""))}
+        from .execution_transfer import describe
+        report["generation"] = record.get("generation", 1)
+        report["execution_state"] = describe(self, record)
         if (record.get("runtime") or {}).get("attempt") == record["attempt"]:
             report["runtime"] = validate_runtime(record["runtime"], record["attempt"])
         # The server limit is bytes, not characters (Chinese logs can use 3 bytes/character).
@@ -514,7 +564,7 @@ class Agent:
             if record["state"] == "running" and "_timing" in record:
                 self._save(record)
         confirmed = dict(self.db.execute("SELECT job_id,seq FROM report_acks"))
-        pending = [record for record in self.records() if record["seq"] > confirmed.get(record["id"], 0)]
+        pending = [record for record in self.records() if not record.get("execution_retired") and record["seq"] > confirmed.get(record["id"], 0)]
         # Older unsent reports are drained before newly updated active jobs.
         pending.sort(key=lambda record: (record.get("updated", 0), record["id"]))
         payload = {"node_id": self.config["node_id"], "snapshot": snapshot, "reports": [],
@@ -531,9 +581,16 @@ class Agent:
         try:
             response = self._sync_request(payload)
             self.online = True
+            if isinstance(response.get("controller_agent"), dict):
+                self._set_meta("controller_agent", response["controller_agent"])
             self.last_error = None
             self.mode = response.get("mode", self.mode)
             self._set_meta("hub_mode", self.mode)
+            if "compute_policy" in response:
+                self.compute_policy = compute_policy.validate(response["compute_policy"]) if response["compute_policy"] else None
+                self._set_meta("compute_policy", {"node_id": self.config["node_id"], "value": self.compute_policy})
+            if response.get("execution_protocol") == 1:
+                self._set_meta("execution_protocol", 1)
             try:
                 self._accept_resource_policy(response.get("resource_policy"), snapshot)
             except (ValueError, TypeError, OverflowError) as error:
@@ -552,17 +609,41 @@ class Agent:
                         self.db.execute("INSERT INTO report_acks(job_id,seq) VALUES (?,?) "
                             "ON CONFLICT(job_id) DO UPDATE SET seq=MAX(seq,excluded.seq)", (job_id, acknowledged))
             existing = {record["id"]: record for record in self.records()}
+            for retired in response.get("retired", []):
+                record = existing.get(retired.get("id"))
+                if record and record.get("generation", 1) <= retired.get("generation", 0):
+                    if record["state"] in ACTIVE:
+                        if record.get("stop_at") is None:
+                            self._command(record, "stop", record.get("command_ack", 0))
+                    else:
+                        self._save(record, execution_retired=True)
             for job in response.get("jobs", []):
                 if not re.fullmatch(r"[0-9a-f]{32}", str(job.get("id", ""))):
                     continue
                 record = existing.get(job["id"])
-                if record is None:
+                generation = job.get("generation", 1)
+                new_generation = record is not None and generation > record.get("generation", 1)
+                if new_generation and record["state"] in ACTIVE:
+                    raise ValueError("Waiting for the previous local execution to stop before accepting its new generation")
+                if record is None or new_generation:
                     spec = common.validate_task(job["spec"])
                     if "result_delivery" not in job["spec"]:
                         spec["result_delivery"]["mode"] = "legacy"
-                    record = {"id": job["id"], "spec": spec, "state": "assigned", "attempt": 1,
+                    record = {"id": job["id"], "spec": spec, "state": "assigned", "attempt": job.get("attempt", 1),
+                              "generation": generation, "resume_checkpoint": job.get("resume_checkpoint"),
+                              "resume_from_checkpoint": bool(job.get("resume_checkpoint")),
                               "seq": 0, "command_ack": 0, "prepared": False, "metrics": {},
                               "_timing": _new_timing()}
+                    if generation > 1:
+                        previous_timing = job.get("timing") or {}
+                        record["_timing"].update(started_at=previous_timing.get("started_at"),
+                            elapsed_seconds=previous_timing.get("elapsed_seconds", 0), complete=previous_timing.get("complete", False))
+                    output = self._output(record)
+                    output.mkdir(parents=True, exist_ok=True)
+                    (output / "STOP").unlink(missing_ok=True)
+                    (output / "checkpoint.json").unlink(missing_ok=True)
+                    with self.db:
+                        self.db.execute("DELETE FROM report_acks WHERE job_id=?", (record["id"],))
                     self._save(record, detail="Persisted on assigned node")
                     existing[record["id"]] = record
                 elif _comparable_spec(record["spec"]) != _comparable_spec(job["spec"]):
@@ -625,6 +706,7 @@ class Agent:
             self._save(record, state="ready" if record.get("prepared") else "assigned",
                 attempt=record["attempt"] + 1, command_ack=command_id, stop_at=None,
                 stop_action=None, container_name=None, worker_pid=None, gpu_uuid=None,
+                execution_stopped=False, resource_release=None,
                 environment=None, archive_scanned=False, resume_from_checkpoint=valid_checkpoint,
                 detail="Resume accepted; checkpoint will be validated by algorithm")
         else:
@@ -731,6 +813,15 @@ class Agent:
 
     def _start(self, record, choice, stop_requested=None):
         spec, output = record["spec"], self._output(record)
+        if record.get("execution_retired"):
+            return
+        if record.get("resume_checkpoint") and not record.get("checkpoint_restored"):
+            marker = output / (".execution-resume-" + str(record["generation"]) + ".json")
+            if common.read_json(marker) != record["resume_checkpoint"]:
+                return
+            if not self._checkpoint(record):
+                raise ValueError("Restored execution checkpoint failed verification")
+            self._save(record, checkpoint_restored=True)
         if stop_requested is not None and stop_requested():
             return
         if spec["backend"] == "docker" and sys.platform != "linux":
@@ -739,6 +830,7 @@ class Agent:
         record.setdefault("_timing", _new_timing(complete=False))
         # Intent is durable before a create/spawn side effect.
         self._save(record, state="starting", gpu_uuid=choice["gpu_uuid"], environment=choice["environment"],
+                   execution_stopped=False,
                    container_name=f"expman-{record['id']}-{record['attempt']}", detail="Start intent persisted")
         execution = {"node_id": self.config["node_id"], "job_id": record["id"], "attempt": record["attempt"],
                      "gpu_uuid": choice["gpu_uuid"], "environment": choice["environment"],
@@ -843,6 +935,7 @@ class Agent:
         else:
             state = "succeeded" if exit_code == 0 else "failed"
         self._save(record, state=state, exit_code=exit_code, archive_scanned=False, _timing_end=finished_at,
+                   execution_stopped=True,
                    detail=f"Process exited with code {exit_code}" + ("; checkpoint verified" if state == "paused" else ""))
 
     def _docker_timing(self, record, state):
@@ -961,7 +1054,8 @@ class Agent:
             if record["state"] in TERMINAL:
                 if record["spec"]["backend"] == "demo" and _pid_alive(record.get("worker_pid")):
                     return
-                self.result_delivery.discover_record(record)
+                # The independent result lane scans terminal records too. Keep
+                # file parsing and its database errors outside execution/heartbeat.
                 if not record.get("archive_scanned"):
                     self._save(record, archive_scanned=True)
             return
@@ -1064,11 +1158,13 @@ class Agent:
     def tick(self, stop_requested=None):
         """One durable cycle; losing Hub connectivity never abandons local ownership."""
         self.result_delivery.start()
+        self.execution_transfer.start()
         def exiting():
             return stop_requested is not None and stop_requested()
 
         def result():
-            return {"online": self.online, "mode": self.mode, "jobs": self.records(), "error": self.last_error}
+            return {"online": self.online, "mode": self.mode, "jobs": self.records(), "error": self.last_error,
+                    "controller_agent": self._meta("controller_agent", {}), "availability": getattr(self, "last_availability", {})}
 
         if exiting():
             return result()
@@ -1087,9 +1183,13 @@ class Agent:
         if exiting():
             return result()
         snapshot = self.snapshot()
+        self.last_availability = snapshot.get("availability", {})
+        self._availability_tick(snapshot)
         if exiting():
             return result()
         self._sync(snapshot)
+        snapshot = self.snapshot()
+        self._availability_tick(snapshot)
         if exiting():
             return result()
         if self.mode == "drain":

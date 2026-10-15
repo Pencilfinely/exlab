@@ -64,7 +64,7 @@ function fillNodeTemplateDraft(){
   $('node-template-status').textContent=status;$('node-template-params-json').value=JSON.stringify(spec.params||{},null,2);
   $('node-template-params-json').setCustomValidity('');
   renderNodeTemplateParameters();renderTaskResources('node-template-resources',spec.resources,(key,value)=>{(spec.resources||={})[key]=value;});
-  renderScheduling('node-template-scheduling',spec.scheduling,spec.priority||0);
+  renderScheduling('node-template-scheduling',spec.scheduling,spec.priority||0,spec.planning);
   renderDraftTags('node-template-tags',()=>nodeTemplateSession?.drafts.get(nodeTemplateSession.index)?.tag_ids||[],values=>{nodeTemplateSession.drafts.get(nodeTemplateSession.index).tag_ids=values;});
   $('node-template-spec').textContent=JSON.stringify({backend:spec.backend,source:spec.source,command:spec.command,environments:spec.environments,assets:spec.assets},null,2);
   $('node-template-preview-result').replaceChildren();inlineFeedback('node-template-feedback','');

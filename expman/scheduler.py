@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import math
+import hashlib
+import json
 from .common import now
 
 
@@ -11,6 +13,8 @@ def _valid_number(value):
 
 
 def in_window(snapshot):
+    if snapshot.get("availability", {}).get("available") is False:
+        return False
     policy = snapshot.get("policy", {})
     if not policy.get("run_enabled", True):
         return False
@@ -173,13 +177,37 @@ def choose_assignment(task, nodes, counts):
         count = counts.get(node["id"], 0)
         if count >= policy.get("max_prefetch", 4):
             continue
-        speed = max(0.1, float(policy.get("speed", 1)))
+        duration = duration_estimate(task, node)
+        queued = node.get("queued_work_seconds", count * duration)
+        availability = snapshot.get("availability", {})
+        remaining = availability.get("available_seconds")
+        resumable = task.get("resume_supported") is True or task.get("backend") == "demo"
+        if remaining is not None and queued + duration > remaining and not resumable:
+            continue
+        risk = availability.get("risk", 0)
         rank = preferred.index(node["id"]) if node["id"] in preferred else len(preferred)
-        candidates.append((rank, (count + 1) / speed, node["id"], bound))
+        candidates.append((rank, (queued + duration) * (1 + risk * (1 if resumable else 4)), node["id"], bound))
     if not candidates:
         return None
     _, _, node_id, spec = min(candidates, key=lambda value: value[:3])
     return {"node_id": node_id, "spec": spec}
+
+
+def workload_key(task):
+    params = {key: value for key, value in task.get("params", {}).items() if key != "seed"}
+    identity = [task.get("project_bundle_id"), task.get("algorithm"), task.get("experiment_id"),
+                task.get("source", {}).get("repo") if not task.get("project_bundle_id") and task.get("source") else None,
+                task.get("source", {}).get("commit") if task.get("source") else None,
+                task.get("command"), params, task.get("resources")]
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def duration_estimate(task, node):
+    measured = node.get("performance", {}).get(workload_key(task))
+    if measured is not None:
+        return max(0.1, measured)
+    expected = task.get("planning", {}).get("expected_seconds") or 300
+    return expected / max(0.1, float(node.get("snapshot", {}).get("policy", {}).get("speed", 1)))
 
 
 def choose_node(task, nodes, counts):

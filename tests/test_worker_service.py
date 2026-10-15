@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -369,6 +370,61 @@ class WorkerServiceTests(unittest.TestCase):
             self.assertEqual(service.serve(self.root), 1)
         run_agent.assert_not_called()
         self.assertEqual(common.read_json(self.root / 'status.json')['status'], 'failed')
+
+    def test_database_interface_error_reopens_same_owned_records_and_redacts_trace(self):
+        from expman.agent import Agent
+        self.select()
+        initial = Agent(self.config_path)
+        try:
+            initial._save({'id': 'existing-job', 'state': 'running', 'attempt': 1,
+                           'spec': {'backend': 'docker'}, 'container_name': 'expman-existing-job-1',
+                           '_timing': {'started_at': 1791513403.519016, 'segment_started_at': 1791513403.519016,
+                                       'elapsed_seconds': 0, 'finished_at': None, 'complete': True}})
+            expected = initial.records()
+        finally:
+            initial.close()
+        created, observed = [], []
+        error = sqlite3.InterfaceError('bad parameter or other API misuse ' + self.config['token'])
+        error.sqlite_errorcode, error.sqlite_errorname = 21, 'SQLITE_MISUSE'
+        def construct(config_path):
+            self.assertEqual(config_path, str(self.config_path))
+            agent = Agent(config_path)
+            self.assertEqual(agent.records(), expected)
+            created.append(agent)
+            def tick(**kwargs):
+                if len(created) == 1:
+                    raise error
+                observed.append(agent.records())
+                return {'online': True, 'jobs': agent.records()}
+            agent.tick = tick
+            return agent
+        with patch('expman.agent.Agent', side_effect=construct), \
+                patch.object(Agent, '_exec', side_effect=AssertionError('Recovery must not change Docker')), \
+                patch.object(Agent, '_start', side_effect=AssertionError('Recovery must not start an attempt')), \
+                patch.object(service, '_update_stop_at_boundary', side_effect=lambda *args: bool(observed)), \
+                patch.object(service.time, 'sleep'), redirect_stdout(io.StringIO()) as output:
+            service._run_agent(self.root, str(self.config_path))
+        self.assertEqual(len(created), 2)
+        self.assertTrue(all(agent.closed for agent in created))
+        self.assertEqual(observed, [expected])
+        state = common.read_json(self.root / 'status.json')
+        self.assertEqual(state['database_recoveries'], 1)
+        self.assertTrue(state['online'])
+        self.assertIn('SQLITE_MISUSE', output.getvalue())
+        self.assertIn('Traceback', output.getvalue())
+        self.assertNotIn(self.config['token'], output.getvalue() + json.dumps(state))
+
+    def test_database_error_during_save_exit_is_not_reported_as_recovered(self):
+        from unittest.mock import Mock
+        agent = Mock()
+        agent.config = self.config
+        error = sqlite3.InterfaceError('bad parameter or other API misuse')
+        with patch('expman.agent.Agent', return_value=agent), \
+                patch.object(service, '_agent_loop', side_effect=error), \
+                patch.object(service, '_shutdown_requested', return_value=True):
+            with self.assertRaises(sqlite3.InterfaceError):
+                service._run_agent(self.root, str(self.config_path))
+        agent.close.assert_called_once()
 
     def test_worker_cli_refuses_controller_release_before_any_lifecycle_action(self):
         output = io.StringIO()

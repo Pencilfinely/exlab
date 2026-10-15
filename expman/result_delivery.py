@@ -151,6 +151,13 @@ class ResultDelivery:
         return [json.loads(row[0]) for row in db.execute("SELECT record FROM tasks ORDER BY id")]
 
     def discover_record(self, record):
+        # The result lane and migration/control lane can discover the same file.
+        # Serialize the complete operation: queries, cache replacement and insert
+        # must not interleave on either the shared connection or cache pathname.
+        with self.result_lock:
+            self._discover_record(record)
+
+    def _discover_record(self, record):
         with self.result_lock:
             config = lightweight(self.result_db, record)
         if config is None:

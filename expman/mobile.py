@@ -21,8 +21,9 @@ def _pick(value, keys):
 
 def _job(value):
     result = _pick(value, ("id", "state", "node_id", "detail", "created", "updated",
-                          "attempt", "metrics", "timing", "command_id", "command_ack", "action"))
-    result["spec"] = _pick(value["spec"], ("name", "algorithm", "group", "params", "resume_supported"))
+                          "attempt", "metrics", "timing", "command_id", "command_ack", "action", "generation",
+                          "execution_state", "handoff", "queue_control", "delivery"))
+    result["spec"] = _pick(value["spec"], ("name", "algorithm", "group", "params", "resume_supported", "result_delivery", "planning", "priority"))
     return result
 
 
@@ -103,19 +104,20 @@ class MobileHubMixin:
         state = self.state()
         nodes = []
         for value in state["nodes"]:
-            node = _pick(value, ("id", "last_seen", "online", "mode"))
+            node = _pick(value, ("id", "last_seen", "online", "mode", "display_name", "compute_policy", "resource_policy"))
             snapshot = value["snapshot"]
-            node["snapshot"] = _pick(snapshot, ("free_ram_mb", "disk_free_mb", "policy"))
+            node["snapshot"] = _pick(snapshot, ("free_ram_mb", "disk_free_mb", "policy", "availability", "local_compute_policy", "ac_power", "capabilities", "execution_delivery", "delivery", "compute_policy_revision"))
             node["snapshot"]["gpus"] = [_pick(gpu, ("uuid", "name", "total_mb", "free_mb", "local_enabled"))
                                         for gpu in snapshot.get("gpus", [])]
             nodes.append(node)
         return {"jobs": [_job(value) for value in state["jobs"]], "nodes": nodes,
-                "time": state["time"], "version": state["version"]}
+                "time": state["time"], "version": state["version"], "agent": state["agent"]}
 
     def mobile_job(self, identity):
         value = self.job(identity)
         return {**_job(value), "time": value["time"], "log_tail": value["log_tail"],
-                "events": value["events"], "artifacts": value["artifacts"]}
+                "events": value["events"], "artifacts": value["artifacts"],
+                **_pick(value, ("execution_checkpoints", "experiment_results", "experiment_progress", "evidence"))}
 
     def mobile_request(self, header, method, path, payload=None, identity=None):
         """Keep revocation, authorization and execution under the same hub lock."""
@@ -127,14 +129,32 @@ class MobileHubMixin:
                     return {**self.mobile_state(), "session": session}
                 if path == "/api/mobile/job":
                     return self.mobile_job(identity)
+                if path == "/api/mobile/agent/status":
+                    return self.autonomy.status()
+                if path == "/api/mobile/agent/run":
+                    return self.autonomy.run_detail(identity)
                 raise APIError(404, "找不到移动接口")
             if method != "POST":
                 raise APIError(405, "不支持的请求方法")
-            if path not in ("/api/mobile/action", "/api/mobile/node-mode"):
+            if path not in ("/api/mobile/action", "/api/mobile/node-mode", "/api/mobile/agent/settings", "/api/mobile/agent/delegate",
+                            "/api/mobile/agent/interrupt", "/api/mobile/compute-policy", "/api/mobile/execution/handoff", "/api/mobile/planning/queue"):
                 raise APIError(404, "找不到移动接口")
             if session["permission"] != "control":
                 raise APIError(403, "此设备仅有查看权限")
             _object(payload, "request")
+            if path.startswith("/api/mobile/agent/"):
+                from .agent_tools import validate, obj, TEXT
+                actor = {"id": "mobile:" + session["id"], "scopes": ["read", "control", "delegate", "automation"]}
+                if path.endswith("settings"):
+                    return self.autonomy.settings(payload)
+                if path.endswith("delegate"):
+                    return self.autonomy.gateway.call("exlab_delegate", payload, actor)
+                validate(payload, obj({"run_id": TEXT}, ("run_id",)))
+                return self.autonomy.cancel(payload["run_id"])
+            routes = {"/api/mobile/compute-policy": self.set_compute_policy, "/api/mobile/execution/handoff": self.request_handoff,
+                      "/api/mobile/planning/queue": self.set_queue_control}
+            if path in routes:
+                return routes[path](payload)
             if path == "/api/mobile/action":
                 expected = _integer(payload.get("expected_command_id"), "expected_command_id")
                 return self.action({"job_id": payload.get("job_id"), "action": payload.get("action"),

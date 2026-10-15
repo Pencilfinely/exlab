@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
 import uuid
 
 from . import __version__, common
@@ -165,7 +166,7 @@ def status(service_root=None):
     state = common.read_json(root / 'status.json', {})
     running = _owned_process(state)
     result = {key: state[key] for key in ('status', 'detail', 'pid', 'node_id', 'updated_at',
-               'online', 'jobs', 'shutdown', 'runtime') if key in state}
+               'online', 'jobs', 'shutdown', 'runtime', 'controller_agent', 'availability') if key in state}
     result['deactivated'] = settings.get('deactivated', False)
     result.update(running=running, backend=settings.get('backend', 'detached'),
                   node_id=settings.get('node_id'), config=settings.get('config'),
@@ -746,42 +747,75 @@ def hold(service_root=None):
         lock.__exit__(None, None, None)
 
 
+def _log_exception(root, error):
+    metadata = dict(type=type(error).__name__, version=__version__,
+                    python_version=sys.version.split()[0], sqlite_version=sqlite3.sqlite_version,
+                    sqlite_errorcode=getattr(error, 'sqlite_errorcode', None),
+                    sqlite_errorname=getattr(error, 'sqlite_errorname', None))
+    print('Worker exception / 算力端异常: ' + json.dumps(metadata, ensure_ascii=False), flush=True)
+    trace = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+    print(_redact(root, trace), flush=True)
+
+
+def _agent_loop(root, agent):
+    previous = None
+    while True:
+        if _shutdown_requested(root):
+            if _shutdown_step(root, agent):
+                return
+            time.sleep(0.5)
+            continue
+        if _update_stop_at_boundary(root, agent):
+            return
+        snapshot = agent.tick(stop_requested=lambda: _shutdown_requested(root) or _update_pending(root))
+        if _shutdown_requested(root):
+            continue
+        online = bool(snapshot['online'])
+        detail = ('Connected to controller / 已连接管理端' if online else
+                  'Controller offline; cached tasks continue / 管理端离线，已缓存任务继续')
+        if snapshot.get('error'):
+            detail += ': ' + _redact(root, str(snapshot['error']))
+        counts = {}
+        for record in snapshot.get('jobs', []):
+            state = record.get('state', 'unknown')
+            counts[state] = counts.get(state, 0) + 1
+        _write_status(root, status='online' if online else 'offline', online=online,
+                      controller_agent=snapshot.get('controller_agent', {}), availability=snapshot.get('availability', {}),
+                      detail=detail, jobs=counts)
+        held_owner = common.read_json(root / 'update-hold.json', {})
+        if held_owner.get('pid') != os.getpid():
+            (root / 'update-hold.json').unlink(missing_ok=True)
+        if detail != previous:
+            print(detail, flush=True)
+            previous = detail
+        time.sleep(max(0.1, float(agent.config.get('poll_seconds', 5))))
+
+
 def _run_agent(root, config_path):
     from .agent import Agent
-    agent = Agent(config_path)
-    previous = None
-    try:
-        while True:
+    recoveries = 0
+    while True:
+        agent = Agent(config_path)
+        try:
+            _agent_loop(root, agent)
+            return
+        except sqlite3.InterfaceError as error:
             if _shutdown_requested(root):
-                if _shutdown_step(root, agent):
-                    return
-                time.sleep(0.5)
-                continue
-            if _update_stop_at_boundary(root, agent):
-                return
-            snapshot = agent.tick(stop_requested=lambda: _shutdown_requested(root) or _update_pending(root))
-            if _shutdown_requested(root):
-                continue
-            online = bool(snapshot['online'])
-            detail = ('Connected to controller / 已连接管理端' if online else
-                      'Controller offline; cached tasks continue / 管理端离线，已缓存任务继续')
-            if snapshot.get('error'):
-                detail += ': ' + _redact(root, str(snapshot['error']))
-            counts = {}
-            for record in snapshot.get('jobs', []):
-                state = record.get('state', 'unknown')
-                counts[state] = counts.get(state, 0) + 1
-            _write_status(root, status='online' if online else 'offline', online=online,
-                          detail=detail, jobs=counts)
-            held_owner = common.read_json(root / 'update-hold.json', {})
-            if held_owner.get('pid') != os.getpid():
-                (root / 'update-hold.json').unlink(missing_ok=True)
-            if detail != previous:
-                print(detail, flush=True)
-                previous = detail
-            time.sleep(max(0.1, float(agent.config.get('poll_seconds', 5))))
-    finally:
-        agent.close()
+                raise  # A failed save/exit must remain visible, not be retried silently.
+            _log_exception(root, error)
+            recoveries += 1
+            detail = 'Database interface error; reconnecting worker / 数据库接口异常，正在恢复管理代理'
+            _write_status(root, status='offline', online=False, detail=detail,
+                          database_recoveries=recoveries, last_database_error=_redact(root, str(error)),
+                          last_database_error_at=time.time())
+        finally:
+            # Releases the SQLite connections and execution lock; Docker
+            # containers keep running and the next Agent reads the same records.
+            agent.close()
+        for _ in range(50):
+            if _shutdown_requested(root) or _update_pending(root):
+                break
+            time.sleep(0.1)
 
 
 def serve(service_root=None, *, shutdown_only=False):
@@ -857,6 +891,7 @@ def serve(service_root=None, *, shutdown_only=False):
                 return 0
             detail = _redact(root, str(error))
             print('Worker error / 算力端错误: ' + detail, flush=True)
+            _log_exception(root, error)
             _write_status(root, status='failed', online=False, detail=detail)
             return 1
         finally:
@@ -1001,12 +1036,35 @@ def install(service_root=None, *, config=None, pairing=None, worker_root=None, b
     return start(root) if start_now else status(root)
 
 
+def compute_availability(service_root=None, *, mode=None, minutes=None, require_ac=None):
+    """A durable local override works even when the Center is unreachable."""
+    from .compute_policy import validate, number
+    from .worker_gpu import _configuration
+    root = _root(service_root)
+    path, _, config = _configuration(root)
+    target = path.parent / 'compute-override.json'
+    policy = validate(common.read_json(target, config.get('compute_policy', {})))
+    if mode is not None:
+        if minutes is not None:
+            number(minutes, 'minutes', 525600, minimum=.01)
+        policy.update(mode=mode, until=common.now() + minutes * 60 if minutes else None,
+                      reason='本地临时释放' if mode == 'release' else '本地可用策略')
+    elif minutes is not None:
+        raise ValueError('minutes requires an explicit compute mode')
+    if require_ac is not None:
+        policy['require_ac'] = require_ac
+    policy = validate(policy)
+    if mode is not None or require_ac is not None:
+        private_write(target, policy)
+    return {'status': 'succeeded', 'policy': policy, 'detail': '本地限制优先保留；恢复本地可用后仍需满足 Center 的策略。'}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
                                          'update-status', 'stop-for-update', 'install-status', 'shutdown', 'deactivate',
                                          'runtime-status', 'runtime-release',
-                                         'gpu-status', 'gpu-enable'))
+                                         'gpu-status', 'gpu-enable', 'compute-policy'))
     parser.add_argument('--shutdown-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--service-root')
     parser.add_argument('--root', help='Worker data directory; separate from lifecycle settings')
@@ -1016,6 +1074,11 @@ def main(argv=None):
     parser.add_argument('--no-start', action='store_true')
     parser.add_argument('--lines', type=int, default=80)
     parser.add_argument('--gpu', help='GPU UUID to verify and enable from local settings')
+    parser.add_argument('--compute-mode', choices=('available', 'drain', 'release'))
+    parser.add_argument('--minutes', type=float)
+    power = parser.add_mutually_exclusive_group()
+    power.add_argument('--require-ac', action='store_true')
+    power.add_argument('--allow-battery', action='store_true')
     args = parser.parse_args(argv)
     try:
         _check_release_role()
@@ -1028,6 +1091,9 @@ def main(argv=None):
             if args.action == 'install':
                 options.update(backend=args.backend, start_now=not args.no_start)
             value = globals()[args.action](args.service_root, **options)
+        elif args.action == 'compute-policy':
+            value = compute_availability(args.service_root, mode=args.compute_mode, minutes=args.minutes,
+                require_ac=True if args.require_ac else False if args.allow_battery else None)
         elif args.action in ('gpu-status', 'gpu-enable'):
             from .worker_gpu import gpu_status, gpu_enable
             value = (gpu_enable(args.service_root, gpu=args.gpu) if args.action == 'gpu-enable'

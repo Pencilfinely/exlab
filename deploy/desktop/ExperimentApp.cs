@@ -495,6 +495,7 @@ namespace ExperimentManagerDesktop {
             AddButton(actions,App.Worker?"启用算力":"打开工作空间",()=> { if(App.Worker) StartWorker(); else OpenController(); });
             AddButton(actions,"停用并释放资源",()=>Stop());
             if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
+            if(App.Worker) AddButton(actions,"可用时间 / 游戏释放",()=>OpenComputeSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
@@ -721,6 +722,31 @@ namespace ExperimentManagerDesktop {
             using(var form=new WorkerGpuForm((action,options)=>WorkerCommand(action,options))) form.ShowDialog(this);
             Display(await WorkerCommand("status"));
         });}
+        async void OpenComputeSettings(){await Execute(async()=>{
+            var value=await WorkerCommand("compute-policy");
+            object raw;var policy=value.TryGetValue("policy",out raw)?raw as Dictionary<string,object>:null;
+            if(policy==null)throw new InvalidOperationException(App.Text(value,"error","无法读取本地可用策略"));
+            using(var form=new Form {Text="本机可用时间与临时释放",Size=new Size(540,390),StartPosition=FormStartPosition.CenterParent}) {
+                var panel=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,Padding=new Padding(18),AutoScroll=true};
+                var mode=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=460};
+                mode.Items.AddRange(new object[]{"允许提供算力","暂停新任务，等待当前实验完成","保存并停止实验，释放训练资源"});
+                mode.SelectedIndex=App.Text(policy,"mode")=="release"?2:App.Text(policy,"mode")=="drain"?1:0;
+                var ac=new CheckBox {Text="仅接通电源时提供算力（离电或供电未知时暂停）",Checked=App.Flag(policy,"require_ac"),AutoSize=true};
+                var timed=new CheckBox {Text="临时策略，到期自动恢复",Checked=true,AutoSize=true};
+                var minutes=new NumericUpDown {Minimum=1,Maximum=525600,Value=120,Width=120};
+                var message=new Label {Text="本地限制优先保留。AI 无法越过本机限制；正在运行的实验需要先保存并确认停止。",MaximumSize=new Size(460,0),AutoSize=true};
+                var save=new Button {Text="应用本地策略",AutoSize=true};
+                save.Click+=async(s,e)=>{save.Enabled=false;try {
+                    var options=new List<string>{"--compute-mode",mode.SelectedIndex==2?"release":mode.SelectedIndex==1?"drain":"available",ac.Checked?"--require-ac":"--allow-battery"};
+                    if(timed.Checked&&mode.SelectedIndex!=0){options.Add("--minutes");options.Add(minutes.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));}
+                    var result=await WorkerCommand("compute-policy",options.ToArray());
+                    message.Text=App.Text(result,"detail",App.Text(result,"error","策略已保存，等待代理执行并回传状态"));
+                } catch(Exception ex){message.Text=ex.Message;} finally{save.Enabled=true;}};
+                panel.Controls.Add(new Label {Text="本机算力策略",AutoSize=true});panel.Controls.Add(mode);panel.Controls.Add(ac);panel.Controls.Add(timed);
+                panel.Controls.Add(new Label {Text="持续分钟数",AutoSize=true});panel.Controls.Add(minutes);panel.Controls.Add(save);panel.Controls.Add(message);form.Controls.Add(panel);form.ShowDialog(this);
+            }
+            Display(await WorkerCommand("status"));
+        });}
         async void Stop(){if(!App.Worker&&deactivated)return;await Execute(async()=>{
             timer.Stop();bool workerStopped=false;try {
                 if(App.Worker) {
@@ -800,6 +826,10 @@ namespace ExperimentManagerDesktop {
             string state=App.Text(value,"status");
             string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state=="online"?"已连接":state=="offline"?"主控离线":state=="preparing"?"准备中":state=="starting"?"启动中":state=="stopped"?"已停止":state=="running"?"运行中":state=="failed"?"启动失败":state;
             summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
+            object agentRaw;var agent=value.TryGetValue("controller_agent",out agentRaw)?agentRaw as Dictionary<string,object>:null;
+            if(agent!=null)summary.Text+="\nAI 托管："+(App.Flag(agent,"enabled")&&App.Flag(agent,"provider_enabled")?"已开启 · 主控按需规划与检查":"未开启")+(string.IsNullOrEmpty(App.Text(agent,"active_run"))?"":" · 正在处理");
+            object availabilityRaw;var availability=value.TryGetValue("availability",out availabilityRaw)?availabilityRaw as Dictionary<string,object>:null;
+            if(availability!=null)summary.Text+="\n本机可用状态："+App.Text(availability,"reason");
             string backendVersion=App.Text(value,"version");
             if(App.Worker) {
                 summary.Text+="\n客户端版本："+App.Version;

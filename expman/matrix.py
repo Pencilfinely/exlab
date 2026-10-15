@@ -55,7 +55,7 @@ def expand_matrix(payload):
     spec = copy.deepcopy(payload.get("spec"))
     if not isinstance(spec, dict):
         raise ValueError("Select an experiment task template for the matrix")
-    for key in ("scheduling", "priority"):
+    for key in ("scheduling", "priority", "planning"):
         if key in payload:
             spec[key] = copy.deepcopy(payload[key])
     for key in ("matrix_id", "matrix_run_id", "matrix_revision", "dataset_name"):
@@ -198,11 +198,7 @@ class MatrixHubMixin:
 
     def _allocation_preview(self, specs):
         from .hub import TERMINAL
-        nodes = []
-        for row in self.db.execute("SELECT * FROM nodes"):
-            item = dict(row)
-            item["snapshot"] = json.loads(item["snapshot"])
-            nodes.append(item)
+        nodes = self._scheduling_nodes()
         counts = {}
         for row in self.db.execute("SELECT node_id,state FROM jobs WHERE node_id IS NOT NULL"):
             if row["state"] not in TERMINAL:
@@ -213,8 +209,11 @@ class MatrixHubMixin:
             node = assignment["node_id"] if assignment else None
             if node:
                 counts[node] = counts.get(node, 0) + 1
-            allocations.append({"node_id": node, "reason": "按节点偏好、资源兼容性与队列负载分配" if node else
-                "等待兼容节点：检查在线状态、运行时段、候选节点、GPU、数据集、环境和预取容量"})
+                from .scheduler import duration_estimate
+                selected = next(item for item in nodes if item["id"] == node)
+                selected["queued_work_seconds"] += duration_estimate(spec, selected)
+            allocations.append({"node_id": node, "reason": "按节点偏好、预计工作量、可用时段和中断风险分配" if node else
+                "等待兼容节点：检查在线状态、可用策略、维护时间、运行时段、候选节点、GPU、数据集、环境和预取容量"})
         warnings = []
         if any(item["node_id"] is None for item in allocations):
             warnings.append("部分实验暂时无法分配，启动后会留在队列中等待符合条件的节点。")

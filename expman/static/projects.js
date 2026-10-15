@@ -183,7 +183,7 @@ function fillProjectPreset(){
   if(!session.drafts.has(session.key)){const spec=copy(preset.template);spec.scheduling={mode:'auto',node_ids:[],preferred_node_ids:[],gpu_uuids:[]};session.drafts.set(session.key,{spec,tag_ids:[],pending:null});}
   const draft=projectCurrentDraft(),spec=draft.spec;
   $('project-preset').value=session.key;$('project-run-name').value=spec.name;$('project-params').value=JSON.stringify(spec.params||{},null,2);$('project-params').setCustomValidity('');
-  renderProjectParameters();renderTaskResources('project-resources',spec.resources,()=>{});renderScheduling('project-scheduling',spec.scheduling,spec.priority||0);
+  renderProjectParameters();renderTaskResources('project-resources',spec.resources,()=>{});renderScheduling('project-scheduling',spec.scheduling,spec.priority||0,spec.planning);
   projectRunTagIds=[...(draft.tag_ids||[])];renderDraftTags('project-run-tags',()=>projectRunTagIds,values=>projectRunTagIds=values);
   if(draft.raw){
     $('project-run-name').value=draft.raw.name;$('project-params').value=draft.raw.json;

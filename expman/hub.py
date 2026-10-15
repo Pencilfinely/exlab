@@ -36,6 +36,9 @@ from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_poli
                           validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
 from .result_hub import ResultHubMixin, initialize as initialize_results
 from . import result_protocol
+from .compute_policy import (ComputePolicyHubMixin, initialize as initialize_compute, apply as apply_compute,
+                             validate_snapshot as validate_compute_snapshot)
+from .execution_control import ExecutionControlHubMixin, initialize as initialize_execution, validate_state
 
 
 TERMINAL = frozenset(("succeeded", "canceled", "failed", "paused", "interrupted"))
@@ -159,6 +162,7 @@ def _snapshot(value):
         if not isinstance(names, list) or any(not isinstance(x, str) for x in names):
             raise APIError(400, "GPU.profiles must be a string list")
     validate_policy_snapshot(value)
+    validate_compute_snapshot(value)
     return value
 
 
@@ -194,7 +198,7 @@ def inspect_update_state(db):
                 detail="管理端当前可以安装更新；远端实验继续运行，已保存的操作和文件传输在重启后继续同步", **counts)
 
 
-class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
+class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin, MobileHubMixin, CenterHubMixin):
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -275,10 +279,17 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
         initialize_node_policies(self.db)
         initialize_mobile(self.db)
         initialize_results(self.db)
+        initialize_compute(self.db)
+        initialize_execution(self.db)
+        from .agent_tools import initialize as initialize_agent_tools
+        from .autonomy import initialize as initialize_autonomy, AgentManager
+        initialize_agent_tools(self.db)
+        initialize_autonomy(self.db)
         with self.lock:
             if 'display_name' not in {row['name'] for row in self.db.execute('PRAGMA table_info(nodes)')}:
                 self.db.execute("ALTER TABLE nodes ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
         initialize_centers(self)
+        self.autonomy = AgentManager(self)
         self.center_start_sync()
 
     @contextmanager
@@ -307,6 +318,10 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
     def import_assist(self, payload):
         from .ai_assist import AIAssist
         return AIAssist(self).assist(payload)
+
+    def scheduling_assist(self, payload):
+        from .planning import assist
+        return assist(self, payload)
 
     @contextmanager
     def update_request(self):
@@ -337,6 +352,7 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             return result
 
     def close(self):
+        self.autonomy.close()
         self.center_stop.set()
         if self.center_thread is not None:
             self.center_thread.join(timeout=35)
@@ -417,6 +433,8 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
         result["metrics"] = json.loads(result["metrics"])
         result["timing"] = json.loads(result["timing"]) if result["timing"] is not None else None
         result["runtime"] = json.loads(result["runtime"]) if result.get("runtime") else None
+        for key in ("execution_state", "resume_checkpoint"):
+            result[key] = json.loads(result[key]) if result.get(key) else None
         result.pop("resume_after_attempt", None)
         return result
 
@@ -438,6 +456,7 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             jobs = [self._job(row) for row in self.db.execute("SELECT * FROM jobs ORDER BY created DESC,id")]
             self._attach_record_tags(jobs, "job")
             for job in jobs:
+                self._execution_public(job)
                 job.pop("log_tail", None)
                 if job.get("runtime"):
                     job["runtime"].pop("diagnostics", None)
@@ -453,6 +472,9 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                     item["snapshot"]["delivery"] = {**json.loads(delivery["value"]), "observed_at": delivery["updated"]}
                 item["online"] = timestamp - item["last_seen"] <= 45
                 item["resource_policy"] = self._node_resource_policy(item["id"])
+                item["compute_policy"] = self._compute_policy(item["id"])
+                if item["compute_policy"]:
+                    apply_compute(item["snapshot"], item["compute_policy"])
                 nodes.append(item)
             projects, project_deletions = [], []
             for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
@@ -467,6 +489,7 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             result = {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
                       "tags": self.record_tags()["tags"],
                       "time": timestamp, "version": __version__, 'center': self.center_info()}
+            result["agent"] = self.autonomy.summary()
             owner = getattr(self, 'desktop_owner', None)
             if owner is not None:
                 result['controller_owner'] = {key: owner[key] for key in ('pid', 'nonce', 'version')}
@@ -515,6 +538,8 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                     raise APIError(409, "节点策略已变化，请刷新后确认")
             if self.db.execute("UPDATE nodes SET mode=? WHERE id=?", (mode, node_id)).rowcount != 1:
                 raise APIError(404, "Unknown node")
+            # A human reasserting the same drain mode is still a new personal-use intent.
+            self.db.execute("DELETE FROM agent_managed_policies WHERE kind='node_mode' AND target=?", (node_id,))
             self._assign()
         return {"node_id": node_id, "mode": mode}
 
@@ -527,10 +552,14 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             row = self._find_job(payload.get("job_id"))
             if "expected_command_id" in payload and row["command_id"] != payload["expected_command_id"]:
                 raise APIError(409, "此实验已收到其他操作，请刷新后确认结果")
+            self.db.execute("DELETE FROM agent_managed_stops WHERE job_id=?", (row["id"],))
             if action == "resume" and self._project_is_deleted(json.loads(row["spec"])):
                 raise APIError(409, "This project was deleted; import and deploy it again before submitting a new experiment")
             if action == "resume" and json.loads(row["spec"]).get("resume_supported") is False:
                 raise APIError(409, "This algorithm does not provide configured native resume; submit a new experiment")
+            canceled = self.db.execute("UPDATE execution_handoffs SET status='canceled',updated=? WHERE job_id=? AND status IN ('requested','waiting_checkpoint','waiting_capacity')", (now(), row["id"]))
+            if canceled.rowcount:
+                self._event(row["id"], "handoff_canceled", {"action": action})
             if row["action"] == action and row["command_id"] > row["command_ack"]:
                 return {"id": row["id"], "command_id": row["command_id"], "action": action}
             if action == "resume" and row["state"] not in ("interrupted", "paused", "failed"):
@@ -555,19 +584,16 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             return {"id": row["id"], "command_id": command_id, "action": action}
 
     def _assign(self):
-        nodes = []
-        # Drained source nodes still supply legacy deployment metadata needed
-        # to rebind their templates; choose_assignment filters destinations.
-        for row in self.db.execute("SELECT * FROM nodes"):
-            item = dict(row)
-            item["snapshot"] = json.loads(item["snapshot"])
-            nodes.append(item)
+        nodes = self._scheduling_nodes()
         counts = {}
         for row in self.db.execute("SELECT node_id,state FROM jobs WHERE node_id IS NOT NULL"):
             if row["state"] not in TERMINAL:
                 counts[row["node_id"]] = counts.get(row["node_id"], 0) + 1
-        pending = list(self.db.execute("SELECT id,spec,created FROM jobs WHERE state='queued' AND node_id IS NULL"))
-        pending.sort(key=lambda row: (-json.loads(row["spec"])["priority"], row["created"], row["id"]))
+        pending = list(self.db.execute("SELECT j.id,j.spec,j.created,c.priority AS queue_priority FROM jobs j LEFT JOIN execution_queue_controls c ON c.job_id=j.id "
+                                      "WHERE j.state='queued' AND j.node_id IS NULL AND COALESCE(c.hold,0)=0"))
+        pending.sort(key=lambda row: (-(row["queue_priority"] if row["queue_priority"] is not None else json.loads(row["spec"])["priority"]) - min(20, (now() - row["created"]) / 3600),
+                                     json.loads(row["spec"]).get("planning", {}).get("deadline") or float("inf"), row["created"], row["id"]))
+        self._maintain_handoffs(nodes, counts)
         for row in pending:
             spec = json.loads(row["spec"])
             assignment = choose_assignment(spec, nodes, counts)
@@ -575,7 +601,12 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                 continue
             node_id = assignment["node_id"]
             self.db.execute("UPDATE jobs SET node_id=?,spec=?,state='assigned',updated=? WHERE id=?", (node_id, _json(assignment["spec"]), now(), row["id"]))
+            self._record_execution_owner(row["id"], node_id)
             counts[node_id] = counts.get(node_id, 0) + 1
+            from .scheduler import duration_estimate
+            for node in nodes:
+                if node["id"] == node_id:
+                    node["queued_work_seconds"] += duration_estimate(assignment["spec"], node)
             self._event(row["id"], "assigned", {"node_id": node_id})
 
     def sync(self, node_id, payload):
@@ -609,7 +640,9 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
             checked = []
             for report in reports:
                 _object(report, "report")
-                row = self._owned(report.get("id"), node_id)
+                row = self._find_job(report.get("id"))
+                if not self._execution_fence(row, node_id, report.get("generation", 1)):
+                    continue
                 seq = _integer(report.get("seq"), "seq", 1)
                 attempt = _integer(report.get("attempt", 0), "attempt")
                 state = {"completed": "succeeded", "cancelled": "canceled"}.get(report.get("state"), report.get("state"))
@@ -633,12 +666,15 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                         runtime = validate_runtime(report["runtime"], attempt)
                     except (ValueError, TypeError, OverflowError) as error:
                         raise APIError(400, "Invalid runtime observation") from error
-                checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime))
+                execution = validate_state(report["execution_state"], attempt, row["generation"]) if "execution_state" in report else None
+                if execution and execution["stopped_confirmed"] and state not in TERMINAL:
+                    raise APIError(400, "A live execution cannot confirm it stopped")
+                checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime, execution))
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (now(), _json(snapshot), node_id))
             for digest, revision, status, detail in project_checked:
                 self.db.execute("UPDATE project_deployments SET status=?,detail=?,updated=? WHERE digest=? AND node_id=? AND revision=?", (status, detail, now(), digest, node_id, revision))
             ack = {}
-            for report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime in checked:
+            for report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime, execution in checked:
                 row = self._owned(report["id"], node_id)
                 # Commands are acknowledged independently of report sequence.
                 if command_ack > row["command_ack"]:
@@ -664,6 +700,7 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                     self.db.execute("UPDATE jobs SET state=?,detail=?,attempt=?,seq=?,metrics=?,updated=?,resume_after_attempt=?,log_tail=?,timing=? WHERE id=?", (state, detail, attempt, seq, _json(metrics), timestamp, None if resume or cancel else row["resume_after_attempt"], row["log_tail"] if log_tail is None else log_tail, serialized_timing, row["id"]))
                     self.db.execute("UPDATE jobs SET runtime=? WHERE id=?",
                                     (_json({**runtime, "received_at": timestamp}) if runtime is not None else None, row["id"]))
+                    self.db.execute("UPDATE jobs SET execution_state=? WHERE id=?", (_json(execution) if execution else None, row["id"]))
                     if state != row["state"] or attempt != row["attempt"]:
                         self._event(row["id"], "state", {"state": state, "detail": detail, "attempt": attempt})
                     if _json(metrics) != row["metrics"] or attempt != row["attempt"] and metrics:
@@ -673,11 +710,19 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                     self.db.execute("UPDATE jobs SET seq=? WHERE id=?", (seq, row["id"]))
                     self._event(row["id"], "ignored_report", {"state": state, "attempt": attempt, "seq": seq})
                 ack[row["id"]] = seq
+            effective = json.loads(_json(snapshot))
+            compute = self._compute_policy(node_id)
+            if compute:
+                apply_compute(effective, compute)
+            self._policy_handoffs(node_id, effective)
             self._assign()
             jobs = []
             for row in self.db.execute("SELECT * FROM jobs WHERE node_id=? ORDER BY created,id", (node_id,)):
                 if row["state"] not in TERMINAL or row["command_id"] > row["command_ack"]:
-                    jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
+                    jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "generation": row["generation"],
+                                 "attempt": max(1, row["attempt"]), "resume_checkpoint": json.loads(row["resume_checkpoint"]) if row["resume_checkpoint"] else None,
+                                 "timing": json.loads(row["timing"]) if row["timing"] else None,
+                                 "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
             mode = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()[0]
             deployments = [dict(row) for row in self.db.execute(
                 "SELECT d.digest,p.size,p.project_id,p.bundle_id,d.revision,CASE WHEN p.deleted_at IS NULL THEN 'install' ELSE 'delete' END AS action FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed','deleted','delete_failed') ORDER BY d.updated LIMIT 100", (node_id,))]
@@ -686,8 +731,14 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
                 ("project-delete-v1" if item["action"] == "delete" else "project-bundle-v1") in capabilities]
             response = {"jobs": jobs, "mode": mode, "ack": ack,
                         "project_deployments": deployments, 'hub_urls': self.center_addresses()}
+            response["controller_agent"] = self.autonomy.summary()
             if NODE_POLICY_CAPABILITY in capabilities:
                 response["resource_policy"] = self._node_resource_policy(node_id)
+            if "dynamic-compute-v1" in capabilities:
+                response["compute_policy"] = self._compute_policy(node_id)
+            if "execution-state-v1" in capabilities:
+                response["execution_protocol"] = 1
+                response["retired"] = [dict(row) for row in self.db.execute("SELECT job_id AS id,generation FROM execution_owners WHERE node_id=? AND last_attempt IS NOT NULL", (node_id,))]
             return response
 
     @staticmethod
@@ -888,6 +939,10 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
     def job(self, job_id):
         with self.lock:
             result = self._job(self._find_job(job_id))
+            self._execution_public(result, full=True)
+            result["execution_checkpoints"] = [{"attempt": row["attempt"], "generation": row["generation"],
+                "manifest": json.loads(row["manifest"]), "received_at": row["received"]} for row in self.db.execute(
+                "SELECT attempt,generation,manifest,received FROM execution_checkpoint_uploads WHERE job_id=? AND complete=1 ORDER BY received DESC LIMIT 20", (job_id,))]
             self._attach_record_tags([result], "job")
             events = list(self.db.execute("SELECT * FROM events WHERE job_id=? ORDER BY event_id DESC LIMIT 200", (job_id,)))
             result["events"] = [{**dict(row), "data": json.loads(row["data"])} for row in reversed(events)]
@@ -926,7 +981,7 @@ class Hub(ResultHubMixin, MatrixHubMixin, RecordTagsHubMixin, NodePolicyHubMixin
         # transaction/lock and block result receipts, heartbeats or commands.
         with self._project_upload_guard("artifact:" + job_id + ":" + digest):
             with self.transaction():
-                self._owned(job_id, node_id)
+                self._archive_owner(job_id, node_id)
                 partial, final = self._archive_paths(job_id, digest)
                 existing = self.db.execute("SELECT size FROM uploads WHERE job_id=? AND sha256=?", (job_id, digest)).fetchone()
                 if existing and existing["size"] != size:
@@ -1085,15 +1140,20 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/runtime.js", "/app.js", "/delivery.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/runtime.js": "runtime.js", "/app.js": "app.js", "/delivery.js": "delivery.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/runtime.js", "/app.js", "/delivery.js", "/compute.js", "/autonomy.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/runtime.js": "runtime.js", "/app.js": "app.js", "/delivery.js": "delivery.js", "/compute.js": "compute.js", "/autonomy.js": "autonomy.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
                 content_type = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".ico": "image/vnd.microsoft.icon"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if not path.startswith("/api/"):
+            if path == "/mcp":
+                from .agent_mcp import validate_http
+                validate_http(self.headers)
+                if self.command != "POST":
+                    raise APIError(405, "MCP uses POST JSON-RPC; SSE is not provided")
+            if not path.startswith("/api/") and path != "/mcp":
                 raise APIError(404, "Not found")
             local_center = path.startswith('/api/local/centers/')
             if hub.center_state['mode'] == 'replica' and not local_center and path != '/api/centers/identity':
@@ -1126,6 +1186,20 @@ def make_server(hub, host="127.0.0.1", port=8765):
                         for block in iter(lambda: response.read(512 * 1024), b''):
                             self.wfile.write(block)
                     return
+            if path == "/mcp" or path.startswith("/api/agent/"):
+                from .agent_mcp import dispatch, http_request
+                with hub.update_request(), hub.lock:
+                    if path == "/mcp":
+                        actor = hub.autonomy.gateway.authenticate(self.headers.get("Authorization"))
+                        result = dispatch(hub, self._body(), actor)
+                        if result is None:
+                            self._bytes(b"", status=202)
+                        else:
+                            self._send(result)
+                    else:
+                        self._send(http_request(hub, self.headers.get("Authorization"), self.command, path,
+                            self._body() if self.command == "POST" else None, parse_qs(url.query)))
+                return
             if path.startswith("/api/mobile/") and path not in ("/api/mobile/devices", "/api/mobile/revoke", "/api/mobile/renew"):
                 query = parse_qs(url.query)
                 identities = query.get("id", [])
@@ -1138,7 +1212,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
             required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download",
-                "/api/results", "/api/delivery/poll", "/api/delivery/report", "/api/evidence/upload") else "admin"
+                "/api/results", "/api/delivery/poll", "/api/delivery/report", "/api/evidence/upload",
+                "/api/execution/checkpoints", "/api/execution/checkpoints/download") else "admin"
             center_routes = ('/api/centers/identity', '/api/centers/snapshot', '/api/centers/file',
                              '/api/centers/handoff', '/api/centers/register')
             if role == 'center' and (path.startswith('/api/local/') or path in
@@ -1239,6 +1314,12 @@ def make_server(hub, host="127.0.0.1", port=8765):
                           "/api/mobile/devices": hub.mobile_enroll, "/api/mobile/revoke": hub.mobile_revoke,
                           "/api/mobile/renew": hub.mobile_renew,
                           "/api/node-policy": hub.set_node_policy,
+                          "/api/compute-policy": hub.set_compute_policy,
+                          "/api/execution/handoff": hub.request_handoff,
+                          "/api/planning/queue": hub.set_queue_control,
+                          "/api/planning/assist": hub.scheduling_assist,
+                          "/api/execution/checkpoints": lambda p: hub.upload_execution_checkpoint(node_id, p),
+                          "/api/execution/checkpoints/download": lambda p: hub.download_execution_checkpoint(node_id, p),
                           "/api/scheduling/preview": hub.scheduling_preview,
                           "/api/matrices/save": hub.matrix_save, "/api/matrices/preview": hub.matrix_preview,
                           "/api/matrices/start": hub.matrix_start, "/api/matrices/delete": hub.matrix_delete,
@@ -1289,6 +1370,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
     server.hub = hub
+    hub.autonomy.start()
     return server
 
 

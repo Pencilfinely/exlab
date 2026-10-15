@@ -11,6 +11,8 @@ let nodeResourceEditor=null,nodeResourceBusy=false;
 let currentView='overview', localImportAvailable=null, importJob=null, importDraft=null, importExperimentIndex=0, importJsonDirty=false, importPolling=false;
 const viewLabels={overview:['总览','实验、算力和算法项目，都在这里管理。'],experiments:['实验记录','查看进度、指标和结果，管理每一次运行。'],matrices:['实验矩阵','组合数据集与参数，自动分配算力，统一整理结果。'],compute:['算力管理','连接 Windows 与 Ubuntu 算力机，查看资源和接单状态。'],projects:['算法项目','从原始目录导入，检查配置，再分发到算力机。'],settings:['设置','连接你的工作空间与设备。']};
 const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
+if(globalThis.ExLabCompute)ExLabCompute.mount({node,$,api,notify,refresh});
+globalThis.ExLabAutonomousUI=globalThis.ExLabAutonomy?.mount({node,api,host:$('ai-settings-form')?.parentElement});
 function node(tag, text, cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=String(text); if(cls)e.className=cls;return e; }
 function notify(message) { $('notice').textContent=message; $('notice').hidden=!message; }
 async function writeClipboardText(text) {
@@ -255,7 +257,7 @@ async function saveNodeResources(){
 $('node-resource-form').onsubmit=event=>{event.preventDefault();void saveNodeResources();};
 $('node-resource-close').onclick=()=>{$('node-resource-form').hidden=true;nodeResourceEditor=null;};
 $('node-resource-reload').onclick=()=>nodeResourceEditor&&openNodeResources(nodeResourceEditor.id);
-function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
+function render(){if(globalThis.ExLabAutonomousUI)globalThis.ExLabAutonomousUI.render();const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
   $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.display_name||n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',n.mode==='drain'?'已暂停接单':online(n)?'可以接单':'等待连接'));
     const rename=node('button','改名','text-button');rename.onclick=async()=>{const name=prompt('算力端显示名称',n.display_name||n.id);if(!name?.trim())return;try{await api('/api/node-rename',{node_id:n.id,name:name.trim()});await refresh();}catch(error){notify(error.message);}};box.append(rename);
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
@@ -268,6 +270,7 @@ function render(){const jobs=state.jobs||[],nodes=state.nodes||[];const online=n
     }
     box.append(node('p',`节点并发上限 ${snap.policy?.max_running??'—'} · `+(snap.gpus||[]).map(g=>`${g.name}：每卡 ${g.max_jobs??1} 个任务`).join('；'),'muted'));
     const resourceButton=node('button','资源设置','subtle');resourceButton.onclick=()=>openNodeResources(n.id);box.append(resourceButton);
+    if(globalThis.ExLabCompute)ExLabCompute.renderNode(box,n,{node,api,refresh,notify});
     renderNodeTemplates(box,n);const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
   updateNodeResourceStatus();renderProjects();renderJobs();renderOverview();
@@ -291,6 +294,7 @@ async function download(path,name){try{const response=await fetch(path,{headers:
 $('export').onclick=()=>download('/api/results.csv','实验结果.csv');
 async function detail(id,scroll){selected=id;try{const data=await api('/api/job?id='+encodeURIComponent(id)),j=data.job||data;setTimingClock(data.time);renderTimingDetail(j);$('detail').hidden=false;$('detail-name').textContent=j.spec.name;$('detail-state').textContent=`${names[j.state]||j.state} · 节点 ${j.node_id||'未分配'} · 尝试 ${j.attempt||1} · ${typeof j.detail==='string'?j.detail:JSON.stringify(j.detail||'')}`;$('detail-spec').textContent=JSON.stringify({id:j.id,source:j.spec.source,params:j.spec.params,resources:j.spec.resources,environments:j.spec.environments,metric_protocol:j.spec.metric_protocol},null,2);
   $('detail-tags').replaceChildren(recordTagButtons('job',j));
+  if(globalThis.ExLabCompute)ExLabCompute.renderExecution(j,{node,$,api,notify,workers:state.nodes,refresh:()=>detail(id,false)});
   if(globalThis.ExLabDelivery)await ExLabDelivery.render(j,{node,$,api,download,requestId,notify,formatTimestamp,worker:state.nodes.find(worker=>worker.id===j.node_id),refresh:()=>detail(id,false)});
   const events=data.events||j.events||[];$('events').textContent=events.slice(-30).map(e=>JSON.stringify(e)).join('\n');$('actions').replaceChildren();const options=terminal.includes(j.state)?(['paused','interrupted','failed'].includes(j.state)&&j.spec.resume_supported!==false?[['resume','从检查点恢复']]:[]):[[j.spec.resume_supported===false?'cancel':'stop',j.spec.resume_supported===false?'停止实验（无续训）':'请求保存并停止'],...(j.spec.resume_supported===false?[]:[['cancel','取消实验']])];for(const [action,label] of options){const b=node('button',label,'subtle');b.onclick=async()=>{try{await api('/api/action',{job_id:id,action});notify('请求已记录；节点收到并执行后才会更新状态。离线节点不会立即响应。');await detail(id,false);}catch(e){notify(e.message);}};$('actions').append(b);}
   $('artifacts').replaceChildren();for(const a of data.artifacts||j.artifacts||[]){const b=node('button',`${a.name} · ${(a.size/1024).toFixed(1)} KiB`,'subtle');b.onclick=()=>download('/api/artifact?job_id='+encodeURIComponent(id)+'&sha256='+encodeURIComponent(a.sha256),a.name.split('/').pop());$('artifacts').append(b);}if(!$('artifacts').children.length)$('artifacts').append(node('p','还没有完整回传的文件。运行状态与文件归档分别同步。','muted'));
@@ -502,7 +506,7 @@ function renderProjectCleanups(){
     $('project-cleanup-list').append(row);
   }
 }
-function renderScheduling(id,scheduling={mode:'auto'},priority=0){
+function renderScheduling(id,scheduling={mode:'auto'},priority=0,planning){
   const container=$(id);container.replaceChildren(node('h3','算力分配'));
   const controls=node('div',undefined,'form-grid'),modeLabel=editField('分配方式',scheduling.mode||'auto',()=>updateMode(),{choices:[['auto','自动 · 根据环境、资源与负载分配'],['assisted','半自动 · 限定候选与节点偏好'],['manual','手动 · 指定一台算力机']]}),mode=modeLabel.querySelector('select');mode.dataset.control='mode';
   const priorityLabel=editField('队列优先级（数字越大越优先）',priority,()=>{},{type:'number'}),priorityInput=priorityLabel.querySelector('input');priorityInput.min=-100;priorityInput.max=100;priorityInput.step=1;priorityInput.dataset.control='priority';controls.append(modeLabel,priorityLabel);container.append(controls);
@@ -516,15 +520,16 @@ function renderScheduling(id,scheduling={mode:'auto'},priority=0){
   container.append(manualLabel,choices,preferredLabel,gpuDetails,node('p','调度始终检查项目环境、数据、空闲显存和节点策略；暂时没有合适资源时自动排队。优先级不会抢占已运行实验。','muted'));
   function updateMode(){manualLabel.hidden=mode.value!=='manual';manual.disabled=manualLabel.hidden;choices.hidden=mode.value!=='assisted';preferredLabel.hidden=mode.value!=='assisted';}
   updateMode();
+  if(globalThis.ExLabCompute)ExLabCompute.renderPlanning(container,planning,node);
 }
 function readScheduling(id){
   const container=$(id),get=name=>container.querySelector('[data-control="'+name+'"]'),mode=get('mode').value,priority=Number(get('priority').value);
   const scheduling={mode,node_ids:mode==='manual'?[get('manual').value]:mode==='assisted'?[...container.querySelectorAll('[data-control="candidate"]:checked')].map(input=>input.value):[],preferred_node_ids:mode==='assisted'?lines(get('preferred').value):[],gpu_uuids:[...container.querySelectorAll('[data-control="gpu"]:checked')].map(input=>input.value)};
   if(mode==='manual'&&!scheduling.node_ids[0])throw new Error('手动分配需要选择一台算力机。');
   if(!Number.isInteger(priority)||priority<-100||priority>100)throw new Error('优先级应为 -100 到 100 的整数。');
-  return {scheduling,priority};
+  const result={scheduling,priority};if(globalThis.ExLabCompute){const planning=ExLabCompute.readPlanning(container);if(planning!==undefined)result.planning=planning;}return result;
 }
-function applyScheduling(spec,options){spec.scheduling=options.scheduling;spec.priority=options.priority;}
+function applyScheduling(spec,options){spec.scheduling=options.scheduling;spec.priority=options.priority;if(options.planning!==undefined)spec.planning=options.planning;}
 
 function renderImportEditors(){
   $('import-command').value=(importDraft.harness.command||[]).join('\n');renderParameterDefinitions();renderImportAssets();renderMetricRules();
@@ -585,8 +590,8 @@ $('import-metric-add').onclick=()=>addMetricRule('step={step} loss={loss}');
 $('import-metric-test').onclick=async()=>{const button=$('import-metric-test');button.disabled=true;try{const data=await api('/api/local/imports/test-metrics',{metrics:importDraft.harness.metrics||[],sample_log:$('import-sample-log').value});inlineFeedback('import-metric-feedback',(data.matches||[]).length?'匹配成功：'+data.matches.map(item=>`规则 ${item.rule+1} · step ${item.step} · ${Object.entries(item.values).map(([k,v])=>k+' = '+v).join('，')}`).join('\n'):'没有匹配到指标，请调整模板，使标点和文本与日志一致。');if(data.warnings?.length)$('import-metric-feedback').textContent+='\n'+data.warnings.join('\n');}catch(error){inlineFeedback('import-metric-feedback',error.message,true);}finally{button.disabled=false;}};
 
 let aiSuggestion=null;
-async function loadAISettings(){try{const settings=await api('/api/ai/settings');$('ai-enabled').checked=!!settings.enabled;$('ai-base-url').value=settings.base_url;$('ai-model').value=settings.model;$('ai-api-key').value='';$('ai-clear-key').checked=false;$('ai-key-status').textContent=settings.has_api_key?'已有密钥，留空保留。密钥只保存在管理端，不会回显。':'尚未配置密钥。';}catch(error){inlineFeedback('ai-settings-feedback',error.message,true);}}
-async function saveAISettings(test=false){if(!$('ai-settings-form').reportValidity())return;$('ai-save').disabled=true;$('ai-test').disabled=true;try{await api('/api/ai/settings',{enabled:$('ai-enabled').checked,base_url:$('ai-base-url').value.trim(),model:$('ai-model').value.trim(),api_key:$('ai-api-key').value.trim(),clear_api_key:$('ai-clear-key').checked});await loadAISettings();inlineFeedback('ai-settings-feedback',test?'正在测试连接…':'设置已保存。');if(test){const result=await api('/api/ai/test',{});inlineFeedback('ai-settings-feedback',result.message||'AI 服务连接成功。');}}catch(error){inlineFeedback('ai-settings-feedback',error.message,true);}finally{$('ai-save').disabled=false;$('ai-test').disabled=false;}}
+async function loadAISettings(){try{const settings=await api('/api/ai/settings');$('ai-enabled').checked=!!settings.enabled;if($('ai-api-mode'))$('ai-api-mode').value=settings.api_mode||'chat_completions';$('ai-base-url').value=settings.base_url;$('ai-model').value=settings.model;$('ai-api-key').value='';$('ai-clear-key').checked=false;$('ai-key-status').textContent=settings.has_api_key?'已有密钥，留空保留。密钥只保存在管理端，不会回显。':'尚未配置密钥。';}catch(error){inlineFeedback('ai-settings-feedback',error.message,true);}}
+async function saveAISettings(test=false){if(!$('ai-settings-form').reportValidity())return;$('ai-save').disabled=true;$('ai-test').disabled=true;try{await api('/api/ai/settings',{enabled:$('ai-enabled').checked,api_mode:$('ai-api-mode')?.value||'chat_completions',base_url:$('ai-base-url').value.trim(),model:$('ai-model').value.trim(),api_key:$('ai-api-key').value.trim(),clear_api_key:$('ai-clear-key').checked});await loadAISettings();inlineFeedback('ai-settings-feedback',test?'正在测试连接…':'设置已保存。');if(test){const result=await api('/api/ai/test',{});inlineFeedback('ai-settings-feedback',result.message||'AI 服务连接成功。');}}catch(error){inlineFeedback('ai-settings-feedback',error.message,true);}finally{$('ai-save').disabled=false;$('ai-test').disabled=false;}}
 $('ai-settings-form').onsubmit=event=>{event.preventDefault();void saveAISettings();};$('ai-test').onclick=()=>void saveAISettings(true);
 $('import-ai-assist').onclick=async()=>{
   if(importJsonDirty){inlineFeedback('import-ai-feedback','请先应用 JSON 修改，让模型使用当前配置。',true);return;}
@@ -641,7 +646,7 @@ function openMatrix(definition){
   for(const [index,item] of matrixTemplates.entries()){const option=node('option',item.label);option.value=String(index);select.append(option);}
   if(!select.children.length){const option=node('option','先导入并部署算法项目，等待节点报告实验配置');option.value='';select.append(option);}
   matrixAxes=Object.entries(matrixDraft.grid||{}).map(([key,values])=>({key,text:values.map(valueText).join('\n'),type:values.every(value=>typeof value==='string')?'string':'auto'}));
-  renderMatrixParameters();renderMatrixDatasets();renderMatrixAxes();renderScheduling('matrix-scheduling',matrixDraft.scheduling||matrixDraft.spec?.scheduling||{mode:'auto'},matrixDraft.priority??matrixDraft.spec?.priority??0);
+  renderMatrixParameters();renderMatrixDatasets();renderMatrixAxes();renderScheduling('matrix-scheduling',matrixDraft.scheduling||matrixDraft.spec?.scheduling||{mode:'auto'},matrixDraft.priority??matrixDraft.spec?.priority??0,matrixDraft.spec?.planning);
   $('matrix-preview-result').hidden=true;inlineFeedback('matrix-feedback','');$('matrix-form').hidden=false;showView('matrices');$('matrix-form').scrollIntoView({behavior:'smooth'});
 }
 function renderMatrixParameters(){

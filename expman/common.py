@@ -120,6 +120,8 @@ def validate_task(spec):
         result[field] = list(dict.fromkeys(values))
     result["priority"] = _number(result.get("priority", 0), "priority", -100, 100, True)
     result["scheduling"] = validate_scheduling(result.get("scheduling", {}))
+    if "planning" in result:
+        result["planning"] = validate_planning(result["planning"])
     if "asset_aliases" in result:
         aliases = result["asset_aliases"]
         if not isinstance(aliases, dict) or len(aliases) > 100 or any(
@@ -184,6 +186,19 @@ def validate_task(spec):
         _number(params.get("delay", 0.2), "delay", 0, 60)
         _number(params.get("seed", 42), "seed", 0, 2**32 - 1, True)
     return result
+
+
+def validate_planning(value):
+    """Execution planning never changes scientific parameters or result delivery."""
+    if not isinstance(value, dict) or set(value) - {"expected_seconds", "deadline", "migrate"}:
+        raise ValueError("planning accepts expected_seconds, deadline and migrate")
+    value = copy.deepcopy(value)
+    for key in ("expected_seconds", "deadline"):
+        if value.get(key) is not None:
+            value[key] = _number(value[key], "planning." + key, 0, 10**12)
+    if "migrate" in value and type(value["migrate"]) is not bool:
+        raise ValueError("planning.migrate must be boolean")
+    return value
 
 
 def validate_scheduling(value):

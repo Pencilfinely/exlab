@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import threading
 import time
 import unittest
@@ -473,6 +474,63 @@ class ResultDeliveryTests(unittest.TestCase):
         self.delivery = self.agent.result_delivery
         with self.agent.db:
             self.agent.db.execute("UPDATE node_results SET next_retry=0")
+        self.delivery.results_once()
+        self.assertEqual(len(self.hub.job(record["id"])["experiment_results"]), 1)
+        self.assertEqual(self.agent.records()[0]["attempt"], 1)
+
+    def test_concurrent_discovery_keeps_one_cache_and_one_result(self):
+        record, run = self.job()
+        self.publish(run)
+        writing, release, second_started, second_write = (threading.Event() for _ in range(4))
+        original = common.atomic_json
+        errors = []
+        def controlled_write(path, value):
+            if threading.current_thread().name == "first-discovery":
+                writing.set()
+                if not release.wait(3):
+                    raise TimeoutError("Controlled concurrent result discovery")
+            else:
+                second_write.set()
+            return original(path, value)
+        def discover():
+            if threading.current_thread().name == "second-discovery":
+                second_started.set()
+            try:
+                self.delivery.discover_record(record)
+            except Exception as error:
+                errors.append(error)
+        first = threading.Thread(target=discover, name="first-discovery")
+        second = threading.Thread(target=discover, name="second-discovery")
+        with patch("expman.result_delivery.common.atomic_json", side_effect=controlled_write):
+            first.start()
+            try:
+                self.assertTrue(writing.wait(2))
+                second.start()
+                self.assertTrue(second_started.wait(2))
+                self.assertFalse(second_write.wait(0.2), "Concurrent discovery overwrote the same cache")
+            finally:
+                release.set()
+                first.join(timeout=3)
+                if second.ident is not None:
+                    second.join(timeout=3)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        rows = self.agent.db.execute("SELECT path FROM node_results").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(Path(rows[0][0]).is_file())
+        self.delivery.results_once()
+        self.assertEqual(len(self.hub.job(record["id"])["experiment_results"]), 1)
+        self.assertEqual(self.agent.records()[0]["attempt"], 1)
+
+    def test_terminal_result_scanner_failure_does_not_enter_execution_lane(self):
+        record, run = self.job(state="succeeded")
+        self.publish(run)
+        with patch.object(self.delivery, "discover_record", side_effect=sqlite3.InterfaceError(
+                "bad parameter or other API misuse")) as discover:
+            self.agent._snapshot_files(record)
+        discover.assert_not_called()
+        self.assertTrue(self.agent.records()[0]["archive_scanned"])
         self.delivery.results_once()
         self.assertEqual(len(self.hub.job(record["id"])["experiment_results"]), 1)
         self.assertEqual(self.agent.records()[0]["attempt"], 1)

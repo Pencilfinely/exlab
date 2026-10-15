@@ -181,6 +181,10 @@ class AgentTests(unittest.TestCase):
         record = self.record("succeeded")
         (self.agent._output(record) / "result.txt").write_text("result")
         self.agent._snapshot_files(record)
+        # Result discovery now belongs to the background lane. Exercise its
+        # offline pass so the diagnostic observes a durable pending upload.
+        with patch.object(self.agent.result_delivery, "_request", side_effect=OSError("offline")):
+            self.agent.result_delivery.results_once()
         self.assertEqual(self.agent.snapshot()["pending_uploads"], 1)
 
     def test_foreground_reports_only_connectivity_changes_without_token(self):

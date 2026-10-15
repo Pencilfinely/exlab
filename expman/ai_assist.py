@@ -1,7 +1,7 @@
-"""Opt-in, server-side import advice through a Chat Completions compatible API.
+"""Opt-in provider transport for reviewed drafts and bounded agent tool turns.
 
-Suggestions are validated drafts, never commands to execute. No request reads
-datasets or sends source unless the caller explicitly includes the entry file.
+Import suggestions remain drafts. Agent execution authority is checked separately
+by the durable tool gateway; the model never receives controller credentials.
 """
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ from urllib.parse import urlsplit
 from .common import atomic_json, read_json
 
 
-DEFAULTS = {"enabled": False, "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "api_key": ""}
+DEFAULTS = {"enabled": False, "base_url": "https://api.deepseek.com", "model": "deepseek-flash", "api_key": "",
+            "api_mode": "chat_completions"}
 MAX_RESPONSE = 512 * 1024
 _SECRET = re.compile(r"(^|[_-])(token|password|secret|api[_-]?key|credential)(s|$)", re.I)
 
@@ -38,8 +39,8 @@ def _endpoint(value):
             or any(char.isspace() or ord(char) < 32 for char in value)
             or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))):
         raise ValueError("AI 地址需要 HTTPS；本机服务可使用 http://localhost 或回环 IP。请填写不含凭证的 API 基础地址。")
-    if parsed.path.endswith("/chat/completions"):
-        raise ValueError("请填写 API 基础地址，不要包含 /chat/completions。")
+    if parsed.path.endswith(("/chat/completions", "/responses")):
+        raise ValueError("请填写 API 基础地址，不要包含 /chat/completions 或 /responses。")
     return value
 
 
@@ -91,6 +92,10 @@ class AIAssist:
                 if not isinstance(enabled, bool) or not isinstance(payload.get("clear_api_key", False), bool):
                     raise ValueError("enabled and clear_api_key must be boolean")
                 config["enabled"] = enabled
+                mode = payload.get("api_mode", config["api_mode"])
+                if mode not in ("chat_completions", "responses"):
+                    raise ValueError("api_mode must be chat_completions or responses")
+                config["api_mode"] = mode
                 key = _text(payload.get("api_key", ""), "api_key", 4096, empty=True)
                 if any(ord(char) < 32 for char in key):
                     raise ValueError("API key contains invalid characters")
@@ -103,7 +108,80 @@ class AIAssist:
                     self.path.chmod(0o600)
                 except OSError:
                     pass
-            return {key: config[key] for key in ("enabled", "base_url", "model")} | {"has_api_key": bool(config["api_key"])}
+            return {key: config[key] for key in ("enabled", "base_url", "model", "api_mode")} | {"has_api_key": bool(config["api_key"])}
+
+    def _request_model(self, config, body, suffix):
+        if not config["enabled"]:
+            raise ValueError("请先在设置中启用 AI 辅助。")
+        endpoint = _endpoint(config["base_url"])
+        headers = {"Content-Type": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = "Bearer " + config["api_key"]
+        request = urllib.request.Request(endpoint + suffix, data=json.dumps(body, allow_nan=False).encode(), headers=headers)
+        try:
+            with urllib.request.build_opener(_NoRedirect()).open(request, timeout=25) as response:
+                raw = response.read(MAX_RESPONSE + 1)
+            if len(raw) > MAX_RESPONSE:
+                raise ValueError("AI 响应过大，请减少上下文。")
+            result = json.loads(raw)
+            if not isinstance(result, dict):
+                raise ValueError("AI 响应必须是 JSON 对象。")
+            return result
+        except urllib.error.HTTPError as error:
+            raise ValueError(f"AI 服务返回 HTTP {error.code}，请检查地址、模型、API Key 或额度。") from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise ValueError("AI 服务连接失败或超时，请检查地址和网络。") from None
+        except (TypeError, json.JSONDecodeError):
+            raise ValueError("AI 服务未返回有效 JSON。") from None
+
+    def tool_turn(self, system, context, history, tools, config=None):
+        """One bounded model turn; execution authority stays in the tool gateway."""
+        config = config or self._config()
+        secrets = [config["api_key"], self.hub.config["admin_token"], *self.hub.config["nodes"].values()]
+        items = copy.deepcopy(history) if history is not None else [{"role": "user", "content": json.dumps(_redact(context, secrets), ensure_ascii=False)}]
+        if len(json.dumps(items, ensure_ascii=False)) > 700000:
+            raise ValueError("AI 工具上下文超过本轮预算。")
+        try:
+            if config["api_mode"] == "responses":
+                result = self._request_model(config, {"model": config["model"], "instructions": system,
+                    "input": items, "tools": [{"type": "function", "name": t["name"], "description": t["description"],
+                        "parameters": t["inputSchema"], "strict": False} for t in tools],
+                    "max_output_tokens": 8192, "store": False}, "/responses")
+                if result.get("status") not in ("completed", None):
+                    raise ValueError("AI 响应未完成，本轮工具未执行。")
+                output = result["output"]
+                calls = [{"id": item["call_id"], "name": item["name"], "arguments": json.loads(item["arguments"])}
+                         for item in output if item.get("type") == "function_call"]
+                text = "\n".join(part.get("text", "") for item in output if item.get("type") == "message"
+                                 for part in item.get("content", []) if part.get("type") == "output_text")
+                items.extend(output)
+            else:
+                result = self._request_model(config, {"model": config["model"], "messages": [{"role": "system", "content": system}, *items],
+                    "tools": [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                        "parameters": t["inputSchema"]}} for t in tools], "max_tokens": 8192, "stream": False}, "/chat/completions")
+                choice = result["choices"][0]
+                if choice.get("finish_reason") == "length":
+                    raise ValueError("AI 响应被截断，本轮工具未执行。")
+                message = choice["message"]
+                calls = [{"id": item["id"], "name": item["function"]["name"], "arguments": json.loads(item["function"]["arguments"])}
+                         for item in message.get("tool_calls", [])]
+                text = message.get("content") or ""
+                items.append({key: message[key] for key in ("role", "content", "tool_calls", "reasoning_content") if key in message})
+            if not isinstance(text, str) or len(calls) > 20 or any(
+                    not isinstance(c["id"], str) or not c["id"] or len(c["id"]) > 200 or not isinstance(c["arguments"], dict)
+                    or not isinstance(c["name"], str) for c in calls) or len({c["id"] for c in calls}) != len(calls):
+                raise ValueError("AI 返回了无效工具调用。")
+            return {"history": items, "calls": calls, "text": text[:12000]}
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+            raise ValueError("AI 服务未返回有效工具调用。") from None
+
+    @staticmethod
+    def tool_result(history, call, result, config):
+        content = json.dumps(result, ensure_ascii=False, allow_nan=False)
+        if config["api_mode"] == "responses":
+            history.append({"type": "function_call_output", "call_id": call["id"], "output": content})
+        else:
+            history.append({"role": "tool", "tool_call_id": call["id"], "content": content})
 
     def _complete(self, system, context):
         with self.hub.lock:
@@ -111,6 +189,21 @@ class AIAssist:
             secrets = [config["api_key"], self.hub.config["admin_token"], *self.hub.config["nodes"].values()]
         if not config["enabled"]:
             raise ValueError("请先在设置中启用 AI 辅助。")
+        if config["api_mode"] == "responses":
+            result = self._request_model(config, {"model": config["model"], "instructions": system,
+                "input": json.dumps(_redact(context, secrets), ensure_ascii=False, allow_nan=False),
+                "text": {"format": {"type": "json_object"}}, "max_output_tokens": 8192, "store": False}, "/responses")
+            try:
+                if result.get("status") not in ("completed", None):
+                    raise ValueError("AI 响应未完成。")
+                text = "".join(part["text"] for item in result["output"] if item.get("type") == "message"
+                               for part in item.get("content", []) if part.get("type") == "output_text")
+                value = json.loads(text)
+                if not isinstance(value, dict):
+                    raise ValueError("AI 建议必须是 JSON 对象。")
+                return value
+            except (KeyError, TypeError, json.JSONDecodeError):
+                raise ValueError("AI 服务未返回有效 JSON。") from None
         endpoint = _endpoint(config["base_url"])
         body = {"model": config["model"], "messages": [{"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(_redact(context, secrets), ensure_ascii=False, allow_nan=False)}],

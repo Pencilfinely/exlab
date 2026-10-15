@@ -14,6 +14,9 @@
   let generation=0, busy=false, polling=false, timer=null, selected=null, detail=null, view='overview', confirmation=null, connectionError=false;
   function notice(message){$('notice').textContent=message;$('notice').hidden=!message;}
   function usable(){return M.canControl(session,connected,sampledAt,busy)&&!document.hidden;}
+  async function agentAPI(path,body){if(body!==undefined&&!usable())throw new Error('请连接主控，并使用具有控制权限的移动凭证。');return request(path.replace('/api/',''),body);}
+  const autonomousUI=rootAutonomy();
+  function rootAutonomy(){return globalThis.ExLabAutonomy?.mount({node:el,api:agentAPI,host:$('stats')?.parentElement,mobile:true,canControl:usable});}
   function status(){
     const fresh=connected&&Date.now()-sampledAt<15000;
     $('connection').textContent=fresh?'在线':token?'连接中':'未配对';
@@ -67,6 +70,7 @@
     $('jobs').replaceChildren(...jobs.map(jobCard));$('job-count').textContent=String(jobs.length);empty($('jobs'),'没有符合条件的实验');
   }
   function render(){
+    autonomousUI?.render();
     const active=data.jobs.filter(j=>!M.terminal.has(j.state));
     const counts=[[data.jobs.filter(j=>j.state==='running').length,'运行中'],[active.filter(j=>j.state!=='running').length,'等待 / 准备'],[data.jobs.filter(j=>j.state==='succeeded').length,'已完成'],[data.nodes.filter(n=>n.online).length,'在线节点']];
     $('stats').replaceChildren(...counts.map(([n,label])=>{const box=el('div',undefined,'stat');box.append(el('strong',n),el('span',label));return box;}));
@@ -74,6 +78,8 @@
     $('nodes').replaceChildren(...data.nodes.map(worker=>{
       const box=el('article',undefined,'card'),heading=el('div',undefined,'heading');heading.append(el('h3',worker.id),el('span',worker.online?'在线':'离线','badge '+(worker.online?'online':'offline')));box.append(heading);
       box.append(el('p',`${worker.mode==='drain'?'已暂停接单':'允许接单'} · ${data.jobs.filter(j=>j.node_id===worker.id&&!M.terminal.has(j.state)).length} 个活跃任务`,'muted small'));
+      if(globalThis.ExLabCompute&&session?.permission==='control')ExLabCompute.renderNode(box,worker,{node:el,api:agentAPI,refresh,notify:notice});
+      else if(worker.snapshot.availability)box.append(el('p',worker.snapshot.availability.reason||'','muted small'));
       const available=[['内存',worker.snapshot.free_ram_mb],['磁盘',worker.snapshot.disk_free_mb]].filter(([,n])=>Number.isFinite(n)).map(([label,n])=>`${label}剩余 ${(n/1024).toFixed(1)} GiB`);if(available.length)box.append(el('p',available.join(' · '),'muted small'));
       for(const gpu of worker.snapshot.gpus){const card=el('div',undefined,'gpu');card.append(el('h3',gpu.name||gpu.uuid));const known=Number.isFinite(gpu.free_mb)&&Number.isFinite(gpu.total_mb)&&gpu.total_mb>0;if(known){card.append(el('p',`显存剩余 ${(gpu.free_mb/1024).toFixed(1)} / ${(gpu.total_mb/1024).toFixed(1)} GiB`,'muted small'));const bar=el('progress');bar.max=gpu.total_mb;bar.value=Math.max(0,gpu.total_mb-gpu.free_mb);bar.setAttribute('aria-label','已用显存');card.append(bar);}else card.append(el('p','暂无显存数据','muted small'));box.append(card);}
       if(session.permission==='control'){const label=worker.mode==='drain'?'恢复接单':'暂停接单';const b=el('button',label);b.dataset.control='true';b.disabled=!usable();b.onclick=()=>confirmAction(label,`节点「${worker.id}」将${label}。`,'node-mode',{node_id:worker.id,mode:worker.mode==='drain'?'run':'drain',expected_mode:worker.mode});box.append(b);}
@@ -92,6 +98,8 @@
     const worker=data.nodes.find(n=>n.id===detail.node_id);
     $('detail-node').textContent=`${detail.node_id||'等待分配'}${worker?' · '+(worker.online?'算力端在线':'算力端离线'):''} · 第 ${detail.attempt||0} 次运行`;
     $('detail-message').textContent=typeof detail.detail==='string'?detail.detail:JSON.stringify(detail.detail);
+    if(globalThis.ExLabCompute){ExLabCompute.renderExecution(detail,{node:el,$,api:agentAPI,notify:notice,workers:data.nodes,refresh:()=>openJob(detail.id)});if(!usable())$('execution-control-panel').querySelectorAll('input,select,button').forEach(input=>input.disabled=true);}
+    if($('lightweight-results'))$('lightweight-results').textContent=JSON.stringify(detail.experiment_results||[],null,2);
     $('detail-pending').hidden=!(detail.command_id>detail.command_ack);$('detail-pending').textContent='请求已记录，等待算力端确认；这不表示操作已经完成。';
     $('detail-actions').replaceChildren();if(session?.permission==='control')for(const action of M.actions(detail)){const b=el('button',action.label,action.value==='cancel'?'danger':'quiet');b.dataset.control='true';b.disabled=!usable();b.onclick=()=>confirmAction(action.label,`实验「${detail.spec.name}」：${action.label}。`,'action',{job_id:detail.id,action:action.value,expected_command_id:detail.command_id});$('detail-actions').append(b);}
     $('metrics').replaceChildren(...Object.entries(detail.metrics||{}).map(([key,value])=>{const item=el('div',undefined,'metric');item.append(el('small',key),el('strong',number(value)));return item;}));empty($('metrics'),'尚无指标回传');
