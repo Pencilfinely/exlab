@@ -10,6 +10,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import uuid
 from unittest.mock import patch
 
 from expman import common
@@ -43,7 +44,7 @@ class AutonomyTests(unittest.TestCase):
         self.temp.__exit__(None, None, None)
 
     def job(self):
-        return self.hub.submit({"request_id": "new-" + str(time.time_ns()), "spec": {"backend": "demo",
+        return self.hub.submit({"request_id": "new-" + uuid.uuid4().hex, "spec": {"backend": "demo",
             "resources": {"gpu_memory_mb": 0}}})["ids"][0]
 
     def enable(self, **extra):
