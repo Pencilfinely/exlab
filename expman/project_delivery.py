@@ -122,6 +122,10 @@ class ProjectDelivery:
             self.installing = None
             self._save()
             return
+        # Finish an in-flight operation above, but do not begin another build or
+        # download after a stop/release request. The receipt waits for it to end.
+        if getattr(self.agent, "last_availability", {}).get("stopping"):
+            return
         for digest, item in self.items.items():
             if item["status"] == "deleting":
                 try:

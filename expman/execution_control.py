@@ -195,7 +195,8 @@ class ExecutionControlHubMixin:
 
     def _policy_handoffs(self, node_id, snapshot):
         availability = snapshot.get("availability", {})
-        stopping = availability.get("stopping") is True
+        # Stop-and-hold preserves local ownership. Only release hands work off.
+        stopping = availability.get("mode") == "release"
         for row in self.db.execute("SELECT * FROM jobs WHERE node_id=?", (node_id,)).fetchall():
             state = json.loads(row["execution_state"]) if row["execution_state"] else {}
             handoff = self.db.execute("SELECT generation,status FROM execution_handoffs WHERE job_id=?", (row["id"],)).fetchone()

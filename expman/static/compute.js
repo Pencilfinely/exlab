@@ -3,6 +3,23 @@
   'use strict';
   const clone=value=>JSON.parse(JSON.stringify(value));
   const defaults=()=>({revision:0,kind:'shared',mode:'available',until:null,reason:'',require_ac:false,reliability:1,maintenance:[],risk_windows:[]});
+  const modeLabels={available:'允许接单',drain:'暂停接单',stop:'停止实验并暂停接单',release:'停止实验、暂停接单并释放训练资源'};
+  const phaseLabels={available:'允许接单',admission_paused:'已暂停接单 · 实验继续',stopping:'正在保存并停止实验',stopped:'实验已停止 · 接单已暂停',releasing:'正在释放训练资源',released:'训练资源已释放 · 接单已暂停',blocked:'执行未完成 · 需要检查'};
+  function nodeState(worker){
+    const snap=worker.snapshot||{},availability=snap.availability||{},control=snap.compute_control;
+    const mode=availability.mode||'available',pending=worker.compute_policy&&worker.compute_policy.revision!==(snap.compute_policy_revision||0);
+    const matching=control&&control.policy&&['mode','revision','source','until','reason'].every(key=>(control.policy[key]??null)===(availability[key]??null));
+    if(pending)return {label:'策略待 Worker 接收',detail:'已保存的策略尚未被 Worker 接收，不能据此确认实验停止或资源释放。'};
+    if(worker.online===false||worker.last_seen!==undefined&&Date.now()/1000-worker.last_seen>=45)
+      return {label:'离线 · 当前执行状态未知',detail:matching?'上次回报：'+phaseLabels[control.phase]+'。'+control.detail:'等待 Worker 连接并核验；离线不能视为已释放。'};
+    if(matching){
+      if(control.phase==='released'&&(!control.resources_released||!control.experiments_stopped)||control.phase==='stopped'&&!control.experiments_stopped)
+        return {label:'等待 Worker 核验',detail:'停止或资源释放确认不完整。'};
+      return {label:worker.mode==='drain'&&mode==='available'?'已暂停接单':phaseLabels[control.phase]||'等待核验',detail:control.detail};
+    }
+    if(mode==='stop'||mode==='release')return {label:'等待 Worker 核验',detail:'已请求'+modeLabels[mode]+'；尚未收到匹配的执行结果。'+((snap.capabilities||[]).includes('compute-control-v2')?'':'此 Worker 需要升级后才能回传停止与释放核验。')};
+    return {label:mode==='drain'||worker.mode==='drain'?'已暂停接单 · 实验继续':'允许接单',detail:availability.reason||''};
+  }
   const localTime=seconds=>{if(!seconds)return '';const d=new Date(seconds*1000);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
   const readTime=(input,original)=>input.value===localTime(original)?(original??null):input.value?new Date(input.value).getTime()/1000:null;
   function field(node,parent,label,value,type='text'){
@@ -19,7 +36,9 @@
     const dialog=node('dialog',undefined,'workspace-dialog'),form=node('form'),feedback=node('p','','inline-feedback');form.append(node('h2',`${worker.display_name||worker.id} · 可用策略`));
     const controls=node('div',undefined,'form-grid');form.append(controls);
     const kind=select(node,controls,'节点类型',[['stable','常开节点'],['shared','个人主机'],['portable','便携设备']],original.kind);
-    const mode=select(node,controls,'提供算力',[['available','允许接单'],['drain','停止接单，等待现有实验结束'],['release','保存并停止现有实验，释放训练资源']],preset?'release':expired?'available':original.mode);
+    const confirmedControl=(worker.snapshot?.capabilities||[]).includes('compute-control-v2');
+    const mode=select(node,controls,'本机实验与资源',Object.entries(modeLabels),preset?'release':expired?'available':original.mode);
+    for(const option of mode.children)if(['stop','release'].includes(option.value))option.disabled=!confirmedControl;
     const until=field(node,controls,'策略结束时间（留空则手动恢复）',localTime(editingUntil),'datetime-local');
     const reason=field(node,controls,'原因',preset?'游戏':original.reason);reason.maxLength=300;
     const acLabel=node('label',undefined,'checkbox-label'),ac=node('input');ac.type='checkbox';ac.checked=original.require_ac;acLabel.append(ac,node('span','仅在接通电源时提供算力（供电未知时暂停）'));form.append(acLabel);
@@ -38,16 +57,20 @@
     }
     for(const risk of original.risk_windows)addRisk(risk);
     const addRiskButton=node('button','添加风险时段','subtle');addRiskButton.type='button';addRiskButton.onclick=()=>addRisk();form.append(addRiskButton);
-    form.append(node('p','释放会先请求保存；超过 Worker 的停止宽限时间后结束本实验台的训练进程。没有完整续训入口的实验需要重新提交。系统会确认停止后才交接；网络失联不会直接派发第二份。','muted'));
+    const semantics=node('p','','muted');
+    mode.onchange=()=>{semantics.textContent=({available:'恢复接单不会自动续训手动停止的实验。',drain:'只暂停接单，当前实验继续运行并占用资源。',stop:'请求保存并停止实验，暂停接单；任务和容器环境留在本机，等待显式续训。',release:'请求保存并停止实验，暂停接单；可交接任务归还队列，清理已停止的实验容器，核验训练进程退出。控制代理及 Docker/WSL 保持在线；完全释放虚拟机内存使用 Windows Worker 的“停用并释放 Docker / WSL”。'})[mode.value];};
+    mode.onchange();form.append(semantics,node('p','停止会先请求保存；超过停止宽限时间后结束训练进程。没有续训入口的实验会中断；确认停止及检查点回传后才交接。','muted'));
+    if(!confirmedControl)form.append(node('p','此 Worker 不能回传停止与释放核验结果，请先升级后使用这两档操作。','inline-feedback'));
     const save=node('button','保存策略'),close=node('button','关闭','subtle'),actions=node('div',undefined,'actions');close.type='button';close.onclick=()=>dialog.close();actions.append(save,close);form.append(actions,feedback);
     let revision=original.revision;
     form.onsubmit=async event=>{
       event.preventDefault();if(save.disabled||!form.reportValidity())return;
+      if(!confirmedControl&&['stop','release'].includes(mode.value)){feedback.textContent='请先升级 Worker，当前版本不能核验停止与释放。';return;}
       const policy={revision,kind:kind.value,mode:mode.value,until:readTime(until,editingUntil),reason:reason.value,require_ac:ac.checked,reliability:Number(reliability.value)/100,
         maintenance:windows.map(x=>({start:readTime(x.start,x.original.start),end:readTime(x.end,x.original.end),reason:x.why.value})),risk_windows:riskRows.map(x=>({window:x.window.value,risk:Number(x.risk.value)/100}))};
       if(policy.until!==null&&policy.until<=Date.now()/1000){feedback.textContent='结束时间应晚于现在。';return;}
       save.disabled=true;
-      try{const result=await api('/api/compute-policy',{node_id:worker.id,policy});revision=result.policy.revision;feedback.textContent='已保存，等待 Worker 确认；可以关闭窗口。';await refresh();notify('可用策略已保存。正在运行的任务按所选策略处理。');}
+      try{const result=await api('/api/compute-policy',{node_id:worker.id,policy});revision=result.policy.revision;feedback.textContent='请求已保存，等待 Worker 执行并核验；可关闭窗口后在节点状态中查看。';await refresh();notify('请求已保存，执行进度以 Worker 回传为准。');}
       catch(error){feedback.textContent='保存未确认：'+error.message+'；输入已保留，可原样重试。';}
       finally{save.disabled=false;}
     };
@@ -55,10 +78,11 @@
   }
   function renderNode(box,worker,ctx){
     const {node}=ctx,snap=worker.snapshot||{},supported=(snap.capabilities||[]).includes('dynamic-compute-v1'),availability=snap.availability;
-    if(availability)box.append(node('p',`${availability.available?'可用':'暂不接单'} · ${availability.reason}${availability.until?' · 截止 '+new Date(availability.until*1000).toLocaleString():''}`,'resource-sync'));
+    const state=nodeState(worker);
+    if(availability)box.append(node('p',`${state.label}${availability.until?' · 截止 '+new Date(availability.until*1000).toLocaleString():''}`,'resource-sync'),node('p',state.detail,'muted'));
     if(worker.compute_policy&&worker.compute_policy.revision!==(snap.compute_policy_revision||0))box.append(node('p','可用策略待 Worker 确认','muted'));
     const button=node('button',supported?'可用策略 / 维护':'升级 Worker 后设置可用策略','subtle');button.disabled=!supported;button.onclick=()=>policyEditor(worker,ctx,false);box.append(button);
-    if(supported){const release=node('button','游戏 · 释放两小时','subtle');release.onclick=()=>policyEditor(worker,ctx,true);box.append(release);}
+    if(supported){const release=node('button','游戏 · 释放训练资源','subtle');release.disabled=!(snap.capabilities||[]).includes('compute-control-v2');release.title=release.disabled?'先升级 Worker 以获得资源释放核验':'预填两小时释放，可在提交前修改';release.onclick=()=>policyEditor(worker,ctx,true);box.append(release);}
     const delivery=snap.execution_delivery;
     if(delivery){box.append(node('p',`续训检查点待传 ${delivery.pending_checkpoints||0} · 最近备份 ${delivery.last_checkpoint_received_at?new Date(delivery.last_checkpoint_received_at*1000).toLocaleString():'暂无'}`,'muted'));if(delivery.last_error)box.append(node('p','执行资料回传：'+delivery.last_error,'muted'));}
   }
@@ -123,5 +147,5 @@
   function mount(ctx){
     const button=ctx.node('button','AI 规划建议','subtle');button.type='button';button.onclick=()=>openAssistant(ctx);ctx.$('nodes').before(button);
   }
-  root.ExLabCompute={renderNode,renderExecution,renderPlanning,readPlanning,policyEditor,defaults,mount};
+  root.ExLabCompute={renderNode,renderExecution,renderPlanning,readPlanning,policyEditor,defaults,mount,nodeState};
 })(globalThis);

@@ -343,8 +343,8 @@ class Agent:
                       env=self._docker_environment() if argv[0] == 'docker' else None)
         if self.preparation and threading.current_thread() is self.preparation["thread"]:
             with self.prep_mutex:
-                if self.closed:
-                    raise RuntimeError("Agent closed during preparation")
+                if self.closed or self.preparation["cancel"].is_set():
+                    raise RuntimeError("Agent preparation canceled")
                 process = subprocess.Popen(argv, **kwargs)
                 self.prep_process = process
             try:
@@ -357,6 +357,8 @@ class Agent:
                 with self.prep_mutex:
                     self.prep_process = None
             result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+            if self.preparation["cancel"].is_set():
+                raise RuntimeError("Agent preparation canceled")
         else:
             result = subprocess.run(argv, timeout=timeout, **kwargs)
         if check and result.returncode:
@@ -407,9 +409,10 @@ class Agent:
                   "free_ram_mb": _free_ram_mb(),
                   "disk_free_mb": shutil.disk_usage(self.root).free // (1024 * 1024),
                   "cpu_count": os.cpu_count(), "local_time": time.strftime("%H:%M"),
-                  "platform": sys.platform, "docker_available": False}
+                  "platform": sys.platform, "docker_available": False, "node_mode": self.mode}
         result["capabilities"] = ["scheduler-v2", "project-delete-v1", node_policy.CAPABILITY,
-                                  compute_policy.CAPABILITY, "execution-state-v1"] + (["project-bundle-v1"] if sys.platform == "linux" else [])
+                                  compute_policy.CAPABILITY, compute_policy.CONTROL_CAPABILITY,
+                                  "execution-state-v1"] + (["project-bundle-v1"] if sys.platform == "linux" else [])
         from . import __version__
         from . import result_protocol, result_delivery
         result["agent_version"] = __version__
@@ -492,24 +495,42 @@ class Agent:
         snapshot["local_compute_policy"] = local
         snapshot["compute_policy_revision"] = remote["revision"]
         result = compute_policy.apply(snapshot, remote)
+        receipt = self._meta("compute_control", None) if hasattr(self, "db") else None
+        if receipt:
+            result["compute_control"] = receipt
         self.last_availability = result["availability"]
         return result
 
     def _availability_tick(self, snapshot):
+        from .compute_control import observe
         availability = snapshot.get("availability", {})
-        if not availability.get("stopping"):
+        if availability.get("stopping"):
+            self._cancel_preparation()
+            for record in self.records():
+                if record.get("execution_retired") or record["state"] in TERMINAL:
+                    continue
+                reason = availability.get("reason", "停止本机实验")
+                if availability.get("release_resources") and not record.get("resource_release"):
+                    self._save(record, resource_release=reason)
+                if record["state"] in ACTIVE:
+                    if record.get("stop_at") is None:
+                        self._command(record, "stop", record.get("command_ack", 0))
+                else:
+                    self._save(record, state="paused", execution_stopped=True,
+                               detail=("已归还未启动任务：" if availability.get("release_resources") else "已停止未启动任务：") + reason)
+        receipt = observe(self, availability)
+        self._set_meta("compute_control", receipt)
+        self.last_compute_control = snapshot["compute_control"] = receipt
+
+    def _cancel_preparation(self):
+        """Cancel only our own preparation child; completion is checked separately."""
+        if not self.preparation:
             return
-        for record in self.records():
-            if record.get("execution_retired") or record["state"] in TERMINAL:
-                continue
-            reason = availability.get("reason", "临时释放算力")
-            if not record.get("resource_release"):
-                self._save(record, resource_release=reason)
-            if record["state"] in ACTIVE:
-                if record.get("stop_at") is None:
-                    self._command(record, "stop", record.get("command_ack", 0))
-            else:
-                self._save(record, state="paused", execution_stopped=True, detail="已归还未启动任务：" + reason)
+        with self.prep_mutex:
+            self.preparation["cancel"].set()
+            process = self.prep_process
+            if process is not None and process.poll() is None:
+                process.terminate()
 
     def _accept_resource_policy(self, value, snapshot):
         if value is None:
@@ -733,7 +754,7 @@ class Agent:
             self._save(record, state="ready", prepared=True, cached_environments=environments,
                        detail="Built-in demo ready")
             return
-        preparation = {"id": record["id"], "done": threading.Event()}
+        preparation = {"id": record["id"], "done": threading.Event(), "cancel": threading.Event()}
 
         def prepare():
             try:
@@ -753,7 +774,10 @@ class Agent:
             return
         self.preparation = None
         record = next(item for item in self.records() if item["id"] == preparation["id"])
-        if "error" in preparation:
+        if preparation["cancel"].is_set():
+            if record["state"] == "preparing":
+                self._save(record, state="assigned", detail="Preparation canceled; inputs retained")
+        elif "error" in preparation:
             if record["state"] == "preparing":
                 self._save(record, state="failed", detail="Preparation failed: " + preparation["error"])
         else:
@@ -1164,6 +1188,7 @@ class Agent:
 
         def result():
             return {"online": self.online, "mode": self.mode, "jobs": self.records(), "error": self.last_error,
+                    "compute_control": getattr(self, "last_compute_control", None),
                     "controller_agent": self._meta("controller_agent", {}), "availability": getattr(self, "last_availability", {})}
 
         if exiting():
@@ -1197,7 +1222,7 @@ class Agent:
         for record in self.records():
             if exiting():
                 return result()
-            if record["state"] in ("assigned", "preparing"):
+            if record["state"] in ("assigned", "preparing") and not snapshot.get("availability", {}).get("stopping"):
                 try:
                     self._prepare(record, snapshot)
                 except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:

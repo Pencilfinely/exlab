@@ -167,7 +167,7 @@ class HubTests(unittest.TestCase):
         barrier = threading.Barrier(6)
         def submit():
             try:
-                barrier.wait(timeout=3)
+                barrier.wait(timeout=15)
                 results.append(self.submit())
             except BaseException as error:
                 errors.append(error)
@@ -175,7 +175,7 @@ class HubTests(unittest.TestCase):
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(5)
+            thread.join(20)
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 6)
         self.assertEqual(len(set(results)), 1)

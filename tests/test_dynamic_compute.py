@@ -69,6 +69,17 @@ class DynamicComputeTests(unittest.TestCase):
         self.assertTrue(compute_policy.evaluate(policy, timestamp=2100)["stopping"])
         self.assertTrue(compute_policy.evaluate(policy, timestamp=2200)["available"])
 
+    def test_stop_and_hold_requires_updated_worker_and_keeps_resource_release_distinct(self):
+        with self.assertRaises(APIError):
+            self.hub.set_compute_policy({'node_id': 'a', 'policy': {'mode': 'stop'}})
+        snap = snapshot()
+        snap['capabilities'].append(compute_policy.CONTROL_CAPABILITY)
+        self.sync('a', snap=snap)
+        self.hub.set_compute_policy({'node_id': 'a', 'policy': {'mode': 'stop'}})
+        value = compute_policy.evaluate(self.hub._compute_policy('a'))
+        self.assertTrue(value['stopping'])
+        self.assertFalse(value['release_resources'])
+
     def test_ac_unknown_and_manual_override_are_local_admission_gates(self):
         policy = compute_policy.validate({"require_ac": True})
         for value in (False, None):
@@ -337,6 +348,69 @@ class DynamicComputeTests(unittest.TestCase):
 
 
 class DynamicComputeHTTPTests(unittest.TestCase):
+    def test_pause_admission_then_stop_holds_work_until_explicit_resume(self):
+        with temporary_directory() as directory:
+            root = Path(directory)
+            hub = Hub(root / 'hub')
+            server = make_server(hub, port=0)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            agents = []
+            try:
+                for name in ('a', 'b'):
+                    config = node_config(name, 'http://127.0.0.1:' + str(server.server_address[1]),
+                                         hub.add_node(name), root / name, True)
+                    path = root / (name + '.json')
+                    common.atomic_json(path, config)
+                    agents.append(Agent(path))
+                    agents[-1].tick()
+                job = hub.submit({'spec': {'backend': 'demo', 'params': {'steps': 200, 'delay': .04},
+                    'resources': {'gpu_memory_mb': 0}}, 'request_id': 'three-controls'})['ids'][0]
+                def pump(predicate):
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        for agent in agents:
+                            agent.tick()
+                        if predicate():
+                            return
+                        time.sleep(.03)
+                    self.fail(str(hub.job(job)))
+                def change(mode):
+                    old = hub._compute_policy('a') or compute_policy.validate({})
+                    hub.set_compute_policy({'node_id': 'a', 'policy': {**old, 'mode': mode}})
+                pump(lambda: hub.job(job)['metrics'].get('step', 0) >= 3)
+                change('drain')
+                step = hub.job(job)['metrics']['step']
+                pump(lambda: hub.job(job)['metrics'].get('step', 0) >= step + 3)
+                self.assertEqual(hub.job(job)['state'], 'running')
+                self.assertEqual(agents[0].last_compute_control['phase'], 'admission_paused')
+                change('stop')
+                pump(lambda: hub.job(job)['state'] == 'paused')
+                self.assertEqual(agents[0].last_compute_control['phase'], 'stopped')
+                self.assertFalse(agents[0].last_compute_control['resources_released'])
+                self.assertEqual(hub.job(job)['node_id'], 'a')
+                self.assertEqual(hub.job(job)['generation'], 1)
+                self.assertIsNone(hub.job(job)['handoff'])
+                self.assertFalse(agents[1].records())
+                change('available')
+                for agent in agents:
+                    agent.tick()
+                self.assertEqual(hub.job(job)['state'], 'paused')
+                hub.action({'job_id': job, 'action': 'resume'})
+                pump(lambda: hub.job(job)['attempt'] == 2 and hub.job(job)['state'] == 'running')
+                self.assertEqual(hub.job(job)['node_id'], 'a')
+                self.assertEqual(hub.job(job)['generation'], 1)
+            finally:
+                for agent in agents:
+                    for record in agent.records():
+                        if record['state'] in ('starting', 'running'):
+                            common.atomic_json(agent._output(record) / 'STOP', {})
+                    for process in agent.processes.values():
+                        process.wait(timeout=5)
+                    agent.close()
+                server.shutdown()
+                server.server_close()
+                hub.close()
+
     def test_real_workers_resume_on_another_node_with_lightweight_results(self):
         with temporary_directory() as directory:
             root = Path(directory)

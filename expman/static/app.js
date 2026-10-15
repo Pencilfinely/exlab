@@ -12,7 +12,7 @@ let currentView='overview', localImportAvailable=null, importJob=null, importDra
 const viewLabels={overview:['总览','实验、算力和算法项目，都在这里管理。'],experiments:['实验记录','查看进度、指标和结果，管理每一次运行。'],matrices:['实验矩阵','组合数据集与参数，自动分配算力，统一整理结果。'],compute:['算力管理','连接 Windows 与 Ubuntu 算力机，查看资源和接单状态。'],projects:['算法项目','从原始目录导入，检查配置，再分发到算力机。'],settings:['设置','连接你的工作空间与设备。']};
 const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).toString(16)).join('');
 if(globalThis.ExLabCompute)ExLabCompute.mount({node,$,api,notify,refresh});
-globalThis.ExLabAutonomousUI=globalThis.ExLabAutonomy?.mount({node,api,host:$('ai-settings-form')?.parentElement});
+globalThis.ExLabAutonomousUI=globalThis.ExLabAutonomy?.mount({node,api,host:$('ai-settings-form')?.parentElement,after:$('ai-settings-form')?.parentElement});
 function node(tag, text, cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=String(text); if(cls)e.className=cls;return e; }
 function notify(message) { $('notice').textContent=message; $('notice').hidden=!message; }
 async function writeClipboardText(text) {
@@ -258,7 +258,7 @@ $('node-resource-form').onsubmit=event=>{event.preventDefault();void saveNodeRes
 $('node-resource-close').onclick=()=>{$('node-resource-form').hidden=true;nodeResourceEditor=null;};
 $('node-resource-reload').onclick=()=>nodeResourceEditor&&openNodeResources(nodeResourceEditor.id);
 function render(){if(globalThis.ExLabAutonomousUI)globalThis.ExLabAutonomousUI.render();const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
-  $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.display_name||n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',n.mode==='drain'?'已暂停接单':online(n)?'可以接单':'等待连接'));
+  $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.display_name||n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',globalThis.ExLabCompute?ExLabCompute.nodeState(n).label:n.mode==='drain'?'已暂停接单':online(n)?'可以接单':'等待连接'));
     const rename=node('button','改名','text-button');rename.onclick=async()=>{const name=prompt('算力端显示名称',n.display_name||n.id);if(!name?.trim())return;try{await api('/api/node-rename',{node_id:n.id,name:name.trim()});await refresh();}catch(error){notify(error.message);}};box.append(rename);
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
     for(const g of snap.gpus||[]){const gpu=node('div',`${g.name} · 空闲 ${Number.isFinite(g.free_mb)?(g.free_mb/1024).toFixed(1):'?'} / ${(g.total_mb/1024).toFixed(1)} GiB`,'gpu'),bar=node('div',undefined,'bar'),fill=node('i');fill.style.width=Math.max(0,Math.min(100,100*(1-g.free_mb/g.total_mb)))+'%';bar.append(fill);gpu.append(bar);box.append(gpu);}
@@ -332,7 +332,7 @@ function renderOverview(){
   for(const worker of (state.nodes||[]).slice(0,5)){
     const row=node('div',undefined,'list-row'),label=node('div');label.append(node('strong',worker.display_name||worker.id));
     const gpus=worker.snapshot?.gpus||[];label.append(node('small',gpus.length?gpus.map(g=>g.name.replace(/^NVIDIA (GeForce )?/, '')).join(' / '):'等待设备信息'));
-    const online=Date.now()/1000-worker.last_seen<45;row.append(label,node('span',online?(worker.mode==='drain'?'暂停接单':'在线'):'离线','badge '+(online?'succeeded':'')));$('overview-workers').append(row);
+    const online=Date.now()/1000-worker.last_seen<45;row.append(label,node('span',globalThis.ExLabCompute?ExLabCompute.nodeState(worker).label:online?(worker.mode==='drain'?'暂停接单':'在线'):'离线','badge '+(online?'succeeded':'')));$('overview-workers').append(row);
   }
   if(!$('overview-workers').children.length)$('overview-workers').append(node('p','还没有算力机。添加一台机器，开始准备实验。','muted'));
   $('recent-jobs').replaceChildren();

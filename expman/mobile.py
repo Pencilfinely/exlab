@@ -106,7 +106,7 @@ class MobileHubMixin:
         for value in state["nodes"]:
             node = _pick(value, ("id", "last_seen", "online", "mode", "display_name", "compute_policy", "resource_policy"))
             snapshot = value["snapshot"]
-            node["snapshot"] = _pick(snapshot, ("free_ram_mb", "disk_free_mb", "policy", "availability", "local_compute_policy", "ac_power", "capabilities", "execution_delivery", "delivery", "compute_policy_revision"))
+            node["snapshot"] = _pick(snapshot, ("free_ram_mb", "disk_free_mb", "policy", "availability", "compute_control", "local_compute_policy", "ac_power", "capabilities", "execution_delivery", "delivery", "compute_policy_revision"))
             node["snapshot"]["gpus"] = [_pick(gpu, ("uuid", "name", "total_mb", "free_mb", "local_enabled"))
                                         for gpu in snapshot.get("gpus", [])]
             nodes.append(node)
@@ -119,7 +119,7 @@ class MobileHubMixin:
                 "events": value["events"], "artifacts": value["artifacts"],
                 **_pick(value, ("execution_checkpoints", "experiment_results", "experiment_progress", "evidence"))}
 
-    def mobile_request(self, header, method, path, payload=None, identity=None):
+    def mobile_request(self, header, method, path, payload=None, identity=None, query=None):
         """Keep revocation, authorization and execution under the same hub lock."""
         from .hub import APIError, _integer, _object
         with self.lock:
@@ -133,11 +133,21 @@ class MobileHubMixin:
                     return self.autonomy.status()
                 if path == "/api/mobile/agent/run":
                     return self.autonomy.run_detail(identity)
+                if path == "/api/mobile/agent/history":
+                    values = query or {}
+                    return self.autonomy.history(int(values.get("offset", [0])[0]), int(values.get("limit", [5])[0]))
+                if path == "/api/mobile/agent/inspection":
+                    values = query or {}
+                    return self.autonomy.rules.report(int(values.get("offset", [0])[0]), int(values.get("limit", [10])[0]))
+                if path == "/api/mobile/agent/rules":
+                    values = query or {}
+                    return self.autonomy.rules.listing(int(values.get("offset", [0])[0]), min(8, int(values.get("limit", [5])[0])))
                 raise APIError(404, "找不到移动接口")
             if method != "POST":
                 raise APIError(405, "不支持的请求方法")
             if path not in ("/api/mobile/action", "/api/mobile/node-mode", "/api/mobile/agent/settings", "/api/mobile/agent/delegate",
-                            "/api/mobile/agent/interrupt", "/api/mobile/compute-policy", "/api/mobile/execution/handoff", "/api/mobile/planning/queue"):
+                            "/api/mobile/agent/interrupt", "/api/mobile/agent/rules/preview", "/api/mobile/agent/rules/save", "/api/mobile/agent/rules/delete",
+                            "/api/mobile/compute-policy", "/api/mobile/execution/handoff", "/api/mobile/planning/queue"):
                 raise APIError(404, "找不到移动接口")
             if session["permission"] != "control":
                 raise APIError(403, "此设备仅有查看权限")
@@ -145,6 +155,9 @@ class MobileHubMixin:
             if path.startswith("/api/mobile/agent/"):
                 from .agent_tools import validate, obj, TEXT
                 actor = {"id": "mobile:" + session["id"], "scopes": ["read", "control", "delegate", "automation"]}
+                if "/rules/" in path:
+                    suffix = path.rsplit("/", 1)[-1]
+                    return self.autonomy.gateway.call("exlab_rule_"+suffix, payload, actor)
                 if path.endswith("settings"):
                     return self.autonomy.settings(payload)
                 if path.endswith("delegate"):

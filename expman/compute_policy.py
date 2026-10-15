@@ -15,6 +15,8 @@ import statistics
 from .common import now
 
 CAPABILITY = "dynamic-compute-v1"
+CONTROL_CAPABILITY = "compute-control-v2"
+MODES = {"available": 0, "drain": 1, "stop": 2, "release": 3}
 
 
 def number(value, name, maximum=10**12, minimum=0):
@@ -35,8 +37,8 @@ def validate(value):
         raise ValueError("revision must be an integer")
     if value.setdefault("kind", "shared") not in ("stable", "shared", "portable"):
         raise ValueError("Unknown node kind")
-    if value.setdefault("mode", "available") not in ("available", "drain", "release"):
-        raise ValueError("mode must be available, drain or release")
+    if value.setdefault("mode", "available") not in MODES:
+        raise ValueError("mode must be available, drain, stop or release")
     if value.setdefault("until", None) is not None:
         number(value["until"], "until")
     reason = value.setdefault("reason", "")
@@ -78,8 +80,8 @@ def evaluate(policy, snapshot=None, timestamp=None):
     if expired:
         mode = "available"
     manual_block = mode != "available"
-    reason = (policy.get("reason") if not expired else "") or {"release": "临时释放算力", "drain": "等待当前实验结束"}.get(mode, "可提供算力")
-    stop = mode == "release"
+    reason = (policy.get("reason") if not expired else "") or {"release": "临时释放训练资源", "stop": "停止实验并暂停接单", "drain": "暂停接单，现有实验继续"}.get(mode, "可提供算力")
+    stop = mode in ("stop", "release")
     available_seconds = None
     for window in policy.get("maintenance", []):
         if window["start"] <= timestamp < window["end"]:
@@ -101,6 +103,7 @@ def evaluate(policy, snapshot=None, timestamp=None):
             if (lo < hi and lo <= point < hi) or (lo > hi and (point >= lo or point < hi)) or lo == hi:
                 risk = max(risk, item["risk"])
     return {"available": mode == "available", "stopping": stop, "mode": mode,
+            "release_resources": mode == "release",
             "reason": reason, "until": until, "risk": risk,
             "available_seconds": available_seconds, "revision": policy.get("revision", 0)}
 
@@ -108,16 +111,21 @@ def evaluate(policy, snapshot=None, timestamp=None):
 def apply(snapshot, policy):
     snapshot["compute_policy"] = policy
     availability = evaluate(policy, snapshot)
+    availability["source"] = "center"
     local = snapshot.get("local_compute_policy")
     if local is not None:
         local_availability = evaluate(validate(local), snapshot)
+        local_availability["source"] = "local"
         current = availability
         if (not local_availability["available"] and
-                (not availability["stopping"] or local_availability["stopping"])):
+                MODES[local_availability["mode"]] >= MODES[availability["mode"]]):
             availability = local_availability
         availability["risk"] = max(current["risk"], local_availability["risk"])
         horizons = [item for item in (current["available_seconds"], local_availability["available_seconds"]) if item is not None]
         availability["available_seconds"] = min(horizons) if horizons else None
+    if snapshot.get("node_mode") == "drain" and availability["available"]:
+        availability.update(mode="drain", available=False, stopping=False, release_resources=False,
+                            source="node_mode", until=None, reason="节点开关已暂停接单，当前实验继续")
     snapshot["availability"] = availability
     if not snapshot["availability"]["available"]:
         snapshot.setdefault("policy", {})["run_enabled"] = False
@@ -137,7 +145,7 @@ def validate_snapshot(snapshot):
     if availability is not None:
         if not isinstance(availability, dict):
             raise ValueError("availability must be an object")
-        for key in ("available", "stopping"):
+        for key in ("available", "stopping", "release_resources"):
             if key in availability and type(availability[key]) is not bool:
                 raise ValueError("availability." + key + " must be boolean")
         if "risk" in availability:
@@ -146,6 +154,41 @@ def validate_snapshot(snapshot):
             number(availability["available_seconds"], "available_seconds")
         if "reason" in availability and (not isinstance(availability["reason"], str) or len(availability["reason"]) > 300):
             raise ValueError("Invalid availability reason")
+    control = snapshot.get("compute_control")
+    if control is not None:
+        if not isinstance(control, dict) or control.get("phase") not in (
+                "available", "admission_paused", "stopping", "stopped", "releasing", "released", "blocked"):
+            raise ValueError("Invalid compute control receipt")
+        if control.get("mode") not in MODES or not isinstance(control.get("intent"), str) or not re.fullmatch(r"[0-9a-f]{64}", control["intent"]):
+            raise ValueError("Invalid compute control intent")
+        policy = control.get("policy")
+        if not isinstance(policy, dict) or set(policy) != {"mode", "revision", "source", "until", "reason"} or control_intent(policy) != control["intent"]:
+            raise ValueError("Invalid compute control policy binding")
+        if control["mode"] != policy.get("mode"):
+            raise ValueError("Compute control mode does not match policy")
+        for key in ("experiments_stopped", "resources_released"):
+            if type(control.get(key)) is not bool:
+                raise ValueError("Invalid compute control confirmation")
+        number(control.get("observed_at"), "compute control observation time")
+        if not isinstance(control.get("detail"), str) or len(control["detail"]) > 1000:
+            raise ValueError("Invalid compute control detail")
+        if (control["phase"] == "released") != control["resources_released"] or control["resources_released"] and (
+                not control["experiments_stopped"] or control["mode"] != "release"):
+            raise ValueError("Invalid resource release confirmation")
+        if control["phase"] == "stopped" and (not control["experiments_stopped"] or control["mode"] != "stop"):
+            raise ValueError("Invalid experiment stop confirmation")
+
+
+def control_intent(availability):
+    """Bind an execution receipt to the effective policy, including local holds."""
+    import hashlib
+    fields = {key: availability.get(key) for key in ("mode", "revision", "source", "until", "reason")}
+    return hashlib.sha256(json.dumps(fields, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def control_matches(snapshot):
+    receipt = snapshot.get("compute_control") or {}
+    return receipt.get("intent") == control_intent(snapshot.get("availability") or {})
 
 
 def ac_power():
@@ -191,8 +234,11 @@ class ComputePolicyHubMixin:
             row = self.db.execute("SELECT snapshot FROM nodes WHERE id=?", (payload["node_id"],)).fetchone()
             if row is None:
                 raise APIError(404, "Unknown node")
-            if CAPABILITY not in json.loads(row[0]).get("capabilities", []):
+            capabilities = json.loads(row[0]).get("capabilities", [])
+            if CAPABILITY not in capabilities:
                 raise APIError(409, "请先升级 Worker 并等待连接，再设置可用策略")
+            if desired["mode"] == "stop" and CONTROL_CAPABILITY not in capabilities:
+                raise APIError(409, "请先升级 Worker，当前版本不能区分停止实验与释放资源")
             previous = self._compute_policy(payload["node_id"])
             revision = previous["revision"] if previous else 0
             if previous and all(desired[k] == previous[k] for k in desired if k != "revision") and desired["revision"] in (revision, revision - 1):

@@ -225,6 +225,40 @@ class AutonomyTests(unittest.TestCase):
         with self.assertRaises(APIError):
             self.gateway.operate("availability", {"node_id": "rog", "policy": {**self.hub._compute_policy("rog"), "require_ac": False}}, "ac", self.actor, automatic=True)
 
+    def test_policy_ack_alone_does_not_verify_training_resource_release(self):
+        from expman import compute_policy
+        from expman.compute_control import observe
+        from types import SimpleNamespace
+        self.hub.add_node("70ti")
+        snap = {"capabilities": [compute_policy.CAPABILITY, compute_policy.CONTROL_CAPABILITY]}
+        def sync():
+            self.hub.sync("70ti", {"node_id": "70ti", "snapshot": snap, "reports": []})
+        sync()
+        self.gateway.operate("availability", {"node_id": "70ti", "policy": {"mode": "release"}}, "game", self.actor)
+        policy = self.hub._compute_policy("70ti")
+        snap["compute_policy_revision"] = policy["revision"]
+        compute_policy.apply(snap, policy)
+        sync()
+        self.assertEqual(self.manager._outcomes(self.actor["id"], "game")[0]["status"], "pending")
+        empty = SimpleNamespace(records=lambda: [], config={"allow_demo": True}, preparation=None, project_delivery=SimpleNamespace(installing=None))
+        snap["compute_control"] = observe(empty, snap["availability"])
+        snap["compute_control"].update(phase="blocked", resources_released=False)
+        sync()
+        self.assertEqual(self.manager._outcomes(self.actor["id"], "game")[0]["status"], "needs_review")
+        snap["compute_control"] = observe(empty, snap["availability"])
+        sync()
+        self.assertEqual(self.manager._outcomes(self.actor["id"], "game")[0]["status"], "verified")
+        self.hub.db.execute("UPDATE nodes SET last_seen=0 WHERE id='70ti'")
+        self.assertEqual(self.manager._outcomes(self.actor["id"], "game")[0]["status"], "pending")
+
+    def test_automatic_manager_cannot_downgrade_human_release_to_stop(self):
+        self.hub.add_node("70ti")
+        self.hub.sync("70ti", {"node_id": "70ti", "snapshot": {"capabilities": ["dynamic-compute-v1", "compute-control-v2"]}, "reports": []})
+        self.hub.set_compute_policy({"node_id": "70ti", "policy": {"mode": "release"}})
+        current = self.hub._compute_policy("70ti")
+        with self.assertRaises(APIError):
+            self.gateway.operate("availability", {"node_id": "70ti", "policy": {**current, "mode": "stop"}}, "downgrade", self.actor, automatic=True)
+
     def test_automatic_resume_recognizes_own_pause_but_not_manual_stop(self):
         self.hub.add_node("a")
         self.hub.sync("a", {"node_id": "a", "snapshot": {"allow_demo": True, "capabilities": ["experiment-results-v1"]}, "reports": []})

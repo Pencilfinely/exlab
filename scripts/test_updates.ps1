@@ -589,6 +589,23 @@ static class InstallProbeTests {
                 ()=>{StoppedCallbacks++;Commands.Add("dormant");},Native.Run,Delay);
         }
     }
+    static void ComputeControlReceipts() {
+        var desired=new Dictionary<string,object>{{"mode","release"},{"revision",3},{"source","local"},{"until",null},{"reason","gaming"}};
+        var state=new Dictionary<string,object>{{"running",true},{"availability",desired}};
+        Assert(DesktopRuntime.ComputeState(state).Contains("\u5c1a\u672a\u786e\u8ba4"),"Policy intent masqueraded as a completed release.");
+        var receipt=new Dictionary<string,object>{{"phase","stopping"},{"policy",new Dictionary<string,object>(desired)},{"resources_released",false},{"experiments_stopped",false},{"detail","saving"}};
+        state["compute_control"]=receipt;
+        Assert(DesktopRuntime.ComputeState(state).StartsWith("\u6b63\u5728\u4fdd\u5b58"),"Saving state claimed resource release.");
+        receipt["phase"]="released";
+        Assert(DesktopRuntime.ComputeState(state).StartsWith("\u7b49\u5f85\u6267\u884c\u6838\u9a8c"),"Incomplete release flags were accepted.");
+        receipt["resources_released"]=true;receipt["experiments_stopped"]=true;
+        Assert(DesktopRuntime.ComputeState(state).StartsWith("\u8bad\u7ec3\u8d44\u6e90\u5df2\u91ca\u653e"),"Verified training release was not shown.");
+        receipt["policy"]=new Dictionary<string,object>(desired){{"extra",true}};
+        ((Dictionary<string,object>)receipt["policy"])["reason"]="old request";
+        Assert(DesktopRuntime.ComputeState(state).Contains("\u5c1a\u672a\u786e\u8ba4"),"An old receipt verified a different request.");
+        receipt["policy"]=new Dictionary<string,object>(desired);state["running"]=false;
+        Assert(DesktopRuntime.ComputeState(state).StartsWith("\u4e0a\u6b21\u56de\u62a5"),"Stopped controller claimed current execution proof.");
+    }
     static void UnifiedWorkerRelease() {
         var active=new WorkerReleaseFixture();var ready=active.Prepare().GetAwaiter().GetResult();
         Assert(active.Prompts==1&&active.StoppedCallbacks==1,"Active compute did not use one stop confirmation and become dormant.");
@@ -695,7 +712,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();UnifiedWorkerRelease();MemoryRelease();
+            WorkerCompletion();InstallerWiring();ComputeActivation();ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");

@@ -73,6 +73,13 @@ TOOLS = [
     ("exlab_events", "Read durable experiment events after a cursor; useful to verify prior commands and detect changes.", obj({"after": INTEGER, "job_id": TEXT, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}), "read"),
     ("exlab_agent_status", "Inspect AI automation settings, recent plans/actions, provider availability, circuit breaker and active run.", obj(), "read"),
     ("exlab_agent_run", "Inspect a delegated or automatic agent run and its tool observations/actions; poll until completed/failed/interrupted.", obj({"run_id": TEXT}, ("run_id",)), "read"),
+    ("exlab_agent_history", "Read bounded pages of AI reports; full reports are fetched only when opened.", obj(PAGE), "read"),
+    ("exlab_rules", "Inspect a page of deterministic rules (default 5, max 8) and allowed exlab-rules-v1 fields/operators/effects. Follow next_offset for remaining rules. Rules never execute general code.", obj(PAGE), "read"),
+    ("exlab_inspection", "Read a bounded page of rule findings and recent state transitions. Deterministic checks do not consume model calls.", obj(PAGE), "read"),
+    ("exlab_rule_preview", "Validate a declarative rule and preview matching current observations without saving or executing actions.", obj({"document": ANY_OBJECT}, ("document",)), "read"),
+    ("exlab_rule_save", "Create/update a bounded exlab-rules-v1 JSON rule using its revision. Fields: id/name/enabled/target(node|job)/when/for_seconds/cooldown_seconds/severity(info|warning|critical)/effect. Conditions: {all:[...]}, {any:[...]} or {field,op,value}. Read exlab_rules and preview first. AI can maintain only AI-authored rules. No arbitrary code, files, shell or network.",
+     obj({"revision": INTEGER, "document": ANY_OBJECT}, ("revision", "document")), "automation"),
+    ("exlab_rule_delete", "Delete a custom rule by id and revision. AI cannot modify human or built-in rules.", obj({"id": TEXT, "revision": INTEGER}, ("id", "revision")), "automation"),
     ("exlab_control", "Directly control ExLab using a durable request_id (reuse it after an uncertain response). Operations and exact payload schemas: " + json.dumps(OPERATIONS, separators=(",", ":")) + ". Commands are requests; inspect actual worker feedback. Never bypass stopped-process/checkpoint checks.",
      obj({"operation": {"enum": list(OPERATIONS)}, "arguments": ANY_OBJECT, "request_id": TEXT}, ("operation", "arguments", "request_id")), "control"),
     ("exlab_delegate", "Ask the system AI to investigate/plan/act and verify results autonomously. Queues a durable run; use exlab_agent_run to inspect it. Does not require automatic intervention to be enabled, but requires AI provider enabled.",
@@ -81,9 +88,13 @@ TOOLS = [
      obj({"revision": INTEGER, "enabled": {"type": "boolean"}, "instructions": {"type": "string", "maxLength": 8000},
           "min_interval_seconds": {"type": "integer", "minimum": 10, "maximum": 86400},
           "review_seconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+          "rule_interval_seconds": {"type": "integer", "minimum": 5, "maximum": 3600},
+          "allow_rule_authoring": {"type": "boolean"},
+          "max_runs_per_hour": {"type": "integer", "minimum": 1, "maximum": 24},
+          "budget_mode": {"enum": ["rounds", "calls"]},
           "max_turns": {"type": "integer", "minimum": 1, "maximum": 20},
           "max_actions": {"type": "integer", "minimum": 1, "maximum": 50},
-          "max_calls_per_hour": {"type": "integer", "minimum": 1, "maximum": 120},
+          "max_calls_per_hour": {"type": "integer", "minimum": 1, "maximum": 480},
           "operations": {"type": "array", "items": {"enum": list(OPERATIONS)}, "maxItems": len(OPERATIONS)},
           "request_id": TEXT}, ("revision", "request_id")), "automation"),
 ]
@@ -178,7 +189,7 @@ class AgentToolGateway:
                 job["execution_state"]["progress"] = {k: execution.get("progress", {}).get(k) for k in ("step", "epoch", "total_steps") if k in execution.get("progress", {})}
                 job["metrics"] = dict(list((job.get("metrics") or {}).items())[:12])
             nodes = [{key: n.get(key) for key in ("id", "display_name", "mode", "online", "last_seen", "compute_policy", "resource_policy")}
-                | {"snapshot": {key: n["snapshot"].get(key) for key in ("capabilities", "local_time", "ac_power", "local_compute_policy", "availability",
+                | {"snapshot": {key: n["snapshot"].get(key) for key in ("capabilities", "local_time", "ac_power", "local_compute_policy", "availability", "compute_control",
                      "compute_policy_revision", "resource_policy_revision", "resource_policy_error", "policy", "gpus", "delivery", "execution_delivery", "free_ram_mb", "disk_free_mb", "assets", "profiles")}}
                 for n in state["nodes"]]
             result = {"time": state["time"], "center": self.hub.center_info(), "nodes": nodes,
@@ -203,7 +214,7 @@ class AgentToolGateway:
         """Automatic management never relaxes a human's active personal-use policy."""
         from .hub import APIError
         if operation == "availability":
-            from .compute_policy import validate as compute, evaluate
+            from .compute_policy import validate as compute, evaluate, MODES
             current = self.hub._compute_policy(arguments["node_id"])
             old = self._baseline(operation, arguments, current)
             desired = compute(arguments["policy"])
@@ -211,7 +222,7 @@ class AgentToolGateway:
                 # Evaluate personal-use modes with AC present; an unplugged laptop must
                 # not hide the fact that a proposed policy removes a gaming release.
                 before, after = evaluate(old, {"ac_power": True}), evaluate(desired, {"ac_power": True})
-                if ((not before["available"] and (after["available"] or (before["stopping"] and not after["stopping"])))
+                if ((MODES[after["mode"]] < MODES[before["mode"]])
                         or (not before["available"] and (old["until"] is None and desired["until"] is not None
                             or old["until"] is not None and desired["until"] is not None and desired["until"] < old["until"]))
                         or old["require_ac"] and not desired["require_ac"]
@@ -335,6 +346,18 @@ class AgentToolGateway:
                 check()
             if name == "exlab_topology":
                 return self.topology(arguments)
+            if name == "exlab_agent_history":
+                return self.hub.autonomy.history(arguments.get("offset", 0), min(20, arguments.get("limit", 5)))
+            if name == "exlab_rules":
+                return self.hub.autonomy.rules.listing(arguments.get("offset", 0), min(8, arguments.get("limit", 5)))
+            if name == "exlab_inspection":
+                return self.hub.autonomy.rules.report(arguments.get("offset", 0), min(20, arguments.get("limit", 10)))
+            if name == "exlab_rule_preview":
+                return self.hub.autonomy.rules.preview(arguments["document"])
+            if name == "exlab_rule_save":
+                return self.hub.autonomy.rules.save(arguments, actor, automatic)
+            if name == "exlab_rule_delete":
+                return self.hub.autonomy.rules.delete(arguments, actor, automatic)
             if name == "exlab_job":
                 value = self.hub.job(arguments["job_id"])
                 result = {k: value.get(k) for k in ("id", "state", "node_id", "detail", "attempt", "generation", "command_id", "command_ack", "action", "time")}
@@ -379,5 +402,7 @@ class AgentToolGateway:
             if name == "exlab_delegate":
                 return self.hub.autonomy.enqueue(arguments["instructions"], actor["id"], arguments["request_id"])
             if name == "exlab_automation":
+                if automatic:
+                    raise APIError(403, "AI 不能改写自身托管授权和预算")
                 return self.hub.autonomy.settings({k: v for k, v in arguments.items() if k != "request_id"})
         raise ValueError("Unhandled agent tool")

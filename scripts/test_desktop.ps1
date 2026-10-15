@@ -145,7 +145,7 @@ public static class DesktopClientControlsTest {
             var type=assembly.GetType("ExperimentManagerDesktop.ClientForm",true);
             // Never show the form: Shown starts live controller/WSL actions.
             using(var form=(System.Windows.Forms.Form)System.Activator.CreateInstance(type,instanceFlags,null,new object[]{new string[0]},null)) {
-                string stop="\u505c\u7528\u5e76\u91ca\u653e\u8d44\u6e90",old="\u91ca\u653e WSL \u5185\u5b58";
+                string stop="\u505c\u7528\u5e76\u91ca\u653e Docker / WSL",old="\u91ca\u653e WSL \u5185\u5b58";
                 if(Buttons(form,stop)!=1||Buttons(form,old)!=0)throw new Exception("Client must have one combined stop/release button.");
                 var tray=(System.Windows.Forms.NotifyIcon)type.GetField("tray",instanceFlags).GetValue(form);
                 int stops=0,oldEntries=0;

@@ -20,7 +20,11 @@ class HarnessTests(unittest.TestCase):
         (self.source / "main.py").write_text('''import json, pathlib, os, time
 pathlib.Path('a.tmp').write_text(json.dumps({'status':'succeeded','test_metrics':{'score':0.123456789}}))
 os.replace('a.tmp','a.json')
-time.sleep(1)
+deadline = time.monotonic() + 30
+while not pathlib.Path('continue').exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit('timed out waiting for the result publication check')
+    time.sleep(0.025)
 pathlib.Path('b.json').write_text(json.dumps({'status':'succeeded','test_metrics':{'score':0.2}}))
 ''', encoding="utf-8")
         result = []
@@ -29,14 +33,17 @@ pathlib.Path('b.json').write_text(json.dumps({'status':'succeeded','test_metrics
                 {"experiment_id": "a", "path": "a.json"}, {"experiment_id": "b", "path": "b.json"}]})))
         thread.start()
         try:
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 20
             path = self.output / ".exlab/results/attempt-1/a.json"
             while not path.exists() and time.monotonic() < deadline:
                 time.sleep(0.025)
             self.assertTrue(path.exists())
             self.assertTrue(thread.is_alive())
         finally:
-            thread.join(timeout=5)
+            work = self.output / "work-attempt-1"
+            if work.is_dir():
+                (work / "continue").touch()
+            thread.join(timeout=35)
         self.assertEqual(result, [0])
         self.assertTrue((self.output / ".exlab/results/attempt-1/b.json").is_file())
 

@@ -493,7 +493,7 @@ namespace ExperimentManagerDesktop {
             layout.Controls.Add(controls);
             var actions=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
             AddButton(actions,App.Worker?"启用算力":"打开工作空间",()=> { if(App.Worker) StartWorker(); else OpenController(); });
-            AddButton(actions,"停用并释放资源",()=>Stop());
+            AddButton(actions,"停用并释放 Docker / WSL",()=>Stop());
             if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
             if(App.Worker) AddButton(actions,"可用时间 / 游戏释放",()=>OpenComputeSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
@@ -519,7 +519,7 @@ namespace ExperimentManagerDesktop {
             Controls.Add(layout);
             tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
-            menu.Items.Add("停用并释放资源",null,(s,e)=>Stop());
+            menu.Items.Add("停用并释放 Docker / WSL",null,(s,e)=>Stop());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
@@ -729,15 +729,15 @@ namespace ExperimentManagerDesktop {
             using(var form=new Form {Text="本机可用时间与临时释放",Size=new Size(540,390),StartPosition=FormStartPosition.CenterParent}) {
                 var panel=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,Padding=new Padding(18),AutoScroll=true};
                 var mode=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=460};
-                mode.Items.AddRange(new object[]{"允许提供算力","暂停新任务，等待当前实验完成","保存并停止实验，释放训练资源"});
-                mode.SelectedIndex=App.Text(policy,"mode")=="release"?2:App.Text(policy,"mode")=="drain"?1:0;
+                mode.Items.AddRange(new object[]{"允许接单","暂停接单（实验继续运行）","停止实验并暂停接单（保留环境）","停止实验、暂停接单并释放训练资源"});
+                mode.SelectedIndex=App.Text(policy,"mode")=="release"?3:App.Text(policy,"mode")=="stop"?2:App.Text(policy,"mode")=="drain"?1:0;
                 var ac=new CheckBox {Text="仅接通电源时提供算力（离电或供电未知时暂停）",Checked=App.Flag(policy,"require_ac"),AutoSize=true};
                 var timed=new CheckBox {Text="临时策略，到期自动恢复",Checked=true,AutoSize=true};
                 var minutes=new NumericUpDown {Minimum=1,Maximum=525600,Value=120,Width=120};
-                var message=new Label {Text="本地限制优先保留。AI 无法越过本机限制；正在运行的实验需要先保存并确认停止。",MaximumSize=new Size(460,0),AutoSize=true};
+                var message=new Label {Text="暂停接单保留当前实验运行。停止实验保留本机任务和环境；释放还会归还可交接任务并清理已停止的实验容器。完全释放虚拟机内存使用主窗口的“停用并释放 Docker / WSL”。",MaximumSize=new Size(460,0),AutoSize=true};
                 var save=new Button {Text="应用本地策略",AutoSize=true};
                 save.Click+=async(s,e)=>{save.Enabled=false;try {
-                    var options=new List<string>{"--compute-mode",mode.SelectedIndex==2?"release":mode.SelectedIndex==1?"drain":"available",ac.Checked?"--require-ac":"--allow-battery"};
+                    var options=new List<string>{"--compute-mode",mode.SelectedIndex==3?"release":mode.SelectedIndex==2?"stop":mode.SelectedIndex==1?"drain":"available",ac.Checked?"--require-ac":"--allow-battery"};
                     if(timed.Checked&&mode.SelectedIndex!=0){options.Add("--minutes");options.Add(minutes.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));}
                     var result=await WorkerCommand("compute-policy",options.ToArray());
                     message.Text=App.Text(result,"detail",App.Text(result,"error","策略已保存，等待代理执行并回传状态"));
@@ -764,7 +764,7 @@ namespace ExperimentManagerDesktop {
                 DisplayInactive();Show();
             }catch(Exception ex){
                 if(workerStopped) {
-                    settings["release_detail"]="算力已停用；资源释放未完成："+ex.Message+"。可再次点击“停用并释放资源”重试。";
+                    settings["release_detail"]="算力已停用；资源释放未完成："+ex.Message+"。可再次点击“停用并释放 Docker / WSL”重试。";
                     App.Write(App.SettingsFile,settings);DisplayInactive();Show();
                     // Execute's general error display would hide that compute
                     // already stopped and resource release remains retryable.
@@ -815,7 +815,7 @@ namespace ExperimentManagerDesktop {
                 if(!App.Flag(state,"docker_ready"))message+="Docker 未连接，无法核查其容器；可能仍有其他任务。\n";
                 message+="请先保存这些程序中的工作。Center 保持运行，实验文件和连接凭证保留。\n确认关闭并释放 WSL 内存吗？";
                 if(MessageBox.Show(this,message,App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes) {
-                    settings["release_detail"]="算力已停用；已保留其他会话，WSL 内存尚未释放。可再次点击“停用并释放资源”重试。";App.Write(App.SettingsFile,settings);return;
+                    settings["release_detail"]="算力已停用；已保留其他会话，WSL 内存尚未释放。可再次点击“停用并释放 Docker / WSL”重试。";App.Write(App.SettingsFile,settings);return;
                 }
                 closeOtherProcesses=true;
             }
@@ -829,7 +829,7 @@ namespace ExperimentManagerDesktop {
             object agentRaw;var agent=value.TryGetValue("controller_agent",out agentRaw)?agentRaw as Dictionary<string,object>:null;
             if(agent!=null)summary.Text+="\nAI 托管："+(App.Flag(agent,"enabled")&&App.Flag(agent,"provider_enabled")?"已开启 · 主控按需规划与检查":"未开启")+(string.IsNullOrEmpty(App.Text(agent,"active_run"))?"":" · 正在处理");
             object availabilityRaw;var availability=value.TryGetValue("availability",out availabilityRaw)?availabilityRaw as Dictionary<string,object>:null;
-            if(availability!=null)summary.Text+="\n本机可用状态："+App.Text(availability,"reason");
+            if(availability!=null)summary.Text+="\n本机执行状态："+DesktopRuntime.ComputeState(value);
             string backendVersion=App.Text(value,"version");
             if(App.Worker) {
                 summary.Text+="\n客户端版本："+App.Version;

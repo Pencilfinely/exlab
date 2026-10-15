@@ -16,8 +16,18 @@
 
 - 节点类型可选常开、个人主机、便携设备，用于记录使用性质，不会根据名字猜测硬件能力。
 - **允许接单**：仍须满足原有运行时段、资源预算、本地授权和节点接单模式。
-- **停止接单，等待现有实验结束**：不启动新实验，已有实验继续。
-- **保存并停止现有实验**：请求协作式保存和停止；Worker 确认进程退出后，符合条件的任务进入交接。
+三档操作分别记录执行意图和 Worker 的实际核验结果：
+
+| 操作 | 接单 | 现有实验 | 本机任务与环境 |
+|---|---|---|---|
+| 暂停接单（`drain`） | 暂停 | 继续运行、继续占用资源 | 保留 |
+| 停止实验并暂停接单（`stop`） | 暂停 | 请求保存，确认停止 | 保留任务归属及容器环境，等待显式续训 |
+| 停止实验、暂停接单并释放训练资源（`release`） | 暂停 | 请求保存，确认停止 | 归还可交接任务，清理已停止且归属已核实的实验容器，确认训练进程退出 |
+
+“已请求”“正在保存并停止”“正在释放”“已释放”和“执行未完成”分别显示。策略版本确认只代表 Worker 接收了策略。`compute_control` 是独立的执行回执，绑定当时实际生效的本地/Center 策略；切换策略或到期后，旧回执不能证明新操作完成。离线只显示上次回报，不能视为已经释放。
+
+新版 `compute-control-v2` Worker 才能使用独立的停止档位、核验容器清理并回传资源释放结果。旧版 Worker 的释放策略继续兼容，但不能据此显示“已释放”；界面会要求升级。自动托管也必须读取匹配的执行回执，持续的核验失败会进入规则巡检。
+
 - 可填写结束时间；留空表示手动恢复。定时策略到期仍须满足其他限制。
 - 笔记本可设置仅插电时提供算力。供电状态未知时暂停，WSL 从 Windows 宿主机查询电源，原生 Linux 从电源设备查询。
 - 维护时间使用明确的开始/结束时刻。每日风险时段使用 Worker 本地时间，如 `22:00-08:00`；风险是调度估计，不代表已测量的断电概率。
@@ -31,17 +41,19 @@
 | 5070 ROG | 便携设备 | 仅插电提供算力，外出前主动释放 |
 | 5070 Ti | 个人主机 | 平时可用，游戏或关机前临时释放 |
 
-「游戏 · 释放两小时」打开预填的策略表单，核对后保存。它释放本实验台训练进程的 GPU、CPU 和内存占用；完整退出 Docker/WSL 仍使用 Worker 已有的「停用并释放资源」。超过 Worker 已配置的停止宽限时间后会结束自身训练进程，无完整续训能力的任务需要重新提交。
+「游戏 · 释放训练资源」打开预填两小时的策略表单，提交前可以修改时长和限制。它释放本实验台训练进程的 GPU、CPU 和内存占用；控制代理、共享 Docker/WSL、项目文件及检查点保留。完整退出虚拟机并释放 WSL 内存使用 Windows Worker 的「停用并释放 Docker / WSL」，界面会分别报告 Docker、其他会话与 WSL 的关闭情况。定时策略不会关闭共享运行环境。超过 Worker 已配置的停止宽限时间后会结束自身训练进程，无完整续训能力的任务需要重新提交。
 
 本地限制在 Center 暂时离线时仍然生效。Worker 所在的 Python/WSL 环境支持：
 
 ```text
+python -m expman.worker_service compute-policy --compute-mode drain
+python -m expman.worker_service compute-policy --compute-mode stop
 python -m expman.worker_service compute-policy --compute-mode release --minutes 120
 python -m expman.worker_service compute-policy --compute-mode available
 python -m expman.worker_service compute-policy --require-ac
 ```
 
-这些命令只写所选节点配置旁的 `compute-override.json`，不重启代理。解除本地限制后，Center 保存的限制继续生效。
+这些命令写入所选节点配置旁的 `compute-override.json`，由在线代理执行，不重启代理。保存回执不代表停止/释放完成，可用 `python -m expman.worker_service status` 查看 `compute_control`。解除本地限制后，Center 保存的限制继续生效。恢复接单不会自动续训已手动停止的实验。
 
 ## 队列、预计工作量和反馈
 
@@ -87,4 +99,4 @@ AI 只返回节点策略修改和队列优先级建议。后端校验字段、�
 
 ## 自动托管与各端接入
 
-手动 AI 预览之外，现已支持开启自动化介入，由 Center 在后台按状态变化规划、执行和核验，无需逐条点击。Windows 本地可用时间窗口、Linux CLI 和 Monitor 使用相同的执行协议；外部 GPT/Codex 可通过 MCP/HTTP 查询、控制或委托系统 AI。详见 [AI 自动托管与外部 agent 接入](AI-AGENT.zh-CN.md)。
+手动 AI 预览之外，现已支持开启自动化介入，由 Center 在后台按状态变化规划、执行和核验，无需逐条点击。规则默认每 10 秒巡检，AI 默认至少间隔 15 分钟、活跃任务每小时复查，每小时最多 4 轮；两条循环独立，模型预算用完或响应缓慢时规则继续检查。AI 可编写受限 JSON 规则交由本地循环消费，报告使用分页和按需弹窗。Windows 本地可用时间窗口、Linux CLI 和 Monitor 使用相同的执行协议；外部 GPT/Codex 可通过 MCP/HTTP 查询、控制或委托系统 AI。详见 [AI 自动托管与外部 agent 接入](AI-AGENT.zh-CN.md)。

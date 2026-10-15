@@ -166,7 +166,7 @@ def status(service_root=None):
     state = common.read_json(root / 'status.json', {})
     running = _owned_process(state)
     result = {key: state[key] for key in ('status', 'detail', 'pid', 'node_id', 'updated_at',
-               'online', 'jobs', 'shutdown', 'runtime', 'controller_agent', 'availability') if key in state}
+               'online', 'jobs', 'shutdown', 'runtime', 'controller_agent', 'availability', 'compute_control') if key in state}
     result['deactivated'] = settings.get('deactivated', False)
     result.update(running=running, backend=settings.get('backend', 'detached'),
                   node_id=settings.get('node_id'), config=settings.get('config'),
@@ -781,6 +781,7 @@ def _agent_loop(root, agent):
             counts[state] = counts.get(state, 0) + 1
         _write_status(root, status='online' if online else 'offline', online=online,
                       controller_agent=snapshot.get('controller_agent', {}), availability=snapshot.get('availability', {}),
+                      compute_control=snapshot.get('compute_control'),
                       detail=detail, jobs=counts)
         held_owner = common.read_json(root / 'update-hold.json', {})
         if held_owner.get('pid') != os.getpid():
@@ -1048,7 +1049,8 @@ def compute_availability(service_root=None, *, mode=None, minutes=None, require_
         if minutes is not None:
             number(minutes, 'minutes', 525600, minimum=.01)
         policy.update(mode=mode, until=common.now() + minutes * 60 if minutes else None,
-                      reason='本地临时释放' if mode == 'release' else '本地可用策略')
+                      reason={'release': '本地临时释放训练资源', 'stop': '本地停止实验并暂停接单',
+                              'drain': '本地暂停接单，现有实验继续'}.get(mode, '本地可用策略'))
     elif minutes is not None:
         raise ValueError('minutes requires an explicit compute mode')
     if require_ac is not None:
@@ -1056,7 +1058,9 @@ def compute_availability(service_root=None, *, mode=None, minutes=None, require_
     policy = validate(policy)
     if mode is not None or require_ac is not None:
         private_write(target, policy)
-    return {'status': 'succeeded', 'policy': policy, 'detail': '本地限制优先保留；恢复本地可用后仍需满足 Center 的策略。'}
+    current = status(root)
+    return {'status': 'succeeded', 'policy': policy, 'compute_control': current.get('compute_control'),
+            'detail': '策略已保存，等待代理执行并核验；此回执不代表已停止或已释放。本地限制优先保留。'}
 
 
 def main(argv=None):
@@ -1074,7 +1078,7 @@ def main(argv=None):
     parser.add_argument('--no-start', action='store_true')
     parser.add_argument('--lines', type=int, default=80)
     parser.add_argument('--gpu', help='GPU UUID to verify and enable from local settings')
-    parser.add_argument('--compute-mode', choices=('available', 'drain', 'release'))
+    parser.add_argument('--compute-mode', choices=('available', 'drain', 'stop', 'release'))
     parser.add_argument('--minutes', type=float)
     power = parser.add_mutually_exclusive_group()
     power.add_argument('--require-ac', action='store_true')

@@ -5,7 +5,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**桌面端当前版本：0.5.13 · Monitor APK：0.5.13** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.13.md)
+**桌面端当前版本：0.5.14 · Monitor APK：0.5.14** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.14.md)
 
 Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及默认关闭的自动更新。0.5.10 起，Windows Center、Windows Worker 和 Ubuntu Worker 的手动及自动更新均只交接管理进程；Docker 实验继续运行，原任务队列和待回传数据在重启后接续。在原服务目录运行 `bash Update-Worker.sh`，加 `--auto enable` 开启自动更新。[Ubuntu 更新命令](docs/OPERATIONS.zh-CN.md#ubuntu一条命令更新与可选自动更新)。
 
@@ -15,7 +15,7 @@ Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及�
 
 动态算力机制支持节点维护、插电限制、定时释放、队列调控和检查点接手。执行状态用于调度与续训，实验结果保持轻量回传；可选 AI 提供规划建议，也可开启自动化介入。[使用方式与恢复条件](docs/DYNAMIC-COMPUTE.zh-CN.md)。
 
-0.5.13 新增 **AI 自动托管**：双开关启用后，Center 会按状态变化和复查周期自主规划、调用工具并核验反馈。Windows / Linux Worker 与 Monitor 共用控制协议；GPT、Codex 等外部 agent 可通过独立授权的 MCP / HTTP 查询、直接操作或委托系统 AI。[配置与接入说明](docs/AI-AGENT.zh-CN.md)。
+0.5.14 的 **AI 自动托管**使用高频规则巡检和低频 AI 研判，支持受限规则编写；报告按需打开。节点操作区分暂停接单、停止并保留、释放训练资源，以 Worker 执行回执确认完成。Windows / Linux Worker 与 Monitor 共用控制协议；外部 GPT、Codex 等 agent 可通过独立授权的 MCP / HTTP 查询、操作或委托。[配置与接入说明](docs/AI-AGENT.zh-CN.md)。
 
 保留 Center 开启、按需释放算力内存：在 Worker 点击 **停用并释放资源**。本机实验先请求保存并停止，再释放空闲的 Docker 与 WSL；存在其他 Ubuntu 会话时需确认关闭。窗口会显示资源是否已释放；已停用后可再次点击同一按钮重试。其他 WSL 系统仍会保留，点击“启用算力”恢复。退出时是否自动释放资源由单独的选项控制。
 
@@ -90,7 +90,7 @@ Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及�
 
 在 Center 的 **设置 → 移动端** 为手机创建只读或有限操作凭证，复制配对链接到 Monitor。默认长期配对并记住连接，再次打开自动接入；也可通过手机浏览器访问 `/mobile/`。可查看实验、指标、日志和节点资源；有限操作凭证还允许停止 / 取消、支持时恢复实验，以及暂停 / 恢复节点接单。使用时需主控在线，手机与主控网络互通。
 
-旧 APK 可覆盖安装 0.5.13，保留原应用数据；0.5.2 及以上可在应用内检查、下载和校验更新，再调用系统安装器。旧定期凭证可在主控设备列表中点击“设为长期”。
+旧 APK 可覆盖安装 0.5.14，保留原应用数据；0.5.2 及以上可在应用内检查、下载和校验更新，再调用系统安装器。旧定期凭证可在主控设备列表中点击“设为长期”。
 
 Android 与原生 HarmonyOS 6 的轻量客户端源码位于 `mobile/`，主要鸿蒙验收机型为 Mate 70 Pro。Android 测试 APK 已完成编译、Lint 和签名验证，鸿蒙 HAP 尚未生成，两端均未完成真机验收。鸿蒙 6 可先尝试经卓易通安装 APK，兼容性待实测；也可通过手机浏览器使用。详见[移动端使用、构建与验收说明](mobile/README.md)。
 

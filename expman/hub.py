@@ -473,8 +473,9 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 item["online"] = timestamp - item["last_seen"] <= 45
                 item["resource_policy"] = self._node_resource_policy(item["id"])
                 item["compute_policy"] = self._compute_policy(item["id"])
-                if item["compute_policy"]:
-                    apply_compute(item["snapshot"], item["compute_policy"])
+                item["snapshot"]["node_mode"] = item["mode"]
+                if item["compute_policy"] or "compute-control-v2" in item["snapshot"].get("capabilities", []):
+                    apply_compute(item["snapshot"], item["compute_policy"] or {})
                 nodes.append(item)
             projects, project_deletions = [], []
             for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
@@ -1140,8 +1141,8 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                 ".svg": "image/svg+xml", ".png": "image/png"}[static.suffix]
                 self._bytes(static.read_bytes(), content_type)
                 return
-            if self.command == "GET" and path in ("/", "/runtime.js", "/app.js", "/delivery.js", "/compute.js", "/autonomy.js", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
-                filename = {"/": "index.html", "/runtime.js": "runtime.js", "/app.js": "app.js", "/delivery.js": "delivery.js", "/compute.js": "compute.js", "/autonomy.js": "autonomy.js", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
+            if self.command == "GET" and path in ("/", "/runtime.js", "/app.js", "/delivery.js", "/compute.js", "/autonomy.js", "/autonomy.css", "/records.js", "/templates.js", "/projects.js", "/connections.js", "/workspace.css", "/timing.js", "/style.css", "/favicon.ico"):
+                filename = {"/": "index.html", "/runtime.js": "runtime.js", "/app.js": "app.js", "/delivery.js": "delivery.js", "/compute.js": "compute.js", "/autonomy.js": "autonomy.js", "/autonomy.css": "autonomy.css", "/records.js": "records.js", "/templates.js": "templates.js", "/projects.js": "projects.js", '/connections.js': 'connections.js', '/workspace.css': 'workspace.css', "/timing.js": "timing.js", "/style.css": "style.css", "/favicon.ico": "favicon.ico"}[path]
                 static = Path(__file__).parent / "static" / filename
                 if not static.is_file():
                     raise APIError(404, "Web interface files have not been installed")
@@ -1208,7 +1209,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 payload = self._body() if self.command == "POST" else None
                 with hub.update_request():
                     self._send(hub.mobile_request(self.headers.get("Authorization"), self.command, path,
-                                                 payload, identities[0] if identities else None))
+                                                 payload, identities[0] if identities else None, query))
                 return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
             required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download",

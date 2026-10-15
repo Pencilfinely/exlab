@@ -34,9 +34,18 @@ def http_request(hub, header, method, path, payload, query):
                 return {"tools": definitions(actor["scopes"])}
             if path == "/api/agent/status":
                 return gateway.call("exlab_agent_status", {}, actor)
+            if path == "/api/agent/history":
+                return gateway.call("exlab_agent_history", {key: int(query[key][0]) for key in ("offset", "limit") if key in query}, actor)
+            if path == "/api/agent/inspection":
+                return gateway.call("exlab_inspection", {key: int(query[key][0]) for key in ("offset", "limit") if key in query}, actor)
+            if path == "/api/agent/rules":
+                return gateway.call("exlab_rules", {key: int(query[key][0]) for key in ("offset", "limit") if key in query}, actor)
             if path == "/api/agent/run" and len(query.get("id", [])) == 1:
                 return gateway.call("exlab_agent_run", {"run_id": query["id"][0]}, actor)
         if method == "POST":
+            if path in ("/api/agent/rules/preview", "/api/agent/rules/save", "/api/agent/rules/delete"):
+                name = {"preview": "exlab_rule_preview", "save": "exlab_rule_save", "delete": "exlab_rule_delete"}[path.rsplit("/", 1)[-1]]
+                return gateway.call(name, payload, actor)
             if path == "/api/agent/call":
                 validate(payload, obj({"name": TEXT, "arguments": {"type": "object"}}, ("name", "arguments")))
                 return gateway.call(payload["name"], payload["arguments"], actor)
