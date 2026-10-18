@@ -227,11 +227,14 @@ class ComputePolicyHubMixin:
 
     def set_compute_policy(self, payload):
         from .hub import APIError
-        if not isinstance(payload, dict) or set(payload) != {"node_id", "policy"}:
+        if not isinstance(payload, dict) or not {"node_id", "policy"} <= set(payload) or set(payload) - {"node_id", "policy", "expected_node_mode"}:
             raise ValueError("node_id and policy are required")
+        unified = "expected_node_mode" in payload
+        if unified and payload["expected_node_mode"] not in ("run", "drain"):
+            raise ValueError("expected_node_mode must be run or drain")
         desired = validate(payload["policy"])
         with self.transaction():
-            row = self.db.execute("SELECT snapshot FROM nodes WHERE id=?", (payload["node_id"],)).fetchone()
+            row = self.db.execute("SELECT snapshot,mode FROM nodes WHERE id=?", (payload["node_id"],)).fetchone()
             if row is None:
                 raise APIError(404, "Unknown node")
             capabilities = json.loads(row[0]).get("capabilities", [])
@@ -241,14 +244,27 @@ class ComputePolicyHubMixin:
                 raise APIError(409, "请先升级 Worker，当前版本不能区分停止实验与释放资源")
             previous = self._compute_policy(payload["node_id"])
             revision = previous["revision"] if previous else 0
-            if previous and all(desired[k] == previous[k] for k in desired if k != "revision") and desired["revision"] in (revision, revision - 1):
-                return {"policy": previous}
+            same = previous and all(desired[k] == previous[k] for k in desired if k != "revision")
+            replay = same and desired["revision"] == revision - 1
+            if unified and row["mode"] != payload["expected_node_mode"] and not (replay and row["mode"] == "run"):
+                raise APIError(409, "节点暂停状态已变化，请关闭后重新打开")
+
+            def finish(policy):
+                if unified:
+                    # Move the old admission gate into the revisioned policy so
+                    # pause expiry and resume cannot leave a second hidden hold.
+                    self.db.execute("UPDATE nodes SET mode='run' WHERE id=?", (payload["node_id"],))
+                    self.db.execute("DELETE FROM agent_managed_policies WHERE kind='node_mode' AND target=?", (payload["node_id"],))
+                self._assign()
+                return {"policy": policy, **({"node_mode": "run"} if unified else {})}
+
+            if same and desired["revision"] in (revision, revision - 1):
+                return finish(previous)
             if desired["revision"] != revision:
                 raise APIError(409, "可用策略已变化，请重新载入")
             desired["revision"] += 1
             self.db.execute("INSERT OR REPLACE INTO node_compute_policies VALUES (?,?)", (payload["node_id"], json.dumps(desired, allow_nan=False)))
-            self._assign()
-            return {"policy": desired}
+            return finish(desired)
 
     def _scheduling_nodes(self):
         from .scheduler import workload_key, duration_estimate

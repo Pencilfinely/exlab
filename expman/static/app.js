@@ -271,7 +271,7 @@ function render(){if(globalThis.ExLabAutonomousUI)globalThis.ExLabAutonomousUI.r
     box.append(node('p',`节点并发上限 ${snap.policy?.max_running??'—'} · `+(snap.gpus||[]).map(g=>`${g.name}：每卡 ${g.max_jobs??1} 个任务`).join('；'),'muted'));
     const resourceButton=node('button','资源设置','subtle');resourceButton.onclick=()=>openNodeResources(n.id);box.append(resourceButton);
     if(globalThis.ExLabCompute)ExLabCompute.renderNode(box,n,{node,api,refresh,notify});
-    renderNodeTemplates(box,n);const button=node('button',n.mode==='drain'?'恢复接单':'暂停接单','subtle');button.onclick=async()=>{try{await api('/api/node-mode',{node_id:n.id,mode:n.mode==='drain'?'run':'drain'});notify('策略已记录，节点下次连接后生效。暂停接单不会终止正在运行的实验。');await refresh();}catch(e){notify(e.message);}};box.append(button);$('nodes').append(box);}
+    renderNodeTemplates(box,n);$('nodes').append(box);}
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
   updateNodeResourceStatus();renderProjects();renderJobs();renderOverview();
 }

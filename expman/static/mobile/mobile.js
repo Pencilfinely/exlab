@@ -77,12 +77,11 @@
     $('recent').replaceChildren(...active.slice(0,6).map(jobCard));empty($('recent'),'目前没有进行中的实验');renderJobs();
     $('nodes').replaceChildren(...data.nodes.map(worker=>{
       const box=el('article',undefined,'card'),heading=el('div',undefined,'heading');heading.append(el('h3',worker.id),el('span',worker.online?'在线':'离线','badge '+(worker.online?'online':'offline')));box.append(heading);
-      box.append(el('p',`${worker.mode==='drain'?'已暂停接单':'允许接单'} · ${data.jobs.filter(j=>j.node_id===worker.id&&!M.terminal.has(j.state)).length} 个活跃任务`,'muted small'));
+      box.append(el('p',`${globalThis.ExLabCompute?ExLabCompute.nodeState(worker).label:worker.mode==='drain'?'已暂停接单':'允许接单'} · ${data.jobs.filter(j=>j.node_id===worker.id&&!M.terminal.has(j.state)).length} 个活跃任务`,'muted small'));
       if(globalThis.ExLabCompute&&session?.permission==='control')ExLabCompute.renderNode(box,worker,{node:el,api:agentAPI,refresh,notify:notice});
       else if(worker.snapshot.availability)box.append(el('p',worker.snapshot.availability.reason||'','muted small'));
       const available=[['内存',worker.snapshot.free_ram_mb],['磁盘',worker.snapshot.disk_free_mb]].filter(([,n])=>Number.isFinite(n)).map(([label,n])=>`${label}剩余 ${(n/1024).toFixed(1)} GiB`);if(available.length)box.append(el('p',available.join(' · '),'muted small'));
       for(const gpu of worker.snapshot.gpus){const card=el('div',undefined,'gpu');card.append(el('h3',gpu.name||gpu.uuid));const known=Number.isFinite(gpu.free_mb)&&Number.isFinite(gpu.total_mb)&&gpu.total_mb>0;if(known){card.append(el('p',`显存剩余 ${(gpu.free_mb/1024).toFixed(1)} / ${(gpu.total_mb/1024).toFixed(1)} GiB`,'muted small'));const bar=el('progress');bar.max=gpu.total_mb;bar.value=Math.max(0,gpu.total_mb-gpu.free_mb);bar.setAttribute('aria-label','已用显存');card.append(bar);}else card.append(el('p','暂无显存数据','muted small'));box.append(card);}
-      if(session.permission==='control'){const label=worker.mode==='drain'?'恢复接单':'暂停接单';const b=el('button',label);b.dataset.control='true';b.disabled=!usable();b.onclick=()=>confirmAction(label,`节点「${worker.id}」将${label}。`,'node-mode',{node_id:worker.id,mode:worker.mode==='drain'?'run':'drain',expected_mode:worker.mode});box.append(b);}
       return box;
     }));empty($('nodes'),'尚未接入算力节点');
     $('account').replaceChildren();for(const [label,value]of [['管理端',location.origin],['设备名称',session.name],['权限',session.permission==='control'?'监控与有限操作':'只读监控'],['有效期',session.expires===0?'长期有效 · 可在主控撤销':new Date(session.expires*1000).toLocaleString()],['界面版本',data.version||'未知']])$('account').append(el('dt',label),el('dd',value));

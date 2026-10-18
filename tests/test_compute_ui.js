@@ -5,6 +5,7 @@ const vm=require('node:vm');
 class Element{
   constructor(tag,text,cls){this.tagName=tag.toUpperCase();this.textContent=text===undefined?'':String(text);this.className=cls||'';this.children=[];this.dataset={};this.disabled=false;this.checked=false;this._value='';}
   set value(value){this._value=String(value);}get value(){return this._value;}
+  get parentElement(){return this.parent;}
   append(...items){for(const item of items){item.parent=this;this.children.push(item);}}
   replaceChildren(...items){this.children=[];this.append(...items);}
   addEventListener(){}showModal(){this.open=true;}close(){this.open=false;}reportValidity(){return true;}
@@ -24,7 +25,7 @@ async function main(){
   let calls=[],fail=true;
   const ctx={node,$,notify(){},refresh:async()=>{},api:async(path,payload)=>{calls.push([path,plain(payload)]);if(fail){fail=false;throw new Error('lost response');}return {policy:{...payload.policy,revision:8}};}};
   const original={...plain(compute.defaults()),revision:7,kind:'portable',require_ac:true,reliability:.8,maintenance:[{start:2000000000,end:2000001000,reason:'维护'}],risk_windows:[{window:'22:00-08:00',risk:.6}]};
-  compute.policyEditor({id:'rog',compute_policy:original,snapshot:{capabilities:['compute-control-v2']}},ctx,true);
+  compute.policyEditor({id:'rog',mode:'run',compute_policy:original,snapshot:{capabilities:['dynamic-compute-v1','compute-control-v2']}},ctx,true);
   const dialog=body.children.at(-1),form=dialog.children[0];
   await form.onsubmit(event);await form.onsubmit(event);
   assert.equal(calls.length,2);assert.deepEqual(calls[0],calls[1]);
@@ -37,8 +38,11 @@ async function main(){
   const timed=node('div');compute.renderPlanning(timed,{deadline:2000000001.25},node);assert.equal(compute.readPlanning(timed).deadline,2000000001.25);
   console.log('PASS planning preserves explicit zero and disabled migration, with no silent default changes');
   const box=node('div');compute.renderNode(box,{id:'old',snapshot:{capabilities:[]}},ctx);
-  assert.equal(box.all().filter(x=>x.tagName==='BUTTON').length,1);assert.equal(box.all().find(x=>x.tagName==='BUTTON').disabled,true);
-  console.log('PASS unsupported workers cannot invoke new policies or game release');
+  assert.equal(box.all().filter(x=>x.tagName==='BUTTON').length,3);assert.equal(box.all().find(x=>x.textContent==='节点长期设置').disabled,true);
+  calls=[];const legacy=compute.pauseEditor({id:'old',mode:'run',snapshot:{capabilities:[]}},ctx).children[0];
+  assert.equal(legacy.all().filter(x=>x.type==='radio'&&x.disabled).length,2);
+  await legacy.onsubmit(event);assert.equal(calls[0][0],'/api/node-mode');assert.equal(calls[0][1].mode,'drain');
+  console.log('PASS older workers retain simple admission pause with unsupported stop/release disabled');
   const desired={mode:'release',revision:8,source:'center',until:null,reason:'游戏'};
   const worker={id:'70ti',online:true,mode:'run',compute_policy:{revision:8},snapshot:{compute_policy_revision:8,availability:desired}};
   assert.equal(compute.nodeState(worker).label,'等待 Worker 核验');
@@ -51,12 +55,30 @@ async function main(){
   worker.snapshot.availability=desired;worker.online=false;assert.equal(compute.nodeState(worker).label,'离线 · 当前执行状态未知');
   worker.online=true;worker.compute_policy.revision=9;assert.equal(compute.nodeState(worker).label,'策略待 Worker 接收');
   console.log('PASS policy ACK, stale receipt, blocked stop and offline nodes never masquerade as released');
-  compute.policyEditor({id:'70ti',compute_policy:original,snapshot:{capabilities:['compute-control-v2']}},ctx,false);
-  const stopForm=body.children.at(-1).children[0],stopSelect=stopForm.all().find(x=>x.tagName==='SELECT'&&x.children.some(o=>o.value==='stop'));
-  assert.equal(stopSelect.children.length,4);stopSelect.value='stop';stopSelect.onchange();
-  assert.ok(stopForm.all().some(x=>x.textContent.includes('任务和容器环境留在本机')));
+  const modern={id:'70ti',mode:'drain',compute_policy:original,snapshot:{capabilities:['dynamic-compute-v1','compute-control-v2']}};
+  calls=[];const stopForm=compute.pauseEditor(modern,ctx).children[0],stopSelect=stopForm.all().find(x=>x.dataset.pauseMode==='stop');
+  assert.equal(calls.length,0);assert.equal(stopForm.all().filter(x=>x.type==='radio').length,3);stopSelect.onchange();
+  assert.ok(stopForm.all().some(x=>x.textContent.includes('保留本机任务和环境')));
   calls=[];await stopForm.onsubmit(event);assert.equal(calls[0][1].policy.mode,'stop');
-  console.log('PASS stopping experiments has a separate option and retains local work/environment');
+  assert.equal(calls[0][1].policy.until,null);assert.equal(calls[0][1].expected_node_mode,'drain');
+  assert.deepEqual(calls[0][1].policy.maintenance,original.maintenance);
+  assert.equal(stopForm.all().filter(x=>x.type==='number').length,0);
+  calls=[];const resume=compute.pauseEditor(modern,ctx,'available').children[0];await resume.onsubmit(event);
+  assert.equal(calls[0][1].policy.mode,'available');assert.equal(calls[0][1].policy.until,null);assert.equal(calls[0][1].expected_node_mode,'drain');
+  assert.equal(calls[0][1].policy.require_ac,true);
+  calls=[];const customForm=compute.pauseEditor(modern,ctx).children[0],duration=customForm.all().find(x=>x.tagName==='SELECT');
+  duration.value='custom';duration.onchange();await customForm.onsubmit(event);assert.equal(calls.length,0);
+  customForm.all().find(x=>x.type==='datetime-local').value='2035-01-01T10:00';await customForm.onsubmit(event);assert.equal(calls.length,1);
+  const notes=compute.restrictions({...modern,snapshot:{local_compute_policy:{mode:'release',require_ac:true},ac_power:false}});
+  assert.ok(notes.some(x=>x.includes('本机也设置了暂停')));assert.ok(notes.some(x=>x.includes('未接电源')));
+  calls=[];const blockedResume=compute.pauseEditor({...modern,mode:'run',compute_policy:plain(compute.defaults()),
+    snapshot:{...modern.snapshot,local_compute_policy:{mode:'drain'},ac_power:false}},ctx,'available').children[0];
+  assert.ok(blockedResume.all().some(x=>x.tagName==='BUTTON'&&x.disabled&&x.textContent==='请先满足上方条件'));
+  await blockedResume.onsubmit(event);assert.equal(calls.length,0);
+  compute.policyEditor({...modern,compute_policy:{...original,mode:'stop',until:2000000000}},ctx,false);
+  const settingsForm=body.children.at(-1).children[0];calls=[];await settingsForm.onsubmit(event);
+  assert.equal(calls[0][1].policy.mode,'stop');assert.equal(calls[0][1].policy.until,2000000000);
+  console.log('PASS simple pause/resume, manual/custom expiry, restrictions and independent long-term settings');
   calls=[];ctx.api=async(path,payload)=>{calls.push([path,plain(payload)]);return {summary:'先安排稳定节点',warnings:[],node_policies:[{node_id:'rog',previous:original,policy:{...original,revision:7,mode:'release'}}],queue_priorities:[]};};
   compute.mount(ctx);const ai=body.children.find(x=>x.textContent==='AI 规划建议');ai.onclick();
   const assistant=body.children.at(-1).children[0];assistant.all().find(x=>x.tagName==='TEXTAREA').value='今晚运行';

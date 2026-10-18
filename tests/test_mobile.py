@@ -121,6 +121,21 @@ class MobileHTTPTests(unittest.TestCase):
         self.hub.action({'job_id':identity, 'action':'cancel'})
         self.denied(409, '/api/mobile/action', token, {**payload, 'expected_command_id':1})
 
+    def test_unified_pause_uses_mobile_control_permissions_and_clears_legacy_gate(self):
+        self.hub.sync('worker', {'node_id':'worker','reports':[], 'snapshot':{
+            **SNAPSHOT, 'capabilities':['dynamic-compute-v1','compute-control-v2']}})
+        self.hub.set_mode({'node_id':'worker','mode':'drain'})
+        payload={'node_id':'worker','expected_node_mode':'drain','policy':{'mode':'drain'}}
+        self.denied(403, '/api/mobile/compute-policy', self.enroll('monitor')['token'], payload)
+        token=self.enroll('control')['token']
+        saved=self.request('/api/mobile/compute-policy', token, payload)
+        self.assertEqual(saved['node_mode'], 'run')
+        self.assertEqual(saved, self.request('/api/mobile/compute-policy', token, payload))
+        self.denied(409, '/api/mobile/compute-policy', token, {**payload,'policy':{**saved['policy'],'mode':'available'}})
+        self.request('/api/mobile/compute-policy', token, {'node_id':'worker','expected_node_mode':'run',
+            'policy':{**saved['policy'],'mode':'available'}})
+        self.assertTrue(self.request('/api/mobile/state', token)['nodes'][0]['snapshot']['availability']['available'])
+
     def test_cancel_queued_and_resume_supported_jobs(self):
         token = self.enroll('control')['token']
         queued = self.hub.submit({'spec':SPEC,'request_id':'queued'})['ids'][0]

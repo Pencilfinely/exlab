@@ -69,6 +69,35 @@ class DynamicComputeTests(unittest.TestCase):
         self.assertTrue(compute_policy.evaluate(policy, timestamp=2100)["stopping"])
         self.assertTrue(compute_policy.evaluate(policy, timestamp=2200)["available"])
 
+    def test_quick_pause_and_resume_atomically_replace_the_legacy_gate(self):
+        self.hub.set_mode({"node_id": "a", "mode": "drain"})
+        policy = compute_policy.validate({"mode": "drain", "until": common.now() + 120,
+                                          "require_ac": True, "risk_windows": [{"window": "22:00-08:00", "risk": .5}]})
+        payload = {"node_id": "a", "expected_node_mode": "drain", "policy": policy}
+        saved = self.hub.set_compute_policy(payload)
+        self.assertEqual(saved["node_mode"], "run")
+        self.assertEqual(self.hub.set_compute_policy(payload), saved)  # Lost ACK retry.
+        self.assertEqual(self.hub.state()["nodes"][0]["mode"], "run")
+        with self.assertRaises(APIError):
+            self.hub.set_compute_policy({**payload, "policy": {**saved["policy"], "mode": "available"}})
+        self.assertEqual(self.hub._compute_policy("a")["mode"], "drain")
+        restored = self.hub.set_compute_policy({"node_id": "a", "expected_node_mode": "run",
+            "policy": {**saved["policy"], "mode": "available", "until": None}})["policy"]
+        self.assertTrue(restored["require_ac"])
+        self.assertEqual(restored["risk_windows"], policy["risk_windows"])
+        self.assertTrue(compute_policy.evaluate(restored, {"ac_power": True})["available"])
+        self.assertFalse(compute_policy.evaluate(restored, {"ac_power": False})["available"])
+
+    def test_stale_quick_control_does_not_clear_a_new_pause(self):
+        first = self.hub.set_compute_policy({"node_id": "a", "policy": {"mode": "drain"}})["policy"]
+        self.hub.set_mode({"node_id": "a", "mode": "drain"})
+        for value in ({"expected_node_mode": "run", "policy": {**first, "mode": "available"}},
+                      {"expected_node_mode": "drain", "policy": {"mode": "available", "revision": 99}}):
+            with self.assertRaises(APIError):
+                self.hub.set_compute_policy({"node_id": "a", **value})
+        self.assertEqual(self.hub.state()["nodes"][0]["mode"], "drain")
+        self.assertEqual(self.hub._compute_policy("a"), first)
+
     def test_stop_and_hold_requires_updated_worker_and_keeps_resource_release_distinct(self):
         with self.assertRaises(APIError):
             self.hub.set_compute_policy({'node_id': 'a', 'policy': {'mode': 'stop'}})

@@ -495,7 +495,7 @@ namespace ExperimentManagerDesktop {
             AddButton(actions,App.Worker?"启用算力":"打开工作空间",()=> { if(App.Worker) StartWorker(); else OpenController(); });
             AddButton(actions,"停用并释放 Docker / WSL",()=>Stop());
             if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
-            if(App.Worker) AddButton(actions,"可用时间 / 游戏释放",()=>OpenComputeSettings());
+            if(App.Worker) AddButton(actions,"暂停 / 恢复",()=>OpenComputeSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
@@ -726,25 +726,7 @@ namespace ExperimentManagerDesktop {
             var value=await WorkerCommand("compute-policy");
             object raw;var policy=value.TryGetValue("policy",out raw)?raw as Dictionary<string,object>:null;
             if(policy==null)throw new InvalidOperationException(App.Text(value,"error","无法读取本地可用策略"));
-            using(var form=new Form {Text="本机可用时间与临时释放",Size=new Size(540,390),StartPosition=FormStartPosition.CenterParent}) {
-                var panel=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,Padding=new Padding(18),AutoScroll=true};
-                var mode=new ComboBox {DropDownStyle=ComboBoxStyle.DropDownList,Width=460};
-                mode.Items.AddRange(new object[]{"允许接单","暂停接单（实验继续运行）","停止实验并暂停接单（保留环境）","停止实验、暂停接单并释放训练资源"});
-                mode.SelectedIndex=App.Text(policy,"mode")=="release"?3:App.Text(policy,"mode")=="stop"?2:App.Text(policy,"mode")=="drain"?1:0;
-                var ac=new CheckBox {Text="仅接通电源时提供算力（离电或供电未知时暂停）",Checked=App.Flag(policy,"require_ac"),AutoSize=true};
-                var timed=new CheckBox {Text="临时策略，到期自动恢复",Checked=true,AutoSize=true};
-                var minutes=new NumericUpDown {Minimum=1,Maximum=525600,Value=120,Width=120};
-                var message=new Label {Text="暂停接单保留当前实验运行。停止实验保留本机任务和环境；释放还会归还可交接任务并清理已停止的实验容器。完全释放虚拟机内存使用主窗口的“停用并释放 Docker / WSL”。",MaximumSize=new Size(460,0),AutoSize=true};
-                var save=new Button {Text="应用本地策略",AutoSize=true};
-                save.Click+=async(s,e)=>{save.Enabled=false;try {
-                    var options=new List<string>{"--compute-mode",mode.SelectedIndex==3?"release":mode.SelectedIndex==2?"stop":mode.SelectedIndex==1?"drain":"available",ac.Checked?"--require-ac":"--allow-battery"};
-                    if(timed.Checked&&mode.SelectedIndex!=0){options.Add("--minutes");options.Add(minutes.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));}
-                    var result=await WorkerCommand("compute-policy",options.ToArray());
-                    message.Text=App.Text(result,"detail",App.Text(result,"error","策略已保存，等待代理执行并回传状态"));
-                } catch(Exception ex){message.Text=ex.Message;} finally{save.Enabled=true;}};
-                panel.Controls.Add(new Label {Text="本机算力策略",AutoSize=true});panel.Controls.Add(mode);panel.Controls.Add(ac);panel.Controls.Add(timed);
-                panel.Controls.Add(new Label {Text="持续分钟数",AutoSize=true});panel.Controls.Add(minutes);panel.Controls.Add(save);panel.Controls.Add(message);form.Controls.Add(panel);form.ShowDialog(this);
-            }
+            using(var form=new ComputePauseForm(policy,await WorkerCommand("status"),options=>WorkerCommand("compute-policy",options)))form.ShowDialog(this);
             Display(await WorkerCommand("status"));
         });}
         async void Stop(){if(!App.Worker&&deactivated)return;await Execute(async()=>{

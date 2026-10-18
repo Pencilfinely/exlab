@@ -109,6 +109,41 @@ public static class DesktopGpuSettingsTest {
         }
     }
 }
+public static class DesktopComputePauseTest {
+    public static void Verify(System.Type type,string screenshot) {
+        var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Public;
+        var calls=new System.Collections.Generic.List<string[]>();
+        System.Func<string[],System.Threading.Tasks.Task<System.Collections.Generic.Dictionary<string,object>>> command=args=>{
+            calls.Add(args);return System.Threading.Tasks.Task.FromResult(new System.Collections.Generic.Dictionary<string,object>{{"status","succeeded"}});
+        };
+        var policy=new System.Collections.Generic.Dictionary<string,object>{{"mode","available"},{"require_ac",true}};
+        var status=new System.Collections.Generic.Dictionary<string,object>();
+        using(var form=(System.Windows.Forms.Form)System.Activator.CreateInstance(type,flags,null,new object[]{policy,status,command},null)) {
+            form.ShowInTaskbar=false;form.StartPosition=System.Windows.Forms.FormStartPosition.Manual;form.Location=new System.Drawing.Point(-20000,-20000);form.Show();
+            System.Windows.Forms.Application.DoEvents();
+            var choices=(System.Windows.Forms.RadioButton[])type.GetField("modes",flags).GetValue(form);
+            var duration=(System.Windows.Forms.ComboBox)type.GetField("duration",flags).GetValue(form);
+            var until=(System.Windows.Forms.DateTimePicker)type.GetField("until",flags).GetValue(form);
+            var save=type.GetMethod("Save",flags);
+            if(calls.Count!=0||!choices[0].Checked||duration.SelectedIndex!=0)throw new Exception("Pause dialog must default to admission pause and manual recovery without side effects.");
+            ((System.Threading.Tasks.Task)save.Invoke(form,new object[]{false})).GetAwaiter().GetResult();
+            if(string.Join(" ",calls[0])!="--compute-mode drain")throw new Exception("Simple pause changed unrelated power settings.");
+            choices[1].Checked=true;
+            ((System.Threading.Tasks.Task)save.Invoke(form,new object[]{false})).GetAwaiter().GetResult();
+            if(string.Join(" ",calls[1])!="--compute-mode stop")throw new Exception("Stop selection was not kept separate.");
+            choices[2].Checked=true;duration.SelectedIndex=2;
+            ((System.Threading.Tasks.Task)save.Invoke(form,new object[]{false})).GetAwaiter().GetResult();
+            if(string.Join(" ",calls[2])!="--compute-mode release --minutes 120")throw new Exception("Timed release did not preserve its intended duration.");
+            ((System.Threading.Tasks.Task)save.Invoke(form,new object[]{true})).GetAwaiter().GetResult();
+            if(string.Join(" ",calls[3])!="--compute-mode available")throw new Exception("Resume retained a timer or changed the power restriction.");
+            duration.SelectedIndex=4;until.Value=System.DateTime.Now.AddMinutes(-2);
+            ((System.Threading.Tasks.Task)save.Invoke(form,new object[]{false})).GetAwaiter().GetResult();
+            if(calls.Count!=4)throw new Exception("Invalid recovery date reached the worker.");
+            duration.SelectedIndex=0;choices[0].Checked=true;
+            using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)) {form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(screenshot,System.Drawing.Imaging.ImageFormat.Png);}
+        }
+    }
+}
 public static class DesktopClientControlsTest {
     static void Render(System.Windows.Forms.Form source,string path) {
         // Rehost only the layout in a test form. Product Shown handlers start
@@ -228,6 +263,9 @@ try {
         }
         Write-Output "PASS $role controls: combined stop/release, optional automation defaults, persisted preferences, queue survives view closure, rendered controls."
         if ($role -eq 'worker') {
+            [DesktopComputePauseTest]::Verify($assembly.GetType('ExperimentManagerDesktop.ComputePauseForm', $true),
+                (Join-Path $visualRoot 'worker-pause-preview.png'))
+            Write-Output 'PASS worker pause: clear choices, manual/timed recovery, separate resume, preserved power settings, invalid date guard and rendered window.'
             [DesktopGpuSettingsTest]::Verify($assembly.GetType('ExperimentManagerDesktop.WorkerGpuForm', $true),
                 (Join-Path $runtimeRoot 'gpu-settings-preview.png'))
             Write-Output 'PASS worker GPU settings: correct UUID action, refreshed local state, duplicate-action prevention, rendered window.'

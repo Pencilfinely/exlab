@@ -1,0 +1,26 @@
+.compute-dialog{width:min(560px,calc(100vw - 28px));box-sizing:border-box;max-height:calc(100dvh - 28px);overflow:auto;padding:24px;border:1px solid #dbe4dd;border-radius:16px;color:#264335;background:#fff;box-shadow:0 20px 80px #142d3040}
+.compute-dialog::backdrop{background:#152d285c}
+.compute-dialog h2{margin:0 0 12px;font-size:21px;line-height:1.4;overflow-wrap:anywhere}
+.compute-dialog h3{font-size:14px;margin:20px 0 10px}
+.compute-current{padding:10px 12px;background:#f2f5f1;border-radius:8px;font-size:13px;line-height:1.6}
+.compute-choices{display:grid;gap:9px}
+.compute-choice{display:grid;grid-template-columns:18px minmax(0,1fr);align-items:start;gap:12px;padding:13px 14px;border:1px solid #d7e1da;border-radius:10px;margin:0;cursor:pointer;color:#294d39;background:white}
+.compute-choice input{width:17px;height:17px;margin:3px 0 0;accent-color:#397552}
+.compute-choice strong{display:block;font-size:14px;line-height:1.5}
+.compute-choice small{display:block;font-size:12px;color:#60756a;line-height:1.6;margin-top:4px}
+.compute-choice:hover{border-color:#75a68b}
+.compute-choice.is-selected{border-color:#397552;box-shadow:0 0 0 1px #397552;background:#f3f8f2}
+.compute-choice.is-disabled{opacity:.55;cursor:not-allowed}
+.compute-choice:focus-within{outline:3px solid #b5d5c2;outline-offset:2px}
+.compute-dialog label:not(.compute-choice){display:block;margin:12px 0;font-size:13px}
+.compute-dialog label:not(.compute-choice)>input,.compute-dialog label>select{box-sizing:border-box;display:block;width:100%;margin-top:7px;min-height:42px}
+.compute-preview{background:#f1f6ee;border-radius:8px;padding:12px 14px;font-size:13px;line-height:1.7;margin:16px 0 12px}
+.compute-holds{border-left:3px solid #c4a66b;padding:10px 12px;background:#fbf7ed;font-size:12px;line-height:1.7}
+.compute-holds p{margin:5px 0 0}
+.compute-constraint{font-size:12px;color:#8b6c38;line-height:1.6}
+.compute-dialog .muted{font-size:12px;line-height:1.7}
+.compute-dialog-actions{display:flex;flex-wrap:wrap;gap:10px;position:sticky;bottom:-24px;background:white;padding:14px 0 5px;margin:0}
+.compute-dialog-actions button{min-height:42px;white-space:normal;line-height:1.5}
+.compute-node-actions{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 8px}
+.compute-settings{font-size:12px}
+@media(max-width:480px){.compute-dialog{padding:18px}.compute-dialog h2{font-size:19px}.compute-dialog-actions{bottom:-18px}.compute-dialog-actions button:first-child{flex:1}.compute-choice{padding:12px}.compute-dialog[open]{margin:auto}}
