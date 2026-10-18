@@ -4,11 +4,21 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 
 from .common import read_json
+
+
+REGISTRIES = {'expman-worker-registry': 'worker-registry',
+              'expman-harness-registry': 'harness-registry'}
+
+
+def container_details(items):
+    return [{'id': item.get('ID', ''), 'name': item.get('Names', ''),
+             'image': item.get('Image', '')} for item in items]
 
 
 def docker_command(argv, endpoint=None, *, timeout=15):
@@ -158,29 +168,40 @@ def release_runtime(worker_root=None, node_id=None):
         return dict(result, detail='Docker 未连接，无法确认容器状态；运行环境已保留')
     endpoint = result['docker_endpoint']
     try:
-        reply = docker_command(['ps', '--format', '{{json .}}'], endpoint)
+        reply = docker_command(['ps', '--no-trunc', '--format', '{{json .}}'], endpoint)
         if reply.returncode:
             raise ValueError('无法核查 Docker 容器')
         live = [json.loads(line) for line in reply.stdout.splitlines() if line.strip()]
-        others = [item for item in live if item.get('Names') != 'expman-worker-registry']
-        if others:
-            return dict(result, other_containers=len(others),
-                        detail=f'{len(others)} 个其他容器仍在运行，Docker 与 WSL 已保留')
-        if live:
-            reply = docker_command(['inspect', 'expman-worker-registry'], endpoint)
+        stopped = []
+        for item in live:
+            component = REGISTRIES.get(item.get('Names'))
+            if not component:
+                continue
+            identity = item.get('ID', '')
+            if not re.fullmatch(r'[0-9a-f]{64}', identity):
+                raise ValueError('镜像仓库容器身份不完整，无法确认释放')
+            reply = docker_command(['inspect', identity], endpoint)
             if reply.returncode:
                 raise ValueError('无法确认镜像仓库归属')
-            labels = json.loads(reply.stdout)[0].get('Config', {}).get('Labels') or {}
-            if labels.get('expman.component') != 'worker-registry':
-                raise ValueError('同名镜像仓库不属于 ExLab，运行环境已保留')
-            reply = docker_command(['stop', '--time', '10', 'expman-worker-registry'], endpoint, timeout=30)
+            inspected = json.loads(reply.stdout)[0]
+            labels = inspected.get('Config', {}).get('Labels') or {}
+            if (inspected.get('Id') != identity or inspected.get('Name') != '/' + item['Names']
+                    or labels.get('expman.component') != component):
+                continue  # A familiar name alone never authorizes stopping it.
+            reply = docker_command(['stop', '--time', '10', identity], endpoint, timeout=30)
             if reply.returncode:
                 raise ValueError('镜像仓库尚未停止')
-            result['registry_stopped'] = True
-        # Recheck after stopping the auxiliary registry before releasing a VM.
-        reply = docker_command(['ps', '-q'], endpoint)
-        if reply.returncode or reply.stdout.strip():
-            raise ValueError('容器状态发生变化，运行环境已保留')
+            stopped.append(item['Names'])
+        result.update(registry_stopped=bool(stopped), stopped_registries=stopped)
+        # Include containers created during cleanup in the remaining blockers.
+        reply = docker_command(['ps', '--no-trunc', '--format', '{{json .}}'], endpoint)
+        if reply.returncode:
+            raise ValueError('无法复核 Docker 容器状态')
+        others = [json.loads(line) for line in reply.stdout.splitlines() if line.strip()]
+        result.update(other_containers=len(others), other_container_details=container_details(others))
+        if others:
+            names = '、'.join(str(item.get('Names', '未知容器')) for item in others[:20])
+            return dict(result, detail=f'资源释放未完成：仍在运行的容器：{names}。可在客户端确认停止后继续释放 Docker / WSL。')
         result.update(can_stop_docker=True, can_terminate_wsl=not workloads,
                       other_processes=len(workloads),
                       detail='计算环境已空闲' if not workloads else 'Ubuntu 中另有进程；可停止 Docker，WSL 已保留')

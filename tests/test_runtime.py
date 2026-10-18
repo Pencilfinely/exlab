@@ -13,6 +13,14 @@ def reply(data, code=0):
     return subprocess.CompletedProcess([], code, data if isinstance(data, str) else json.dumps(data), '')
 
 
+def container(name='other-project', identity='a' * 64):
+    return {'ID': identity, 'Names': name, 'Image': 'registry:3'}
+
+
+def registry(name='expman-worker-registry', component='worker-registry', identity='a' * 64):
+    return [{'Id': identity, 'Name': '/' + name, 'Config': {'Labels': {'expman.component': component}}}]
+
+
 class RuntimeTests(unittest.TestCase):
     def desktop_stopped(self, response, *, probe=None, setup=None, processes=(), kernel='microsoft-standard-WSL2'):
         with patch.object(runtime.sys, 'platform', 'linux'), \
@@ -86,24 +94,64 @@ class RuntimeTests(unittest.TestCase):
             return runtime.release_runtime(), command
 
     def test_other_containers_prevent_docker_and_wsl_shutdown(self):
-        result, command = self.release([reply({'Names': 'other-project'})])
+        result, command = self.release([reply(container()), reply(container())])
         self.assertFalse(result['can_stop_docker'])
         self.assertFalse(result['can_terminate_wsl'])
-        self.assertEqual(command.call_count, 1)
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual(result['other_container_details'], [{'id': 'a' * 64, 'name': 'other-project', 'image': 'registry:3'}])
+        self.assertIn('other-project', result['detail'])
 
     def test_only_owned_registry_is_stopped_and_volumes_remain(self):
-        result, command = self.release([reply({'Names': 'expman-worker-registry'}),
-            reply([{'Config': {'Labels': {'expman.component': 'worker-registry'}}}]), reply('stopped'), reply('')])
+        result, command = self.release([reply(container('expman-worker-registry')),
+            reply(registry()), reply('stopped'), reply('')])
         self.assertTrue(result['registry_stopped'])
         self.assertTrue(result['can_stop_docker'])
         self.assertTrue(result['can_terminate_wsl'])
-        self.assertEqual(command.call_args_list[2].args[0], ['stop', '--time', '10', 'expman-worker-registry'])
+        self.assertEqual(command.call_args_list[2].args[0], ['stop', '--time', '10', 'a' * 64])
         self.assertFalse(any(call.args[0][0] in ('rm', 'rmi', 'system', 'volume') for call in command.call_args_list))
 
     def test_registry_name_alone_is_not_shutdown_authority(self):
-        result, command = self.release([reply({'Names': 'expman-worker-registry'}), reply([{'Config': {'Labels': {}}}])])
+        live = container('expman-worker-registry')
+        result, command = self.release([reply(live), reply(registry(component='unrelated')), reply(live)])
         self.assertFalse(result['can_stop_docker'])
-        self.assertEqual(command.call_count, 2)
+        self.assertEqual(command.call_count, 3)
+        self.assertFalse(any(call.args[0][0] == 'stop' for call in command.call_args_list))
+
+    def test_harness_registry_does_not_block_resource_release(self):
+        result, command = self.release([reply(container('expman-harness-registry')),
+            reply(registry('expman-harness-registry', 'harness-registry')), reply('stopped'), reply('')])
+        self.assertTrue(result['can_stop_docker'])
+        self.assertTrue(result['can_terminate_wsl'])
+        self.assertEqual(result['stopped_registries'], ['expman-harness-registry'])
+        self.assertEqual(command.call_args_list[2].args[0][-1], 'a' * 64)
+
+    def test_both_registries_stop_without_removing_images_or_volumes(self):
+        live = '\n'.join(json.dumps(container(name, identity)) for name, identity in
+            (('expman-worker-registry', 'a' * 64), ('expman-harness-registry', 'b' * 64)))
+        result, command = self.release([reply(live), reply(registry()), reply('stopped'),
+            reply(registry('expman-harness-registry', 'harness-registry', 'b' * 64)), reply('stopped'), reply('')])
+        self.assertTrue(result['can_stop_docker'])
+        self.assertEqual(len(result['stopped_registries']), 2)
+        self.assertEqual([call.args[0][0] for call in command.call_args_list], ['ps', 'inspect', 'stop', 'inspect', 'stop', 'ps'])
+
+    def test_registry_cleanup_still_reports_external_and_new_containers(self):
+        live = json.dumps(container('expman-harness-registry')) + '\n' + json.dumps(container('database', 'b' * 64))
+        remaining = json.dumps(container('database', 'b' * 64)) + '\n' + json.dumps(container('new-task', 'c' * 64))
+        result, command = self.release([reply(live), reply(registry('expman-harness-registry', 'harness-registry')),
+            reply('stopped'), reply(remaining)])
+        self.assertFalse(result['can_stop_docker'])
+        self.assertEqual(result['other_containers'], 2)
+        self.assertIn('database', result['detail'])
+        self.assertIn('new-task', result['detail'])
+        self.assertEqual([call.args[0][-1] for call in command.call_args_list if call.args[0][0] == 'stop'], ['a' * 64])
+
+    def test_registry_id_or_name_change_never_authorizes_stop(self):
+        for inspected in (registry(identity='b' * 64), registry(name='replaced-container')):
+            with self.subTest(inspected=inspected):
+                live = container('expman-worker-registry')
+                result, command = self.release([reply(live), reply(inspected), reply(live)])
+                self.assertFalse(result['can_stop_docker'])
+                self.assertFalse(any(call.args[0][0] == 'stop' for call in command.call_args_list))
 
     def test_user_workloads_preserve_ubuntu(self):
         result, _ = self.release([reply(''), reply('')], processes=[123])

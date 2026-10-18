@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "com.pencilfinely.expmonitor",
     "vendor": "Pencilfinely",
-    "versionCode": 1000005,
-    "versionName": "0.5.16",
+    "versionCode": 1000006,
+    "versionName": "0.5.17",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

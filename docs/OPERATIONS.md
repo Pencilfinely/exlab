@@ -20,7 +20,7 @@ Wait for local experiments, queued work and uploads to finish first. An idle run
 | Exit the worker completely | Worker tray menu → Exit | Requests cooperative experiment stops, waits for execution to stop, then exits the agent and client; algorithms without native resume cannot promise recovery |
 | Stop accepting new experiments | Controller → Compute → Pause accepting work | Current experiments continue; new assignments/starts pause |
 | Stop the controller | Experiment Center stop control | Controller operations become unavailable; already running worker Docker experiments continue |
-| Deactivate compute and release memory | Worker window or tray → 停用并释放资源 | Requests local experiments to save and stop, then releases idle Docker and WSL; Center stays running; algorithms without native resume may not recover |
+| Deactivate compute and release memory | Worker window or tray → 停用并释放 Docker / WSL | Saves and stops local experiments, stops both verified ExLab registries, then closes Docker and WSL. Other containers are listed for explicit confirmation; only approved IDs can be stopped. Incomplete release is shown explicitly. Center, container data and images remain; algorithms without native resume may not recover |
 | End an experiment | Experiment detail controls | Uses that project's supported stop/cancel behavior |
 
 Before shutdown or upgrade, finish tasks and pending uploads. Stopping the agent does not mean all training containers have ended.

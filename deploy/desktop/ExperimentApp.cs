@@ -733,10 +733,11 @@ namespace ExperimentManagerDesktop {
             timer.Stop();bool workerStopped=false;try {
                 if(App.Worker) {
                     var state=await DesktopRuntime.PrepareWorkerRelease(SelectedDistribution,action=>WorkerCommand(action),
-                        ()=>MessageBox.Show(this,"停用将请求本机实验保存并停止，然后释放空闲的 Docker 与 WSL 内存。\n未配置续训的算法会记为中断。Center 保持运行。继续吗？",
+                        ()=>MessageBox.Show(this,"停用将请求本机实验保存并停止，关闭 ExLab 自带镜像仓库，再释放 Docker 与 WSL 内存。\n如有其他容器或会话，会列出并询问是否一起关闭。未配置续训的算法会记为中断。Center 保持运行。继续吗？",
                             App.Title,MessageBoxButtons.OKCancel,MessageBoxIcon.Question)==DialogResult.OK,
                         Display,()=>{
                             workerStopped=true;deactivated=true;settings["deactivated"]=true;
+                            settings["resources_released"]=false;
                             settings["release_detail"]="算力已停用；正在检查 Docker 与 WSL 的释放状态。";
                             ReleaseWorkerHold();App.Write(App.SettingsFile,settings);
                         });
@@ -762,7 +763,7 @@ namespace ExperimentManagerDesktop {
             if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
         }
         async void OpenController(){await Execute(async()=>{deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
-        void DisplayInactive(){summary.Text="已停用 · 点击“"+(App.Worker?"启用算力":"打开工作空间")+"”恢复\n"+App.Text(settings,"release_detail","实验记录与连接身份已保留。");}
+        void DisplayInactive(){summary.Text=(App.Worker?(App.Flag(settings,"resources_released")?"已停用 · 资源已释放":"已停用 · 资源释放未完成"):"已停用")+" · 点击“"+(App.Worker?"启用算力":"打开工作空间")+"”恢复\n"+App.Text(settings,"release_detail","实验记录与连接身份已保留。");}
         void ImportClipboard(){
             try {
                 string text=Clipboard.GetText().Trim();if(text.Length==0||text.Length>16384)throw new Exception("请先复制主控提供的连接凭证（小于 16 KiB）。");
@@ -783,26 +784,35 @@ namespace ExperimentManagerDesktop {
         }
         async Task ReleaseWorkerResources(bool explicitRelease=false,Dictionary<string,object> state=null){
             ReleaseWorkerHold();
+            settings["resources_released"]=false;
             if(!explicitRelease&&!releaseResources.Checked){settings["release_detail"]="算力已停用；退出时自动释放选项未开启，Docker 与 WSL 保留。";App.Write(App.SettingsFile,settings);return;}
             if(state==null)state=await WorkerCommand("runtime-release");
             bool closeOtherProcesses=explicitRelease&&App.Flag(state,"can_terminate_wsl");
-            bool confirm=explicitRelease&&DesktopRuntime.NeedsOtherProcessConfirmation(state);
+            var containers=DesktopRuntime.OtherContainers(state);
+            bool confirmContainers=explicitRelease&&DesktopRuntime.ContainerIds(state).Count>0;
+            bool confirm=explicitRelease&&(DesktopRuntime.NeedsOtherProcessConfirmation(state)||confirmContainers);
             if(confirm) {
                 var names=new List<string>();object details;
                 if(state.TryGetValue("other_process_details",out details)&&details is IList)foreach(object item in (IList)details) {
                     var process=item as Dictionary<string,object>;if(process!=null)names.Add(App.Text(process,"name")+"（PID "+App.Text(process,"pid")+"）");
                 }
-                string message="算力已停用。关闭 "+SelectedDistribution+" 将结束其中的其他会话和程序。\n";
+                string message="算力已停用，资源尚未全部释放。\n";
+                if(confirmContainers) {
+                    message+="以下容器仍在运行，继续会停止它们：\n";
+                    foreach(var container in containers)message+="• "+App.Text(container,"name")+"（"+App.Text(container,"image")+"，"+App.Text(container,"id").Substring(0,12)+"）\n";
+                }
+                message+="关闭 "+SelectedDistribution+" 将结束其中的其他会话和程序。\n";
                 if(names.Count>0)message+="检测到："+String.Join("、",names)+"\n";
                 if(!App.Flag(state,"docker_ready"))message+="Docker 未连接，无法核查其容器；可能仍有其他任务。\n";
-                message+="请先保存这些程序中的工作。Center 保持运行，实验文件和连接凭证保留。\n确认关闭并释放 WSL 内存吗？";
+                message+="请先保存这些程序中的工作。Center 保持运行，容器、数据卷、实验文件和连接凭证保留。\n确认停止列出的容器、关闭会话并释放 Docker / WSL 内存吗？";
                 if(MessageBox.Show(this,message,App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes) {
-                    settings["release_detail"]="算力已停用；已保留其他会话，WSL 内存尚未释放。可再次点击“停用并释放 Docker / WSL”重试。";App.Write(App.SettingsFile,settings);return;
+                    settings["release_detail"]="资源释放未完成：已保留列出的容器或会话。可再次点击“停用并释放 Docker / WSL”确认关闭。";App.Write(App.SettingsFile,settings);return;
                 }
                 closeOtherProcesses=true;
             }
             summary.Text="正在释放 WSL 内存…";
-            settings["release_detail"]=await DesktopRuntime.Release(SelectedDistribution,state,closeOtherProcesses);App.Write(App.SettingsFile,settings);
+            settings["release_detail"]=await DesktopRuntime.Release(SelectedDistribution,state,closeOtherProcesses,confirmContainers?DesktopRuntime.ContainerIds(state):null);
+            settings["resources_released"]=App.Flag(state,"resources_released");App.Write(App.SettingsFile,settings);
         }
         void Display(Dictionary<string,object> value) {
             string state=App.Text(value,"status");

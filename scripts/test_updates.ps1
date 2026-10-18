@@ -538,7 +538,8 @@ static class InstallProbeTests {
     sealed class MemoryFixture {
         internal readonly List<string> Calls=new List<string>();
         internal string Inventory="Ubuntu\r\ndocker-desktop\r\n",After="",Identity="owned-daemon",Containers="",DesktopStatus="stopped";
-        internal bool FailStop,FailInfo;int inventories;
+        internal string RegistryName="",RegistryComponent="",InspectedId=null;
+        internal bool FailStop,FailInfo,ContainerKeepsRunning;int inventories;
         internal Task<string> Run(int timeout,string executable,string[] argv) {
             string file=Path.GetFileName(executable);Calls.Add(file+" "+String.Join(" ",argv));
             if(file=="wsl.exe") {
@@ -546,7 +547,20 @@ static class InstallProbeTests {
                 if(argv[0]=="--shutdown"||argv[0]=="--terminate")return Task.FromResult("");
             } else {
                 if(argv[0]=="--context"&&argv[2]=="info") {if(FailInfo)throw new IOException("daemon unavailable");return Task.FromResult(Identity);}
-                if(argv[0]=="--context"&&argv[2]=="ps")return Task.FromResult(Containers);
+                if(argv[0]=="--context"&&argv[2]=="ps") {
+                    if(argv[3]=="-q")return Task.FromResult(Containers);
+                    var rows=new List<string>();
+                    foreach(string id in Containers.Split(new[]{'\r','\n',' '},StringSplitOptions.RemoveEmptyEntries))
+                        rows.Add(App.Json.Serialize(new Dictionary<string,object>{{"ID",id},{"Names",RegistryName.Length>0?RegistryName:"other-project"},{"Image","registry:3"}}));
+                    return Task.FromResult(String.Join("\n",rows));
+                }
+                if(argv[0]=="--context"&&argv[2]=="inspect")return Task.FromResult(App.Json.Serialize(new object[]{
+                    new Dictionary<string,object>{{"Id",InspectedId??argv[3]},{"Name","/"+RegistryName},{"Config",new Dictionary<string,object>{
+                        {"Labels",new Dictionary<string,object>{{"expman.component",RegistryComponent}}}}}}}));
+                if(argv[0]=="--context"&&argv[2]=="stop") {
+                    if(!ContainerKeepsRunning)Containers=Containers.Replace(argv[argv.Length-1],"").Trim();
+                    return Task.FromResult(argv[argv.Length-1]);
+                }
                 if(argv[0]=="desktop"&&argv[1]=="status")return Task.FromResult("{\"Status\":\""+DesktopStatus+"\"}");
                 if(argv[0]=="desktop"&&argv[1]=="stop") {if(FailStop)throw new IOException("unsupported stop CLI");return Task.FromResult("");}
             }
@@ -566,6 +580,7 @@ static class InstallProbeTests {
         internal readonly List<string> Commands=new List<string>();
         internal readonly Queue<Dictionary<string,object>> Statuses=new Queue<Dictionary<string,object>>();
         internal bool Consent=true,FailInspection,MissingInspection;
+        internal Dictionary<string,object> Inspection;
         internal int Prompts,StoppedCallbacks;
         internal Func<Task> Delay=()=>Task.FromResult(true);
         internal WorkerReleaseFixture() {
@@ -580,7 +595,7 @@ static class InstallProbeTests {
             if(action=="runtime-release") {
                 Assert(StoppedCallbacks==1&&Statuses.Count==0,"Resource inspection preceded confirmed worker shutdown and dormancy.");
                 if(FailInspection)throw new IOException("inspection unavailable");
-                return Task.FromResult(MissingInspection?null:IdleRuntime(true));
+                return Task.FromResult(MissingInspection?null:Inspection??IdleRuntime(true));
             }
             throw new Exception("Unified worker stop invoked an unrelated command: "+action);
         }
@@ -667,7 +682,7 @@ static class InstallProbeTests {
         var inactiveState=DesktopRuntime.InspectStoppedDistribution(inactive.Run).GetAwaiter().GetResult();
         Assert(App.Flag(inactiveState,"can_stop_docker")&&App.Flag(inactiveState,"agents_stopped"),"Stopped Ubuntu could not release a verified idle Windows Docker.");
         Assert(inactive.Calls.Count==2&&!inactive.Calls.Exists(call=>call.StartsWith("wsl.exe ")),"Inspecting a stopped Ubuntu woke WSL.");
-        var inactiveBusy=new MemoryFixture{Containers="another-live-container"};
+        var inactiveBusy=new MemoryFixture{Containers=new string('a',64)};
         var busyState=DesktopRuntime.InspectStoppedDistribution(inactiveBusy.Run).GetAwaiter().GetResult();
         Assert(App.Flag(busyState,"docker_ready")&&!App.Flag(busyState,"can_stop_docker"),"Stopped Ubuntu inspection ignored another live container.");
         var inactiveOffline=new MemoryFixture{FailInfo=true};
@@ -710,9 +725,54 @@ static class InstallProbeTests {
         foreach(var fixture in new[]{automatic,full,other,unknown,alreadyOff,noConsent,live,agent,unreadable,oldDocker,restarted})
             Assert(!fixture.Calls.Exists(call=>call.Contains("--exec")||call.Contains("--unregister")||call.Contains(" desktop start")||call.Contains(" wsl.exe -d")),"Memory release launched WSL/Docker or removed a distribution.");
     }
+    static void RegistryAndContainerRelease() {
+        string id=new string('a',64),other=new string('b',64);
+        var legacy=new WorkerReleaseFixture{Inspection=IdleRuntime()};legacy.Inspection["can_stop_docker"]=false;
+        legacy.Native.Containers=id;legacy.Native.RegistryName="expman-harness-registry";legacy.Native.RegistryComponent="harness-registry";
+        var legacyState=legacy.Prepare().GetAwaiter().GetResult();
+        Assert(App.Flag(legacyState,"can_stop_docker")&&legacy.Native.Called("stop --time 10 "+id),"Old WSL backend's registry blocker could not be repaired by the Windows release path.");
+        var unidentified=new WorkerReleaseFixture{Inspection=IdleRuntime()};unidentified.Inspection["can_stop_docker"]=false;unidentified.Inspection.Remove("docker_id");
+        bool refused=false;try{unidentified.Prepare().GetAwaiter().GetResult();}catch(InvalidDataException){refused=true;}
+        Assert(refused&&unidentified.Native.Calls.Count==1,"Missing WSL Docker identity authorized native container cleanup.");
+        foreach(string name in new[]{"expman-worker-registry","expman-harness-registry"}) {
+            var owned=new MemoryFixture{Containers=id,RegistryName=name,RegistryComponent=name=="expman-worker-registry"?"worker-registry":"harness-registry"};
+            var state=DesktopRuntime.InspectStoppedDistribution(owned.Run).GetAwaiter().GetResult();
+            Assert(App.Flag(state,"can_stop_docker")&&owned.Called("stop --time 10 "+id),"ExLab's own registry blocked release or was stopped without its immutable ID.");
+            string detail=owned.Release(state,true);
+            Assert(App.Flag(state,"resources_released")&&owned.Called("wsl.exe --shutdown"),"Owned registry cleanup did not proceed to verified Docker/WSL shutdown.");
+            Assert(owned.Called("desktop status --format json"),"Docker stop was not verified.");
+        }
+        foreach(bool replaced in new[]{false,true}) {
+            var impostor=new MemoryFixture{Containers=id,RegistryName="expman-harness-registry",RegistryComponent=replaced?"harness-registry":"unrelated",InspectedId=replaced?other:null};
+            var state=DesktopRuntime.InspectStoppedDistribution(impostor.Run).GetAwaiter().GetResult();
+            Assert(!App.Flag(state,"can_stop_docker")&&!impostor.Calls.Exists(call=>call.Contains(" stop --time ")),"Registry name, wrong labels or changed identity authorized a stop.");
+            Assert(App.Text(state,"detail").Contains("expman-harness-registry"),"Remaining blocker omitted its container name.");
+        }
+        var busy=new MemoryFixture{Containers=id};var busyState=DesktopRuntime.InspectStoppedDistribution(busy.Run).GetAwaiter().GetResult();
+        Assert(DesktopRuntime.ContainerIds(busyState).Count==1,"Named external container had no explicit stop choice.");
+        busy.Calls.Clear();busy.Release(busyState,false);
+        Assert(busy.Calls.Count==0&&!App.Flag(busyState,"resources_released"),"Automatic exit stopped an unrelated container or claimed release.");
+        DesktopRuntime.Release("Ubuntu",busyState,true,busy.Run,new[]{id}).GetAwaiter().GetResult();
+        Assert(busy.Called("stop --time 20 "+id)&&busy.Called("desktop stop")&&busy.Called("wsl.exe --shutdown")&&App.Flag(busyState,"resources_released"),"Explicitly approved container did not stop and release Docker/WSL.");
+        foreach(bool identityChanged in new[]{false,true}) {
+            var race=new MemoryFixture{Containers=id};var state=DesktopRuntime.InspectStoppedDistribution(race.Run).GetAwaiter().GetResult();race.Calls.Clear();
+            if(identityChanged)race.Identity="new-daemon";else race.Containers=id+"\n"+other;
+            DesktopRuntime.Release("Ubuntu",state,true,race.Run,new[]{id}).GetAwaiter().GetResult();
+            Assert(!race.Calls.Exists(call=>call.Contains(" stop --time ")||call.Contains("desktop stop")||call.StartsWith("wsl.exe ")),"Stale approval stopped a changed daemon or a newly created container.");
+        }
+        var unauthorized=new MemoryFixture{Containers=id};var unauthorizedState=DesktopRuntime.InspectStoppedDistribution(unauthorized.Run).GetAwaiter().GetResult();unauthorized.Calls.Clear();
+        DesktopRuntime.Release("Ubuntu",unauthorizedState,true,unauthorized.Run,new[]{other}).GetAwaiter().GetResult();
+        Assert(unauthorized.Calls.Count==0,"An ID never shown in confirmation was allowed to stop.");
+        var lingering=new MemoryFixture{Containers=id,ContainerKeepsRunning=true};var lingeringState=DesktopRuntime.InspectStoppedDistribution(lingering.Run).GetAwaiter().GetResult();lingering.Calls.Clear();
+        DesktopRuntime.Release("Ubuntu",lingeringState,true,lingering.Run,new[]{id}).GetAwaiter().GetResult();
+        Assert(!App.Flag(lingeringState,"resources_released")&&!lingering.Called("desktop stop"),"Unverified container stop claimed release or shut down Docker.");
+        var stillRunning=new MemoryFixture{DesktopStatus="running",After="docker-desktop\n"};var idle=IdleRuntime();
+        stillRunning.Release(idle,true);
+        Assert(!App.Flag(idle,"resources_released")&&!stillRunning.Called("wsl.exe --shutdown"),"Docker CLI success alone claimed all memory freed.");
+    }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();
+            WorkerCompletion();InstallerWiring();ComputeActivation();ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
