@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -26,6 +27,7 @@ from .worker_upgrade import _candidate, discover_configs
 
 REPOSITORY = 'https://github.com/Pencilfinely/exlab'
 RELEASES_API = 'https://api.github.com/repos/Pencilfinely/exlab/releases?per_page=100'
+LATEST_CHECKSUMS = REPOSITORY + '/releases/latest/download/SHA256SUMS.txt'
 ROLE = 'ubuntu-worker-x64'
 CHECK_INTERVAL = 3600
 MAX_PACKAGE_BYTES = 512 * 1024 * 1024
@@ -142,8 +144,55 @@ def _read(url, limit):
     return data.decode('utf-8-sig')
 
 
+def _check_stable_download(current):
+    """Use GitHub's official latest-asset link when its REST API is limited."""
+    if not version_key(current)[1]:
+        raise RuntimeError('GitHub API 限流，暂时无法核查预览版本；保留原更新渠道，请稍后重试')
+    checksums = _read(LATEST_CHECKSUMS, 256 * 1024)
+    packages = []
+    for line in checksums.lstrip('\ufeff').splitlines():
+        match = re.fullmatch(r'([0-9a-fA-F]{64}) [ *]((?:ExLab|ExperimentManager)-(.+)-' + ROLE + r'\.zip)', line)
+        if not match:
+            continue
+        key = version_key(match[3])
+        if not key[1]:
+            raise ValueError('最新正式版校验文件包含预览版本安装包')
+        packages.append((match[2], match[3]))
+    if len(packages) != 1:
+        raise ValueError('最新正式版必须包含唯一的 Ubuntu 安装包校验值')
+    name, version = packages[0]
+    if version_key(version) <= version_key(current):
+        return None
+    tag = 'v' + version
+    checksum_url = _release_url(tag, 'SHA256SUMS.txt')
+    # Re-read the versioned file: a moving latest alias must not mix releases.
+    digest = parse_checksum(_read(checksum_url, 256 * 1024), name)
+    if digest != parse_checksum(checksums, name):
+        raise ValueError('最新正式版与指定版本的 SHA256 清单不一致，请稍后重试')
+    url = _release_url(tag, name)
+    # Only inspect the headers here. The normal download still verifies all bytes.
+    with _open(url) as response:
+        declared = response.headers.get('Content-Length', '')
+        if not declared.isdecimal() or not 0 < int(declared) <= MAX_PACKAGE_BYTES:
+            raise ValueError('Ubuntu 安装包缺少有效的下载大小')
+        size = int(declared)
+    return dict(version=version, tag=tag, name=name, size=size, url=url,
+                checksum_url=checksum_url, sha256=digest, source='github-release-download')
+
+
 def check(current):
-    release = select_release(json.loads(_read(RELEASES_API, 8 * 1024 * 1024)), current)
+    try:
+        releases = _read(RELEASES_API, 8 * 1024 * 1024)
+    except urllib.error.HTTPError as error:
+        # Do not reinterpret unrelated permission failures as API rate limiting.
+        with error:
+            limited = error.code == 429 or (error.code == 403 and
+                ((error.headers or {}).get('X-RateLimit-Remaining') == '0' or
+                 b'rate limit' in error.read(4096).lower()))
+        if not limited:
+            raise
+        return _check_stable_download(current)
+    release = select_release(json.loads(releases), current)
     if release:
         release['sha256'] = parse_checksum(_read(release['checksum_url'], 256 * 1024), release['name'])
     return release

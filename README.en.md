@@ -7,7 +7,7 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.15. Monitor APK: 0.5.15.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.15 release notes](docs/RELEASE-0.5.15.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
+**Desktop version: 0.5.16. Monitor APK: 0.5.16.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.16 release notes](docs/RELEASE-0.5.16.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
 
 The algorithm library now supports search, deployment filters, bounded pagination and import timestamps. A five-step import opens node deployment when complete. Project dialogs provide experiment forms, allocation previews and matrix conversion, retaining inputs within the current page when switching presets or closing and reopening.
 
@@ -15,7 +15,7 @@ Experiment and matrix lists now have bounded scrolling, pagination, creation and
 
 Dynamic compute supports node maintenance, AC-only admission, timed resource release, queue controls and checkpoint handoffs. Mutable execution state supports scheduling and recovery while final results retain the lightweight protocol. Optional AI can propose reviewed policy changes or intervene automatically when enabled. See the [dynamic compute guide (Chinese)](docs/DYNAMIC-COMPUTE.zh-CN.md).
 
-Version 0.5.15 simplifies node pause into two choices: what to stop and when to accept work again. Resume clears the old admission gate together with the manual policy; local, AC and maintenance restrictions remain visible. Long-term settings are separate. Windows Worker and Monitor use the same choices.
+Version 0.5.16 simplifies node pause into two choices: what to stop and when to accept work again. Resume clears the old admission gate together with the manual policy; local, AC and maintenance restrictions remain visible. Long-term settings are separate. Windows Worker and Monitor use the same choices.
 
 AI management combines frequent deterministic inspections with infrequent AI reviews and bounded declarative rule authoring. Reports open on demand. Node operations are verified through worker receipts; external GPT/Codex agents can inspect, operate or delegate through scoped MCP/HTTP tools. See the [AI agent guide (Chinese)](docs/AI-AGENT.zh-CN.md).
 

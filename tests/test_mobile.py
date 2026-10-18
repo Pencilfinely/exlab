@@ -180,6 +180,14 @@ class MobileHTTPTests(unittest.TestCase):
                 self.assertEqual(response.headers['Cache-Control'], 'no-store')
         self.denied(404, '/mobile/../../hub.json')
 
+    def test_shared_compute_assets_are_served_for_both_center_and_monitor(self):
+        files = application_files()
+        for filename, content_type in (('compute.css', 'text/css'), ('compute.js', 'text/javascript')):
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(self.url + '/' + filename) as response:
+                self.assertEqual(response.read(), files['expman/static/' + filename])
+                self.assertEqual(response.headers.get_content_type(), content_type)
+                self.assertEqual(response.headers['Cache-Control'], 'no-store')
+
     def test_long_term_pairing_survives_restart_and_time_until_revoked(self):
         device = self.enroll()
         self.assertEqual(device['expires'], 0)

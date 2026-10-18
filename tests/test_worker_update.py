@@ -8,6 +8,7 @@ import stat
 import subprocess
 import unittest
 from unittest.mock import patch
+import urllib.error
 import zipfile
 
 from expman import common, worker_update as update, worker_service as service
@@ -92,6 +93,76 @@ class UbuntuReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 update._allow_download_url(url)
         update._allow_download_url('https://release-assets.githubusercontent.com/asset?signature=fixture')
+
+    def test_api_rate_limit_uses_official_versioned_checksum_and_normal_download_validation(self):
+        archive, expected = self.package()
+        checksums = expected['sha256'] + '  ' + expected['name'] + '\n'
+        seen = []
+        def read(url, limit):
+            seen.append(url)
+            if url == update.RELEASES_API:
+                raise urllib.error.HTTPError(url, 403, 'Forbidden', {'X-RateLimit-Remaining': '0'}, io.BytesIO())
+            self.assertIn(url, (update.LATEST_CHECKSUMS, expected['checksum_url']))
+            return checksums
+        with patch.object(update, '_read', side_effect=read), \
+                patch.object(update, '_open', side_effect=lambda url: Response(archive.read_bytes(), expected['size'])):
+            release = update.check('0.5.8')
+            self.assertEqual(release, {**expected, 'source': 'github-release-download'})
+            downloaded = update.download(release, self.folder / 'downloads')
+            self.assertEqual(downloaded.read_bytes(), archive.read_bytes())
+        self.assertEqual(seen, [update.RELEASES_API, update.LATEST_CHECKSUMS, expected['checksum_url']])
+
+    def test_only_api_rate_limiting_enables_fallback(self):
+        for code, message, limited in ((429, b'', True), (403, b'API rate limit exceeded', True),
+                                       (403, b'Access denied', False), (404, b'Not Found', False)):
+            error = urllib.error.HTTPError(update.RELEASES_API, code, 'HTTP failure', {}, io.BytesIO(message))
+            with self.subTest(code=code, message=message), patch.object(update, '_read', side_effect=error), \
+                    patch.object(update, '_check_stable_download', return_value={'verified': True}) as fallback:
+                if limited:
+                    self.assertEqual(update.check('0.5.8'), {'verified': True})
+                    fallback.assert_called_once_with('0.5.8')
+                else:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        update.check('0.5.8')
+                    fallback.assert_not_called()
+
+    def test_api_limit_never_silently_switches_preview_channel(self):
+        with patch.object(update, '_read') as read:
+            with self.assertRaisesRegex(RuntimeError, '预览版本'):
+                update._check_stable_download('0.6.0-rc.1')
+        read.assert_not_called()
+
+    def test_fallback_cannot_downgrade_or_download_an_installed_version(self):
+        checksums = 'a' * 64 + '  ExLab-0.5.9-ubuntu-worker-x64.zip\n'
+        for current in ('0.5.9', '0.5.10'):
+            with self.subTest(current=current), patch.object(update, '_read', return_value=checksums), \
+                    patch.object(update, '_open') as opened:
+                self.assertIsNone(update._check_stable_download(current))
+                opened.assert_not_called()
+
+    def test_fallback_rejects_ambiguous_roles_versions_and_mismatched_checksums(self):
+        good = 'a' * 64 + '  ExLab-0.5.9-ubuntu-worker-x64.zip\n'
+        for checksums in (good + good, good + good.replace('ExLab-', 'ExperimentManager-'),
+                          good.replace('0.5.9', '0.5.9-rc.1'), good.replace('0.5.9', '../0.5.9'),
+                          good.replace('ubuntu-worker', 'windows-worker')):
+            with self.subTest(checksums=checksums), patch.object(update, '_read', return_value=checksums), \
+                    patch.object(update, '_open') as opened:
+                with self.assertRaises(ValueError):
+                    update._check_stable_download('0.5.8')
+                opened.assert_not_called()
+        with patch.object(update, '_read', side_effect=[good, good.replace('a' * 64, 'b' * 64)]), \
+                patch.object(update, '_open') as opened:
+            with self.assertRaisesRegex(ValueError, '清单不一致'):
+                update._check_stable_download('0.5.8')
+            opened.assert_not_called()
+
+    def test_fallback_requires_a_bounded_real_package_size(self):
+        checksums = 'a' * 64 + '  ExLab-0.5.9-ubuntu-worker-x64.zip\n'
+        for size in (None, 0, -1, update.MAX_PACKAGE_BYTES + 1, 'garbage'):
+            with self.subTest(size=size), patch.object(update, '_read', return_value=checksums), \
+                    patch.object(update, '_open', return_value=Response(b'', size)):
+                with self.assertRaisesRegex(ValueError, '下载大小'):
+                    update._check_stable_download('0.5.8')
 
     def test_download_and_extraction_verify_cache_and_each_manifest_file(self):
         archive, release = self.package()
