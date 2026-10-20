@@ -231,7 +231,7 @@ class RuleMonitor:
         return timestamp-prior["since"]
 
     def facts(self, persist=False):
-        state, timestamp = self.hub.state(), now()
+        state, timestamp = self.hub.state(summary=True), now()
         result = {"job": [], "node": []}
         existing = {row["target"]: json.loads(row["value"]) for row in self.hub.db.execute("SELECT * FROM agent_rule_observations")}
         observations = {}

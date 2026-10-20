@@ -427,9 +427,13 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         self.db.execute("INSERT INTO events(job_id,time,kind,data) VALUES (?,?,?,?)", (job_id, now(), kind, _json(data)))
 
     @staticmethod
-    def _job(row):
+    def _job(row, *, summary=False):
         result = dict(row)
         result["spec"] = json.loads(result["spec"])
+        if summary:
+            # Imported tasks can embed an entire runner in their command. Polling
+            # lists never execute it; workers and /api/job retain the full spec.
+            result["spec"].pop("command", None)
         result["metrics"] = json.loads(result["metrics"])
         result["timing"] = json.loads(result["timing"]) if result["timing"] is not None else None
         result["runtime"] = json.loads(result["runtime"]) if result.get("runtime") else None
@@ -451,9 +455,20 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             raise APIError(403, "Job does not belong to this node")
         return row
 
-    def state(self):
+    def health(self):
+        """Local lifecycle probe, independent of experiment payloads and imports."""
         with self.lock:
-            jobs = [self._job(row) for row in self.db.execute("SELECT * FROM jobs ORDER BY created DESC,id")]
+            result = {"health_protocol": 1, "version": __version__,
+                      "nodes": self.db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
+                      "jobs": self.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]}
+            owner = getattr(self, 'desktop_owner', None)
+            if owner is not None:
+                result['controller_owner'] = {key: owner[key] for key in ('pid', 'nonce', 'version')}
+            return result
+
+    def state(self, *, summary=False):
+        with self.lock:
+            jobs = [self._job(row, summary=summary) for row in self.db.execute("SELECT * FROM jobs ORDER BY created DESC,id")]
             self._attach_record_tags(jobs, "job")
             for job in jobs:
                 self._execution_public(job)
@@ -1157,7 +1172,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             if not path.startswith("/api/") and path != "/mcp":
                 raise APIError(404, "Not found")
             local_center = path.startswith('/api/local/centers/')
-            if hub.center_state['mode'] == 'replica' and not local_center and path != '/api/centers/identity':
+            if hub.center_state['mode'] == 'replica' and not local_center and path not in ('/api/centers/identity', '/api/health'):
                 if path.startswith('/api/local/'):
                     raise APIError(403, '同步 Center 可上传项目包；文件夹导入请在调度主控操作')
                 link = hub.center_state['upstream']
@@ -1218,7 +1233,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             center_routes = ('/api/centers/identity', '/api/centers/snapshot', '/api/centers/file',
                              '/api/centers/handoff', '/api/centers/register')
             if role == 'center' and (path.startswith('/api/local/') or path in
-                    ('/api/centers/enroll', '/api/centers/revoke', '/api/update-status')):
+                    ('/api/centers/enroll', '/api/centers/revoke', '/api/update-status', '/api/health')):
                 raise APIError(403, '请在主控本机管理连接凭证或软件生命周期')
             if path in center_routes and role not in ('admin', 'center'):
                 raise APIError(403, '需要主控凭证')
@@ -1264,8 +1279,10 @@ def make_server(hub, host="127.0.0.1", port=8765):
                 elif path == "/api/setup-info":
                     from .pairing import address_candidates
                     self._send({"addresses": address_candidates(self.server.server_address[1])})
+                elif path == "/api/health":
+                    self._send(hub.health())
                 elif path == "/api/state":
-                    self._send(hub.state())
+                    self._send(hub.state(summary=True))
                 elif path == "/api/update-status":
                     self._send(hub.update_status())
                 elif path == "/api/job":
@@ -1354,7 +1371,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             self.connection.settimeout(30)
             try:
                 self._route()
-            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                 pass  # Peer may retry; persisted operations remain idempotent.
             except APIError as error:
                 self._send({"error": str(error)}, error.status)

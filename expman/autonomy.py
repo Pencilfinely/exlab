@@ -333,7 +333,7 @@ class AgentManager:
                     wanted = {"pause": ("paused", "interrupted", "succeeded"), "resume": ("preparing", "ready", "starting", "running", "succeeded"), "cancel": ("canceled",)}[row["operation"]]
                     status = "verified" if job["state"] in wanted else "needs_review"
             elif state == "requested" and row["operation"] in ("availability", "resources"):
-                node = next((n for n in self.hub.state()["nodes"] if n["id"] == args["node_id"]), None)
+                node = next((n for n in self.hub.state(summary=True)["nodes"] if n["id"] == args["node_id"]), None)
                 if node:
                     receipt = json.loads(row["result"])["result"]
                     if row["operation"] == "availability":
@@ -357,7 +357,7 @@ class AgentManager:
                         if observed["revision"] == receipt["resource_policy"]["revision"]:
                             status = "verified"
             elif state == "requested" and row["operation"] == "node_mode":
-                node = next((n for n in self.hub.state()["nodes"] if n["id"] == args["node_id"]), None)
+                node = next((n for n in self.hub.state(summary=True)["nodes"] if n["id"] == args["node_id"]), None)
                 observed = {"mode": node["mode"]} if node else None
                 # This is a scheduling policy enforced by Center; no process-stop claim.
                 status = "verified" if node and node["mode"] == args["mode"] else "needs_review"

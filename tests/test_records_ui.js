@@ -104,4 +104,18 @@ check('template to matrix carries user parameters, resource edits and labels wit
   env.$('node-template-matrix').onclick();assert.equal(definition.name,'Selected run · 矩阵');assert.deepEqual(plain(definition.tag_ids),['a']);assert.equal(definition.spec.params.seed,42);
   env.$('node-template-name').value='x'.repeat(200);env.$('node-template-matrix').onclick();assert.equal(definition.name.length,160);assert.equal(definition.spec.name.length,200);
 });
+check('slow and failed state polls share one request and release it for the next refresh',async()=>{
+  const elements=new Map();let requests=0,resolve,reject,renders=0;
+  const env=vm.createContext({token:'test',state:{},localImportAvailable:false,selected:null,
+    $:id=>{if(!elements.has(id))elements.set(id,{});return elements.get(id);},
+    document:{body:{classList:{add(){}}}},setTimingClock(){},refreshTagControls(){},
+    render(){renders++;},notify(){},
+    api(){requests++;return new Promise((yes,no)=>{resolve=yes;reject=no;});}});
+  vm.runInContext(fragment('let refreshPending=null;','function openNodeResources'),env);
+  const first=env.refresh();for(let i=0;i<10;i++)assert.equal(env.refresh(),first);
+  assert.equal(requests,1);resolve({time:123,jobs:[],nodes:[]});await first;assert.equal(renders,1);
+  const failed=env.refresh();assert.equal(requests,2);reject(Error('disconnected'));await failed;
+  const retry=env.refresh();assert.equal(requests,3);resolve({time:124,jobs:[],nodes:[]});await retry;
+  assert.equal(renders,2);
+});
 (async()=>{for(const [name,callback] of checks){await callback();console.log('PASS '+name);}console.log(checks.length+' record/template UI checks passed');})().catch(error=>{console.error(error);process.exitCode=1;});

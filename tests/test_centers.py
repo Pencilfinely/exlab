@@ -63,6 +63,15 @@ class CenterTests(unittest.TestCase):
         self.assertNotIn('admin_token', self.primary.center_snapshot()['configuration'])
         self.assertIn(self.replica_url, self.primary.center_addresses())
 
+    def test_replica_health_attests_local_owner_without_forwarding(self):
+        self.join()
+        self.primary.desktop_owner = {'pid': 111, 'nonce': 'primary', 'version': 'primary-version'}
+        self.replica.desktop_owner = {'pid': 222, 'nonce': 'replica', 'version': 'replica-version'}
+        with patch('expman.hub.open_remote', side_effect=AssertionError('Local health was forwarded')):
+            result = self.request('/api/health')
+        self.assertEqual(result['controller_owner'], self.replica.desktop_owner)
+        self.assertEqual(result['nodes'], 0)
+
     def test_replica_forwards_writes_without_creating_its_own_schedule(self):
         self.join()
         result = self.request('/api/jobs', {'request_id': 'from-rog', 'spec': SPEC})

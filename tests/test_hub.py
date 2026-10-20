@@ -5,6 +5,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 
@@ -246,6 +247,38 @@ class HubTests(unittest.TestCase):
         self.assertIn("'=1+1", text)
         self.assertIn("' @SUM(1)", text)
 
+    def test_polling_omits_embedded_runner_but_details_and_worker_keep_it(self):
+        identity = self.submit()
+        spec = self.hub.job(identity)['spec']
+        spec['command'] = ['python', '-c', 'runner = ' + 'x' * 600_000]
+        self.hub.db.execute('UPDATE jobs SET spec=? WHERE id=?', (json.dumps(spec), identity))
+        server = make_server(self.hub, port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def request(path):
+            return opener.open(urllib.request.Request(f'http://127.0.0.1:{server.server_port}' + path,
+                headers={'Authorization': 'Bearer ' + self.hub.config['admin_token']}), timeout=3)
+        try:
+            with request('/api/state') as response:
+                raw = response.read()
+            self.assertLess(len(raw), 15_000)
+            listed = json.loads(raw)['jobs'][0]
+            self.assertNotIn('command', listed['spec'])
+            self.assertEqual(listed['spec']['params'], spec['params'])
+            with request('/api/job?id=' + identity) as response:
+                self.assertEqual(json.load(response)['spec']['command'], spec['command'])
+            self.assertEqual(self.sync()['jobs'][0]['spec']['command'], spec['command'])
+            with patch.object(self.hub, 'state', side_effect=AssertionError('Health must not load job specs')):
+                with request('/api/health') as response:
+                    raw = response.read()
+            self.assertLess(len(raw), 1024)
+            self.assertEqual(json.loads(raw)['jobs'], 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(3)
+
     def test_http_auth_roles_invalid_json_and_download(self):
         server = make_server(self.hub, port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -262,9 +295,10 @@ class HubTests(unittest.TestCase):
                 self.assertEqual(response.headers.get_content_type(), "image/vnd.microsoft.icon")
                 self.assertEqual(response.read(), (Path(__file__).resolve().parents[1] / "assets/center.ico").read_bytes())
             for token, status in ((None, 401), (self.token, 403), ("fake", 401)):
-                with self.assertRaises(urllib.error.HTTPError) as error:
-                    request("/api/state", token)
-                self.assertEqual(error.exception.code, status)
+                for endpoint in ('/api/state', '/api/health'):
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        request(endpoint, token)
+                    self.assertEqual(error.exception.code, status)
             with request("/api/state", self.hub.config["admin_token"]) as response:
                 self.assertNotIn("token", response.read().decode())
             with self.assertRaises(urllib.error.HTTPError) as error:

@@ -173,7 +173,7 @@ class AgentToolGateway:
 
     def topology(self, arguments):
         with self.hub.lock:
-            state = self.hub.state()
+            state = self.hub.state(summary=True)
             offset, limit = arguments.get("offset", 0), arguments.get("limit", 100)
             jobs = state["jobs"]
             # Active work comes first; completed jobs remain available through pagination/detail.
@@ -394,7 +394,7 @@ class AgentToolGateway:
                     rows = self.hub.db.execute("SELECT job_id,attempt,experiment_id,summary FROM experiment_results ORDER BY received DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
                     return self.clean({"items": [{**{k: row[k] for k in ("job_id", "attempt", "experiment_id")}, "result": json.loads(row["summary"])} for row in rows],
                         "total": self.hub.db.execute("SELECT COUNT(*) FROM experiment_results").fetchone()[0]})
-                state = self.hub.state() if kind == "projects" else self.hub.matrices()
+                state = self.hub.state(summary=True) if kind == "projects" else self.hub.matrices()
                 items = state.get(kind, [])
                 return self.clean({"items": items[offset:offset+limit], "total": len(items)})
             if name == "exlab_control":

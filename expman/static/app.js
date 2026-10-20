@@ -199,7 +199,13 @@ $('pair-form').onsubmit=async event=>{
     $('pair-form').hidden=true;await refresh();
   }catch(error){notify('配对失败 / Pairing failed: '+error.message);}
 };
-async function refresh(){if(!token)return;try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';refreshTagControls();render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}}
+let refreshPending=null;
+function refresh(){
+  if(!token)return Promise.resolve();
+  if(refreshPending)return refreshPending;
+  refreshPending=(async()=>{try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';refreshTagControls();render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}})().finally(()=>{refreshPending=null;});
+  return refreshPending;
+}
 function openNodeResources(id){
   if(nodeResourceBusy)return;const worker=(state.nodes||[]).find(item=>item.id===id);if(!worker)return;
   const snapshot=worker.snapshot||{},desired=worker.resource_policy||{},policy={max_running:2,max_prefetch:4,cpu_budget:4,ram_budget_mb:8192,...snapshot.policy,...desired.policy};

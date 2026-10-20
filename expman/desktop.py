@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -129,13 +130,34 @@ def controller_status(root):
     if not isinstance(port, int) or not hub.get('admin_token'):
         return result
     try:
-        request = urllib.request.Request(f'http://127.0.0.1:{port}/api/state',
-                                         headers={'Authorization': 'Bearer ' + hub['admin_token']})
-        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=2) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        headers = {'Authorization': 'Bearer ' + hub['admin_token']}
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/api/health', headers=headers)
+        legacy = False
+        try:
+            response = opener.open(request, timeout=2)
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            error.close()
+            # Only pre-health releases use the full state response. Allow time
+            # for large histories so the old desktop can safely hand off once.
+            legacy = True
+            request = urllib.request.Request(f'http://127.0.0.1:{port}/api/state', headers=headers)
+            response = opener.open(request, timeout=15)
+        with response:
             value = json.load(response)
-        if (not isinstance(value, dict) or not isinstance(value.get('nodes'), list)
-                or not isinstance(value.get('jobs'), list)):
-            raise ValueError('Invalid controller health response')
+        if legacy:
+            if (not isinstance(value, dict) or not isinstance(value.get('nodes'), list)
+                    or not isinstance(value.get('jobs'), list)):
+                raise ValueError('Invalid controller health response')
+            nodes, jobs = len(value['nodes']), len(value['jobs'])
+        else:
+            if (not isinstance(value, dict) or value.get('health_protocol') != 1
+                    or not isinstance(value.get('version'), str) or not value['version']
+                    or any(type(value.get(key)) is not int or value[key] < 0 for key in ('nodes', 'jobs'))):
+                raise ValueError('Invalid controller health response')
+            nodes, jobs = value['nodes'], value['jobs']
         # The request may have waited for startup. The owner file is written
         # before serve_forever, so refresh it after the successful health probe.
         state = read_json(root / 'desktop-process.json', {})
@@ -144,7 +166,7 @@ def controller_status(root):
         if result['managed']:
             result['controller_owner'] = _owner_identity(state)
         result.update(running=True, responsive=True, status='running', version=value.get('version'),
-            nodes=len(value.get('nodes', [])), jobs=len(value.get('jobs', [])),
+            nodes=nodes, jobs=jobs,
             detail='主控运行中；关闭应用窗口后继续在后台运行')
         if result['managed'] and 'update_stop_protocol' in state:
             result['update_stop_protocol'] = state['update_stop_protocol']

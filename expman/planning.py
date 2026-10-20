@@ -22,7 +22,7 @@ def assist(hub, payload):
         raise ValueError("Planning assistance requires instructions")
     instructions = _text(payload["instructions"], "instructions", 8000)
     with hub.lock:
-        current = hub.state()
+        current = hub.state(summary=True)
     nodes = {node["id"]: node for node in current["nodes"] if CAPABILITY in node["snapshot"].get("capabilities", [])}
     queued = {job["id"]: job for job in current["jobs"] if job["state"] == "queued" and job["node_id"] is None}
     context = {"instructions": instructions, "time": current["time"], "nodes": [{"node_id": identity,

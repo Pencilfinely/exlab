@@ -101,7 +101,7 @@ class MobileHubMixin:
             return dict(row)
 
     def mobile_state(self):
-        state = self.state()
+        state = self.state(summary=True)
         nodes = []
         for value in state["nodes"]:
             node = _pick(value, ("id", "last_seen", "online", "mode", "display_name", "compute_policy", "resource_policy"))

@@ -111,7 +111,9 @@ class DesktopTests(unittest.TestCase):
 
     def test_live_controller_with_invalid_health_response_blocks_update(self):
         self.serve()
-        for invalid in (b'null', b'[]', b'{}', b'{"nodes":{},"jobs":[]}'):
+        for invalid in (b'null', b'[]', b'{}', b'{"nodes":{},"jobs":[]}',
+                        b'{"health_protocol":1,"version":"test","nodes":true,"jobs":0}',
+                        b'{"health_protocol":1,"version":"test","nodes":0,"jobs":-1}'):
             with self.subTest(invalid=invalid), patch("expman.desktop.urllib.request.build_opener") as opener:
                 opener.return_value.open.side_effect = lambda *args, **kwargs: io.BytesIO(invalid)
                 status = desktop.controller_status(self.root)
@@ -314,6 +316,8 @@ class DesktopTests(unittest.TestCase):
                 common.atomic_json(self.root / 'desktop-process.json', owner)
                 real_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 def older_health(request, **kwargs):
+                    if request.full_url.endswith('/api/health'):
+                        raise urllib.error.HTTPError(request.full_url, 404, 'Not found', {}, None)
                     response = real_opener.open(request, **kwargs)
                     if request.full_url.endswith('/api/state'):
                         with response:
@@ -339,7 +343,7 @@ class DesktopTests(unittest.TestCase):
         common.atomic_json(self.root / 'desktop-process.json',
                            {'pid': os.getpid(), 'nonce': 'stale-owner', 'version': '0.3.0rc3', 'update_stop_protocol': 1})
         with patch.object(desktop.urllib.request, 'build_opener') as opener:
-            opener.return_value.open.return_value = io.BytesIO(b'{"version":"0.3.0rc1","nodes":[],"jobs":[]}')
+            opener.return_value.open.return_value = io.BytesIO(b'{"health_protocol":1,"version":"0.3.0rc1","nodes":0,"jobs":0}')
             status = desktop.controller_status(self.root)
         self.assertNotIn('update_stop_protocol', status)
         self.assertFalse(status['managed'])
@@ -351,7 +355,7 @@ class DesktopTests(unittest.TestCase):
         with patch.object(desktop, '_owner_is_running', return_value=False), \
                 patch.object(desktop.urllib.request, 'build_opener') as opener:
             opener.return_value.open.side_effect = lambda *a, **kw: io.BytesIO(
-                json.dumps({'version': __version__, 'nodes': [], 'jobs': []}).encode())
+                json.dumps({'health_protocol': 1, 'version': __version__, 'nodes': 0, 'jobs': 0}).encode())
             status = desktop.controller_status(self.root)
             self.assertTrue(status['running'])
             self.assertFalse(status['managed'])
@@ -424,7 +428,7 @@ class DesktopTests(unittest.TestCase):
         def became_ready(*args, **kwargs):
             common.atomic_json(self.root / "desktop-process.json",
                                {"pid": os.getpid(), "nonce": "newly-ready", "version": __version__})
-            return io.BytesIO(json.dumps({'version': __version__, 'nodes': [], 'jobs': []}).encode())
+            return io.BytesIO(json.dumps({'health_protocol': 1, 'version': __version__, 'nodes': 0, 'jobs': 0}).encode())
         with patch("expman.desktop.urllib.request.build_opener") as opener:
             opener.return_value.open.side_effect = became_ready
             status = desktop.controller_status(self.root)
