@@ -188,8 +188,8 @@ class AgentToolGateway:
                 job["execution_state"] = {k: execution.get(k) for k in ("ever_started", "stopped_confirmed", "release", "checkpoint")}
                 job["execution_state"]["progress"] = {k: execution.get("progress", {}).get(k) for k in ("step", "epoch", "total_steps") if k in execution.get("progress", {})}
                 job["metrics"] = dict(list((job.get("metrics") or {}).items())[:12])
-            nodes = [{key: n.get(key) for key in ("id", "display_name", "mode", "online", "last_seen", "compute_policy", "resource_policy")}
-                | {"snapshot": {key: n["snapshot"].get(key) for key in ("capabilities", "local_time", "ac_power", "local_compute_policy", "availability", "compute_control",
+            nodes = [{key: n.get(key) for key in ("id", "display_name", "mode", "online", "worker_online", "last_seen", "compute_policy", "resource_policy")}
+                | {"snapshot": {key: n["snapshot"].get(key) for key in ("capabilities", "local_time", "ac_power", "local_compute_policy", "availability", "compute_control", "host_control", "runtime_host",
                      "compute_policy_revision", "resource_policy_revision", "resource_policy_error", "policy", "gpus", "delivery", "execution_delivery", "free_ram_mb", "disk_free_mb", "assets", "profiles")}}
                 for n in state["nodes"]]
             result = {"time": state["time"], "center": self.hub.center_info(), "nodes": nodes,

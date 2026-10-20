@@ -6,8 +6,8 @@ android {
         applicationId = "com.pencilfinely.expmonitor"
         minSdk = 28
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.5.18"
+        versionCode = 10
+        versionName = "0.5.19"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }

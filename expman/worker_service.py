@@ -1063,11 +1063,19 @@ def compute_availability(service_root=None, *, mode=None, minutes=None, require_
             'detail': '策略已保存，等待代理执行并核验；此回执不代表已停止或已释放。本地限制优先保留。'}
 
 
+def host_info(service_root=None):
+    """Local-only credential handoff to the Windows control process."""
+    root = _root(service_root)
+    settings = _settings(root)
+    config = common.read_json(settings['config'])
+    return {key: config[key] for key in ('node_id', 'hub_url', 'token')}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
                                          'update-status', 'stop-for-update', 'install-status', 'shutdown', 'deactivate',
-                                         'runtime-status', 'runtime-release',
+                                         'runtime-status', 'runtime-release', 'host-info',
                                          'gpu-status', 'gpu-enable', 'compute-policy'))
     parser.add_argument('--shutdown-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--service-root')

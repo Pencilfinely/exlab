@@ -1,4 +1,4 @@
-param()
+﻿param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -76,6 +76,9 @@ static class UpdateTests {
         settings["auto_enable_compute"]="true";
         Assert(!DesktopLifecycle.ShouldEnableCompute(settings,true,false),"Malformed startup flag enabled compute.");
         Assert(DesktopLifecycle.ShouldEnableCompute(settings,true,true),"Update handoff lost the running worker's restart choice.");
+        settings["auto_enable_compute"]=true;settings["deactivated"]=true;
+        Assert(!DesktopLifecycle.ShouldEnableCompute(settings,true,false),"Login startup overrode a released worker.");
+        Assert(!DesktopLifecycle.ShouldEnableCompute(settings,true,true),"Stale update restart overrode deactivation.");
         var release=FileRelease(new byte[]{(byte)'M',(byte)'Z',1,2,3});
         var now=new DateTime(2026,10,7,0,0,0,DateTimeKind.Utc);
         string persisted="";
@@ -614,7 +617,7 @@ static class InstallProbeTests {
         receipt["phase"]="released";
         Assert(DesktopRuntime.ComputeState(state).StartsWith("\u7b49\u5f85\u6267\u884c\u6838\u9a8c"),"Incomplete release flags were accepted.");
         receipt["resources_released"]=true;receipt["experiments_stopped"]=true;
-        Assert(DesktopRuntime.ComputeState(state).StartsWith("\u8bad\u7ec3\u8d44\u6e90\u5df2\u91ca\u653e"),"Verified training release was not shown.");
+        Assert(DesktopRuntime.ComputeState(state).StartsWith("\u8d44\u6e90\u5df2\u91ca\u653e"),"Verified training release was not shown.");
         receipt["policy"]=new Dictionary<string,object>(desired){{"extra",true}};
         ((Dictionary<string,object>)receipt["policy"])["reason"]="old request";
         Assert(DesktopRuntime.ComputeState(state).Contains("\u5c1a\u672a\u786e\u8ba4"),"An old receipt verified a different request.");
@@ -770,9 +773,29 @@ static class InstallProbeTests {
         stillRunning.Release(idle,true);
         Assert(!App.Flag(idle,"resources_released")&&!stillRunning.Called("wsl.exe --shutdown"),"Docker CLI success alone claimed all memory freed.");
     }
+    static void HostControl(string folder) {
+        string path=Path.Combine(folder,"host-control-test.json");
+        var host=new DesktopHostControl(path);
+        Assert(!host.Linked,"Unconfigured host was linked.");
+        var info=new Dictionary<string,object>{{"node_id","fixture"},{"hub_url","http://127.0.0.1:8765"},{"token",new string('x',32)}};
+        host.Connect(info,"Ubuntu");
+        Assert(host.Linked&&host.Distribution=="Ubuntu","Host credential binding was not retained.");
+        var partial=new Dictionary<string,object>{{"resources_released",true},{"agents_stopped",true},{"docker_stopped",true},{"wsl_stopped",false}};
+        bool rejected=false;try{host.Observe(new string('a',64),"released","partial",partial);}catch(InvalidDataException){rejected=true;}
+        Assert(rejected,"Training or Docker-only release was accepted as full release.");
+        partial["wsl_stopped"]=true;host.Observe(new string('a',64),"released","verified",partial);
+        var restored=new DesktopHostControl(path);
+        Assert(restored.Linked&&App.Flag(restored.Report,"resources_released"),"Host connection and bound receipt did not survive restart.");
+        Assert(DesktopHostControl.RuntimeClosed(()=>Task.FromResult(""),()=>Task.FromResult(true)).GetAwaiter().GetResult(),"Closed VM was not recognized.");
+        Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult("Ubuntu\n"),()=>Task.FromResult(true)).GetAwaiter().GetResult(),"Running Ubuntu was called released.");
+        Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult("docker-desktop\n"),()=>Task.FromResult(true)).GetAwaiter().GetResult(),"Running Docker was called released.");
+        Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult("Debian\n"),()=>Task.FromResult(true)).GetAwaiter().GetResult(),"Another running WSL was called fully released.");
+        Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult(""),()=>Task.FromResult(false)).GetAwaiter().GetResult(),"WSL-only closure masqueraded as Docker closure.");
+        File.Delete(path);
+    }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();
+            WorkerCompletion();InstallerWiring();ComputeActivation();ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
@@ -822,7 +845,7 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','ComputePauseForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','ComputePauseForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

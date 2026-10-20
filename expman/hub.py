@@ -36,6 +36,7 @@ from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_poli
                           validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
 from .result_hub import ResultHubMixin, initialize as initialize_results
 from . import result_protocol
+from . import host_control
 from .compute_policy import (ComputePolicyHubMixin, initialize as initialize_compute, apply as apply_compute,
                              validate_snapshot as validate_compute_snapshot)
 from .execution_control import ExecutionControlHubMixin, initialize as initialize_execution, validate_state
@@ -281,6 +282,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         initialize_results(self.db)
         initialize_compute(self.db)
         initialize_execution(self.db)
+        host_control.initialize(self.db)
         from .agent_tools import initialize as initialize_agent_tools
         from .autonomy import initialize as initialize_autonomy, AgentManager
         initialize_agent_tools(self.db)
@@ -491,6 +493,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 item["snapshot"]["node_mode"] = item["mode"]
                 if item["compute_policy"] or "compute-control-v2" in item["snapshot"].get("capabilities", []):
                     apply_compute(item["snapshot"], item["compute_policy"] or {})
+                host_control.overlay(self, item, timestamp)
                 nodes.append(item)
             projects, project_deletions = [], []
             for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
@@ -1227,7 +1230,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
                                                  payload, identities[0] if identities else None, query))
                 return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
-            required_role = "node" if path in ("/api/sync", "/api/upload", "/api/node-info", "/api/projects/download",
+            required_role = "node" if path in ("/api/sync", "/api/host/sync", "/api/upload", "/api/node-info", "/api/projects/download",
                 "/api/results", "/api/delivery/poll", "/api/delivery/report", "/api/evidence/upload",
                 "/api/execution/checkpoints", "/api/execution/checkpoints/download") else "admin"
             center_routes = ('/api/centers/identity', '/api/centers/snapshot', '/api/centers/file',
@@ -1319,6 +1322,7 @@ def make_server(hub, host="127.0.0.1", port=8765):
             elif self.command == "POST":
                 payload = self._body()
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
+                          "/api/host/sync": lambda p: host_control.sync(hub, node_id, p),
                           "/api/tags/save": hub.tag_save, "/api/tags/delete": hub.tag_delete,
                           "/api/tags/assign": hub.tag_assign,
                           '/api/node-rename': hub.rename_node,

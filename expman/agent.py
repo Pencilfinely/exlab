@@ -416,6 +416,12 @@ class Agent:
         from . import __version__
         from . import result_protocol, result_delivery
         result["agent_version"] = __version__
+        if sys.platform == 'linux':
+            try:
+                if 'microsoft' in Path('/proc/sys/kernel/osrelease').read_text().lower():
+                    result['runtime_host'] = 'windows'
+            except OSError:
+                pass
         from .runtime_observation import CAPABILITY as RUNTIME_CAPABILITY
         result["capabilities"].append(RUNTIME_CAPABILITY)
         from .python_stack_observation import CAPABILITY as STACK_CAPABILITY

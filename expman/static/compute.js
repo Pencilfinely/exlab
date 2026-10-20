@@ -3,21 +3,25 @@
   'use strict';
   const clone=value=>JSON.parse(JSON.stringify(value));
   const defaults=()=>({revision:0,kind:'shared',mode:'available',until:null,reason:'',require_ac:false,reliability:1,maintenance:[],risk_windows:[]});
-  const modeLabels={available:'允许接单',drain:'暂停接单',stop:'停止实验并暂停接单',release:'停止实验、暂停接单并释放训练资源'};
-  const phaseLabels={available:'允许接单',admission_paused:'已暂停接单 · 实验继续',stopping:'正在保存并停止实验',stopped:'实验已停止 · 接单已暂停',releasing:'正在释放训练资源',released:'训练资源已释放 · 接单已暂停',blocked:'执行未完成 · 需要检查'};
+  const modeLabels={available:'允许接单',drain:'暂停接单',stop:'停止实验并暂停接单',release:'停止实验、暂停接单并释放资源'};
+  const phaseLabels={available:'允许接单',admission_paused:'已暂停接单 · 实验继续',stopping:'正在保存并停止实验',stopped:'实验已停止 · 接单已暂停',releasing:'资源释放中 · 尚未完成',released:'资源已释放 · 接单已暂停',blocked:'资源释放未完成 · 需要检查'};
   function nodeState(worker){
     const snap=worker.snapshot||{},availability=snap.availability||{},control=snap.compute_control;
     const mode=availability.mode||'available',pending=worker.compute_policy&&worker.compute_policy.revision!==(snap.compute_policy_revision||0);
     const matching=control&&control.policy&&['mode','revision','source','until','reason'].every(key=>(control.policy[key]??null)===(availability[key]??null));
-    if(pending)return {label:'策略待 Worker 接收',detail:'已保存的策略尚未被 Worker 接收，不能据此确认实验停止或资源释放。'};
-    if(worker.online===false||worker.last_seen!==undefined&&Date.now()/1000-worker.last_seen>=45)
+    const hostConfirmed=snap.host_control?.online&&snap.host_control.matches;
+    if(hostConfirmed&&snap.host_control.phase==='restarting')return {label:'正在恢复运行环境',detail:snap.host_control.detail};
+    if(pending&&!hostConfirmed)return {label:'策略待 Worker 接收',detail:'已保存的策略尚未被 Worker 接收，不能据此确认实验停止或资源释放。'};
+    if(worker.online===false||!snap.host_control?.online&&worker.last_seen!==undefined&&Date.now()/1000-worker.last_seen>=45)
       return {label:'离线 · 当前执行状态未知',detail:matching?'上次回报：'+phaseLabels[control.phase]+'。'+control.detail:'等待 Worker 连接并核验；离线不能视为已释放。'};
     if(matching){
+      if(control.phase==='released'&&control.runtime_retained)return {label:'训练已停止 · 运行环境仍保留',detail:control.detail};
       if(control.phase==='released'&&(!control.resources_released||!control.experiments_stopped)||control.phase==='stopped'&&!control.experiments_stopped)
         return {label:'等待 Worker 核验',detail:'停止或资源释放确认不完整。'};
       return {label:worker.mode==='drain'&&mode==='available'?'已暂停接单':phaseLabels[control.phase]||'等待核验',detail:control.detail};
     }
     if(mode==='stop'||mode==='release')return {label:'等待 Worker 核验',detail:'已请求'+modeLabels[mode]+'；尚未收到匹配的执行结果。'+((snap.capabilities||[]).includes('compute-control-v2')?'':'此 Worker 需要升级后才能回传停止与释放核验。')};
+    if(snap.host_control?.online&&worker.worker_online===false)return {label:'控制在线 · 算力未启动',detail:'Windows 控制代理在线，等待运行环境及 Worker 恢复。'};
     return {label:mode==='drain'||worker.mode==='drain'?'已暂停接单 · 实验继续':'允许接单',detail:availability.reason||''};
   }
   const localTime=seconds=>{if(!seconds)return '';const d=new Date(seconds*1000);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);};
@@ -46,7 +50,7 @@
     const holds=restrictions(worker),centerPaused=worker.mode==='drain'||original.mode!=='available'&&(original.until==null||original.until>Date.now()/1000);
     const dialog=node('dialog',undefined,'workspace-dialog compute-dialog'),form=node('form'),feedback=node('p','','inline-feedback');
     form.append(node('h2',`${worker.display_name||worker.id} · ${resuming?'恢复接单':'暂停节点'}`),node('p','当前：'+nodeState(worker).label,'compute-current'));
-    const options=[['drain','只暂停接单','当前实验继续运行，仍会占用资源。'],['stop','停止当前实验','保存并停止，保留本机任务和环境，之后手动续训。'],['release','释放训练资源','保存并停止，清理实验容器；可续训的任务交给其他节点。']];
+    const options=[['drain','只暂停接单','当前实验继续运行，仍会占用资源。'],['stop','停止当前实验','保存并停止，保留本机任务和环境，之后手动续训。'],['release','停止并释放资源','保存并停止实验；Windows 同时关闭空闲 Docker / WSL，释放内存。可续训的任务交给其他节点。']];
     let selected=resuming?'available':preset==='release'?'release':original.until!=null&&original.until<=Date.now()/1000?'drain':['drain','stop','release'].includes(original.mode)?original.mode:'drain';
     if(!confirmed&&selected!=='available')selected='drain';
     const cards=[];
@@ -67,12 +71,12 @@
     const summary=node('p','','compute-preview');form.append(summary);
     if(holds.length){const callout=node('div',undefined,'compute-holds');callout.append(node('strong','恢复接单还需满足'));for(const note of holds)callout.append(node('p',note));form.append(callout);}
     if(!confirmed&&!resuming)form.append(node('p','此节点需要升级 Worker 才能停止实验或核验资源释放；当前可以暂停接单。','muted'));
-    const scope=node('p','这里释放实验占用的训练资源，控制代理保持在线。若要退出整个 Docker / WSL，请在 Windows 节点使用“停用并释放 Docker / WSL”。','muted');form.append(scope);
+    const scope=node('p','Windows 需要新版客户端接管运行环境释放，完成后保留轻量控制连接，可在这里恢复。其他容器或会话会明确显示为阻塞；原生 Linux 释放训练容器并保留系统服务。','muted');form.append(scope);
     const actions=node('div',undefined,'actions compute-dialog-actions'),save=node('button'),close=node('button','取消','subtle');close.type='button';close.onclick=()=>dialog.close();actions.append(save,close);form.append(actions,feedback);
     function update(){
       for(const item of cards){item.input.checked=item.mode===selected;item.input.autofocus=item.input.checked;item.card.className='compute-choice'+(item.input.checked?' is-selected':'')+(item.input.disabled?' is-disabled':'');}
       const option=options.find(item=>item[0]===selected);
-      save.textContent=resuming?(holds.length?(centerPaused?'解除管理端暂停':'请先满足上方条件'):'确认恢复接单'):{drain:'确认暂停接单',stop:'保存并停止实验',release:'停止并释放训练资源'}[selected];
+      save.textContent=resuming?(holds.length?(centerPaused?'解除管理端暂停':'请先满足上方条件'):'确认恢复接单'):{drain:'确认暂停接单',stop:'保存并停止实验',release:'停止并释放资源'}[selected];
       save.disabled=resuming&&holds.length>0&&!centerPaused;
       summary.textContent=resuming?'恢复此节点接收新任务，保留电源与维护限制。':option[2]+(duration.value==='manual'?' 直到你手动恢复。':duration.value==='custom'?' 在指定时间恢复接单。':` ${Number(duration.value)/60} 小时后恢复接单。`);
       summary.hidden=resuming&&holds.length>0;

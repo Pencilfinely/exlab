@@ -430,6 +430,7 @@ namespace ExperimentManagerDesktop {
     sealed class ClientForm : IconForm {
         readonly DesktopIcons trayIcons=new DesktopIcons();
         NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
+        DesktopHostControl hostControl;bool hostPumping;DateTime nextHost=DateTime.MinValue,nextHostAttempt=DateTime.MinValue;
         UpdateForm updateDialog;
         BrowserAppWindow browserWindowIcons;
         bool resumeWorkerAfterUpdate;
@@ -456,6 +457,7 @@ namespace ExperimentManagerDesktop {
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=5000 };
         internal ClientForm(string[] args) {
             settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
+            if(App.Worker)hostControl=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));
             UpdateQueueState restored=null;
             string queueFile=Path.Combine(App.SettingsRoot,"update-queue.json");
             try {if(File.Exists(queueFile))restored=App.Json.Deserialize<UpdateQueueState>(File.ReadAllText(queueFile,Encoding.UTF8));}
@@ -523,7 +525,7 @@ namespace ExperimentManagerDesktop {
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
-            timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpUpdates();if(!exiting)RefreshState();};
+            timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpHostControl();await PumpUpdates();if(!exiting)RefreshState();};
             Shown+=async (s,e)=> {
                 if(startingAfterUpdate)App.UpdateReport("client_start","launched");
                 if(App.Worker) {
@@ -537,7 +539,7 @@ namespace ExperimentManagerDesktop {
                     else RefreshState();
                     if(background)Hide();
                 } else if(deactivated)DisplayInactive();else if(background) { await Execute(async()=>{await Controller("controller-start");Hide();}); } else OpenController();
-                timer.Start();NotifyUpdates();await PumpUpdates();
+                timer.Start();NotifyUpdates();await PumpHostControl();await PumpUpdates();
             };
             ResumeLayout(true);
         }
@@ -613,6 +615,7 @@ namespace ExperimentManagerDesktop {
             UpdateQueue.Enqueue(UpdateQueue.State.Release??AvailableUpdate,install,false);NotifyUpdates();
         }
         async Task PumpUpdates() {
+            if(App.Worker&&deactivated&&(!UpdateQueue.Active||UpdateQueue.State.Automatic))return;
             if(pumpingUpdates||exiting)return;pumpingUpdates=true;
             try {
                 if(DateTime.UtcNow>=nextCleanup) {
@@ -684,6 +687,76 @@ namespace ExperimentManagerDesktop {
                 busy=false;timer.Start();throw new Exception(failure.Message+recovery,failure);
             }
         }
+        async Task PumpHostControl() {
+            if(!App.Worker||hostPumping||exiting||DateTime.UtcNow<nextHost)return;
+            hostPumping=true;nextHost=DateTime.UtcNow.AddSeconds(5);
+            string intent="";
+            try {
+                if(!hostControl.Linked||hostControl.Distribution!=SelectedDistribution) {
+                    if(deactivated||busy)return;
+                    string[] running=DesktopRuntime.RunningDistributions(await Task.Run(()=>App.RunWithTimeout(15000,"wsl.exe","--list","--running","--quiet")));
+                    if(!Array.Exists(running,name=>name.Equals(SelectedDistribution,StringComparison.OrdinalIgnoreCase)))return;
+                    hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
+                }
+                var desired=await Task.Run(()=>hostControl.Sync());
+                intent=App.Text(desired,"intent");string mode=App.Text(desired,"mode");
+                if(busy)return;
+                if(mode=="release"&&App.Text(desired,"source")=="center") {
+                    // This read-only Windows check cannot start WSL. It also
+                    // revalidates a receipt restored after a client restart.
+                    bool closed=await DesktopHostControl.RuntimeClosed();
+                    if(closed) {
+                        deactivated=true;settings["deactivated"]=true;settings["resources_released"]=true;
+                        settings["host_managed_release"]=!App.Flag(settings,"host_local_hold");ReleaseWorkerHold();
+                        settings["release_detail"]="Docker / WSL 已关闭，内存已释放；Windows 控制连接保持在线，可从中控恢复。";
+                        App.Write(App.SettingsFile,settings);
+                        hostControl.Observe(intent,"released",App.Text(settings,"release_detail"),new Dictionary<string,object>{
+                            {"agents_stopped",true},{"docker_stopped",true},{"wsl_stopped",true},{"resources_released",true}});
+                        await Task.Run(()=>hostControl.Sync());return;
+                    }
+                    if(DateTime.UtcNow<nextHostAttempt)return;
+                    nextHostAttempt=DateTime.UtcNow.AddSeconds(30);busy=true;
+                    try {
+                        hostControl.Observe(intent,"releasing","中控请求释放；Windows 正在保存实验、停用算力并关闭空闲 Docker / WSL。");
+                        await Task.Run(()=>hostControl.Sync());
+                        var state=await DesktopRuntime.PrepareWorkerRelease(SelectedDistribution,action=>WorkerCommand(action),()=>true,Display,()=>{
+                            deactivated=true;settings["deactivated"]=true;settings["host_managed_release"]=!App.Flag(settings,"host_local_hold");
+                            settings["resources_released"]=false;ReleaseWorkerHold();App.Write(App.SettingsFile,settings);
+                        });
+                        var latest=await Task.Run(()=>hostControl.Sync());
+                        if(App.Text(latest,"intent")!=intent||App.Text(latest,"mode")!="release") {
+                            hostControl.Observe(intent,"blocked","主控请求已变化，Docker / WSL 保留；正在重新检查最新策略。",state);return;
+                        }
+                        string detail=await DesktopRuntime.Release(SelectedDistribution,state,false);
+                        settings["resources_released"]=App.Flag(state,"resources_released");settings["release_detail"]=detail;
+                        App.Write(App.SettingsFile,settings);
+                        hostControl.Observe(intent,App.Flag(state,"resources_released")?"released":"blocked",detail,state);
+                        await Task.Run(()=>hostControl.Sync());DisplayInactive();
+                    } finally {busy=false;}
+                } else if(mode=="available"&&App.Flag(settings,"host_managed_release")) {
+                    if(DateTime.UtcNow<nextHostAttempt)return;
+                    nextHostAttempt=DateTime.UtcNow.AddSeconds(30);
+                    if(App.Flag(desired,"require_ac")&&SystemInformation.PowerStatus.PowerLineStatus!=PowerLineStatus.Online) {
+                        hostControl.Observe(intent,"blocked","仍要求接通电源；Docker / WSL 保持关闭。 ");
+                        await Task.Run(()=>hostControl.Sync());return;
+                    }
+                    hostControl.Observe(intent,"restarting","中控已恢复接单，Windows 正在恢复 Docker / WSL 和原节点。");
+                    await Task.Run(()=>hostControl.Sync());bool restarted=await StartWorkerAsync(true);
+                    if(restarted) {
+                        settings["host_managed_release"]=false;App.Write(App.SettingsFile,settings);
+                        hostControl.Observe(intent,"retained","运行环境已恢复；实验执行状态由 Worker 继续回报。");
+                        await Task.Run(()=>hostControl.Sync());
+                    }
+                }
+            } catch(Exception ex) {
+                nextHost=DateTime.UtcNow.AddSeconds(15);
+                // A network failure never starts a dormant WSL or grants a new
+                // release action. Existing queued policy can be checked later.
+                if(intent.Length>0&&hostControl.Linked) {
+                    try {hostControl.Observe(intent,"blocked","Windows 资源交接未完成："+ex.Message);}catch(Exception){}
+                }
+            } finally {hostPumping=false;}
+        }
         internal void FinishUpdateExit(){exiting=true;if(updateDialog!=null)updateDialog.Close();Close();}
         internal void OpenFromTray(){if(App.Worker)ShowStatus();else OpenController();}
         async Task<Dictionary<string,object>> Controller(string action) {
@@ -717,7 +790,20 @@ namespace ExperimentManagerDesktop {
         }
         async void RefreshState(){if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
         async void StartWorker(){await StartWorkerAsync(false);}
-        async Task StartWorkerAsync(bool automatic){await Execute(async()=>{if(!await EnsureDocker(automatic))return;deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);summary.Text="正在准备算力…";Display(await WorkerCommand("install"));});}
+        async Task<bool> StartWorkerAsync(bool automatic){
+            bool started=false;
+            await Execute(async()=>{
+                if(!await EnsureDocker(automatic))return;
+                summary.Text="正在准备算力…";var state=await WorkerCommand("install");Display(state);
+                if(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing")
+                    throw new InvalidOperationException(App.Text(state,"detail","算力尚未启动，请检查状态后重试。"));
+                hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
+                deactivated=false;settings["deactivated"]=false;settings["resources_released"]=false;
+                if(!automatic){settings["host_managed_release"]=false;settings["host_local_hold"]=false;}
+                App.Write(App.SettingsFile,settings);started=true;
+            });
+            return started;
+        }
         async void OpenGpuSettings(){await Execute(async()=>{
             using(var form=new WorkerGpuForm((action,options)=>WorkerCommand(action,options))) form.ShowDialog(this);
             Display(await WorkerCommand("status"));
@@ -737,6 +823,7 @@ namespace ExperimentManagerDesktop {
                             App.Title,MessageBoxButtons.OKCancel,MessageBoxIcon.Question)==DialogResult.OK,
                         Display,()=>{
                             workerStopped=true;deactivated=true;settings["deactivated"]=true;
+                            settings["host_managed_release"]=false;settings["host_local_hold"]=true;
                             settings["resources_released"]=false;
                             settings["release_detail"]="算力已停用；正在检查 Docker 与 WSL 的释放状态。";
                             ReleaseWorkerHold();App.Write(App.SettingsFile,settings);
@@ -815,6 +902,8 @@ namespace ExperimentManagerDesktop {
             settings["resources_released"]=App.Flag(state,"resources_released");App.Write(App.SettingsFile,settings);
         }
         void Display(Dictionary<string,object> value) {
+            if(App.Worker&&hostControl!=null&&hostControl.Linked&&App.Text(value,"node_id").Length>0&&App.Text(value,"node_id")!=hostControl.NodeId)
+                hostControl.Disconnect();
             string state=App.Text(value,"status");
             string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state=="online"?"已连接":state=="offline"?"主控离线":state=="preparing"?"准备中":state=="starting"?"启动中":state=="stopped"?"已停止":state=="running"?"运行中":state=="failed"?"启动失败":state;
             summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");

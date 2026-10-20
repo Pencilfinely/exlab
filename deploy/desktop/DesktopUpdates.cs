@@ -15,8 +15,9 @@ using System.Web.Script.Serialization;
 namespace ExperimentManagerDesktop {
     internal static class DesktopLifecycle {
         internal static bool ShouldEnableCompute(Dictionary<string,object> settings,bool worker,bool resumingUpdate) {
-            object enabled;
-            return worker&&(resumingUpdate||(settings.TryGetValue("auto_enable_compute",out enabled)&&enabled is bool&&(bool)enabled));
+            object enabled,paused;
+            bool deactivated=settings.TryGetValue("deactivated",out paused)&&paused is bool&&(bool)paused;
+            return worker&&!deactivated&&(resumingUpdate||(settings.TryGetValue("auto_enable_compute",out enabled)&&enabled is bool&&(bool)enabled));
         }
         internal static bool CanExitUnconfiguredWorker(string configuredDistribution,IEnumerable<string> registeredDistributions) {
             if(!String.IsNullOrWhiteSpace(configuredDistribution)||registeredDistributions==null)return false;

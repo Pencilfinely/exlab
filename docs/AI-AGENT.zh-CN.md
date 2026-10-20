@@ -49,7 +49,7 @@ AI 调用与人工控制共用原有调度、版本校验和执行协议。它�
 
 自动托管保留人工设置的插电要求、维护窗口、游戏释放、暂停接单和队列暂缓。AI 可以撤回自己设置的临时限制，但不能借后续操作抹掉原有人工限制。人工重新保存策略会成为新的约束基线。
 
-节点操作明确区分 `drain`（只暂停接单）、`stop`（保存并停止实验，保留本机任务/环境）和 `release`（停止后归还可交接任务、清理已停止的实验容器并释放训练资源）。`node_mode=drain` 不能被描述为释放。`availability` 的策略 ACK 也不能证明实验停止或资源释放：必须检查当前策略匹配的 `compute_control`，其中 `experiments_stopped` 与 `resources_released` 是独立确认。离线、核验失败或回执过期均不能标记完成。原生 Windows、Linux 状态、Monitor 及外部模型拓扑接口都保留此回执；规则可以检查 `compute_phase`、`resources_released`，持续的阻塞默认升级为异常。训练资源释放保留轻量控制代理及共享 Docker/WSL，完整虚拟机退出走独立的停用流程。
+节点操作明确区分 `drain`（只暂停接单）、`stop`（保存并停止实验，保留本机任务/环境）和 `release`（停止后归还可交接任务、清理已停止的实验容器并释放训练资源）。`node_mode=drain` 不能被描述为释放。`availability` 的策略 ACK 也不能证明实验停止或资源释放：必须检查当前策略匹配的 `compute_control`，其中 `experiments_stopped` 与 `resources_released` 是独立确认。离线、核验失败或回执过期均不能标记完成。原生 Windows、Linux 状态、Monitor 及外部模型拓扑接口都保留此回执；规则可以检查 `compute_phase`、`resources_released`，持续的阻塞默认升级为异常。Windows 中控释放由 Windows 客户端关闭空闲 Docker / WSL，必须检查 `host_control` 中策略匹配且新鲜的双退出确认；`runtime_retained=true` 仅表示训练容器已清理。轻量 Windows 控制连接保持在线供远程恢复，`worker_online=false` 的节点不可调度，旧资源测量不作为当前值。原生 Linux 保留系统服务。
 
 断电或丢失心跳只表示失联。跨节点接手仍须原进程确认停止；已开始的实验还须声明完整续训能力，并具备中心完整接收、校验的检查点。无续训能力的任务不会被 AI 自动抢占后假装成功续训。用户手动停止、取消交接的实验不会被自动恢复。
 

@@ -104,9 +104,9 @@ class MobileHubMixin:
         state = self.state(summary=True)
         nodes = []
         for value in state["nodes"]:
-            node = _pick(value, ("id", "last_seen", "online", "mode", "display_name", "compute_policy", "resource_policy"))
+            node = _pick(value, ("id", "last_seen", "online", "worker_online", "mode", "display_name", "compute_policy", "resource_policy"))
             snapshot = value["snapshot"]
-            node["snapshot"] = _pick(snapshot, ("free_ram_mb", "disk_free_mb", "policy", "availability", "compute_control", "local_compute_policy", "ac_power", "capabilities", "execution_delivery", "delivery", "compute_policy_revision"))
+            node["snapshot"] = _pick(snapshot, ("free_ram_mb", "disk_free_mb", "policy", "availability", "compute_control", "host_control", "runtime_host", "local_compute_policy", "ac_power", "capabilities", "execution_delivery", "delivery", "compute_policy_revision"))
             node["snapshot"]["gpus"] = [_pick(gpu, ("uuid", "name", "total_mb", "free_mb", "local_enabled"))
                                         for gpu in snapshot.get("gpus", [])]
             nodes.append(node)

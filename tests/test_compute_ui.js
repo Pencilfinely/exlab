@@ -48,9 +48,15 @@ async function main(){
   assert.equal(compute.nodeState(worker).label,'等待 Worker 核验');
   worker.snapshot.compute_control={policy:{...desired},phase:'stopping',experiments_stopped:false,resources_released:false,detail:'正在保存'};
   assert.equal(compute.nodeState(worker).label,'正在保存并停止实验');
-  worker.snapshot.compute_control.phase='blocked';assert.equal(compute.nodeState(worker).label,'执行未完成 · 需要检查');
+  worker.snapshot.compute_control.phase='blocked';assert.equal(compute.nodeState(worker).label,'资源释放未完成 · 需要检查');
   worker.snapshot.compute_control={policy:{...desired},phase:'released',experiments_stopped:true,resources_released:true,detail:'控制代理及 Docker/WSL 保留'};
-  assert.equal(compute.nodeState(worker).label,'训练资源已释放 · 接单已暂停');
+  assert.equal(compute.nodeState(worker).label,'资源已释放 · 接单已暂停');
+  worker.snapshot.compute_control.runtime_retained=true;assert.equal(compute.nodeState(worker).label,'训练已停止 · 运行环境仍保留');
+  worker.snapshot.compute_control.runtime_retained=false;
+  worker.last_seen=0;worker.snapshot.host_control={online:true,matches:true,phase:'released'};
+  assert.equal(compute.nodeState(worker).label,'资源已释放 · 接单已暂停');
+  worker.snapshot.host_control.phase='restarting';assert.equal(compute.nodeState(worker).label,'正在恢复运行环境');
+  delete worker.snapshot.host_control;delete worker.last_seen;
   worker.snapshot.availability={...desired,reason:'新的请求'};assert.equal(compute.nodeState(worker).label,'等待 Worker 核验');
   worker.snapshot.availability=desired;worker.online=false;assert.equal(compute.nodeState(worker).label,'离线 · 当前执行状态未知');
   worker.online=true;worker.compute_policy.revision=9;assert.equal(compute.nodeState(worker).label,'策略待 Worker 接收');

@@ -19,7 +19,7 @@ namespace ExperimentManagerDesktop {
             string mode=availability==null?"":App.Text(availability,"mode");
             if(!matches)return mode=="stop"||mode=="release"?"等待 Worker 执行并核验；尚未确认停止或释放":mode=="drain"?"已暂停接单；实验继续运行":"允许接单";
             string phase=App.Text(receipt,"phase");
-            string label=phase=="released"&&App.Flag(receipt,"resources_released")&&App.Flag(receipt,"experiments_stopped")?"训练资源已释放 · 接单已暂停":phase=="stopped"&&App.Flag(receipt,"experiments_stopped")?"实验已停止 · 接单已暂停":phase=="stopping"?"正在保存并停止实验":phase=="releasing"?"正在释放训练资源":phase=="blocked"?"执行未完成 · 需要检查":phase=="admission_paused"?"已暂停接单 · 实验继续":phase=="available"?"允许接单":"等待执行核验";
+            string label=phase=="released"&&App.Flag(receipt,"resources_released")&&App.Flag(receipt,"experiments_stopped")?(App.Flag(receipt,"runtime_retained")?"训练已停止 · 运行环境仍保留":"资源已释放 · 接单已暂停"):phase=="stopped"&&App.Flag(receipt,"experiments_stopped")?"实验已停止 · 接单已暂停":phase=="stopping"?"正在保存并停止实验":phase=="releasing"?"正在释放资源":phase=="blocked"?"执行未完成 · 需要检查":phase=="admission_paused"?"已暂停接单 · 实验继续":phase=="available"?"允许接单":"等待执行核验";
             return (App.Flag(value,"running")?"":"上次回报：")+label+"；"+App.Text(receipt,"detail");
         }
         internal const string RunKey="Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -185,6 +185,7 @@ namespace ExperimentManagerDesktop {
         internal static async Task<string> Release(string distribution,Dictionary<string,object> state,bool closeOtherProcesses,
                 Func<int,string,string[],Task<string>> execute,IEnumerable<string> stopContainers=null) {
             state["resources_released"]=false;
+            state["docker_stopped"]=false;state["wsl_stopped"]=false;
             if(String.IsNullOrWhiteSpace(distribution)||distribution.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException("请选择算力端使用的 Ubuntu。");
             if(closeOtherProcesses&&!App.Flag(state,"agents_stopped"))
@@ -230,6 +231,7 @@ namespace ExperimentManagerDesktop {
                 }
                 catch(Exception) { /* An empty, verified Docker may remain running on older CLI versions. */ }
             }
+            state["docker_stopped"]=dockerStopped;
             if(!App.Flag(state,"can_terminate_wsl")&&!closeOtherProcesses)
                 return "Docker "+(dockerStopped?"已停止":"保持运行")+"；Ubuntu 中另有进程，WSL 内存尚未释放。可点击“停用并释放 Docker / WSL”确认关闭。";
             string[] running=RunningDistributions(await execute(15000,"wsl.exe",new[]{"--list","--running","--quiet"}));
@@ -240,6 +242,7 @@ namespace ExperimentManagerDesktop {
             string[] after=RunningDistributions(await execute(15000,"wsl.exe",new[]{"--list","--running","--quiet"}));
             foreach(string name in after)if(name.Equals(distribution,StringComparison.OrdinalIgnoreCase))
                 return "Ubuntu 被其他程序重新启动，WSL 内存尚未完全释放；请关闭相关会话后重试。";
+            state["wsl_stopped"]=after.Length==0;
             if(all&&after.Length==0) {
                 state["resources_released"]=true;
                 return "WSL 已关闭，内存已释放；Center 保持运行。镜像、数据和实验记录保留。";

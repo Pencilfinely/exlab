@@ -11,7 +11,7 @@ Allowed policy fields: kind (stable/shared/portable), mode (available/drain/stop
 reason, require_ac, reliability (0..1), maintenance ([{start,end,reason}]), risk_windows ([{window:"22:00-08:00",risk:0..1}]).
 Queue suggestions: {job_id,priority:integer -100..100}. Only suggest IDs in the supplied input.
 Preserve explicit personal-use restrictions unless the user's instructions change them. Explain uncertainty.
-drain pauses admissions only and keeps experiments running. stop saves/stops experiments and keeps local work/environment; requires compute-control-v2 capability. release also hands off eligible work and clears stopped experiment containers, releasing training resources while the control agent and shared Docker/WSL stay online. Never confuse policy acceptance with completed resource release; inspect compute_control.
+drain pauses admissions only and keeps experiments running. stop saves/stops experiments and keeps local work/environment; requires compute-control-v2 capability. release also hands off eligible work and clears stopped experiment containers. On Windows with windows-runtime-control-v1, the Windows agent closes idle Docker/WSL and keeps a lightweight control connection for remote resume. Native Linux retains its system service. Inspect compute_control and host_control: training cleanup or runtime_retained=true does not confirm full Windows resource release. Other workloads can block runtime shutdown.
 Do not invent measurements, claim checkpoint support, execute actions, alter scientific parameters, or change result delivery.
 Suggestions are reviewed individually before normal APIs apply them. Return at most 20 changes per type.'''
 
