@@ -5,6 +5,7 @@ using System.IO;
 using System.Collections;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Threading;
 using Microsoft.Win32;
 
 namespace ExperimentManagerDesktop {
@@ -34,21 +35,47 @@ namespace ExperimentManagerDesktop {
         }
         internal static string DockerCli {
             get { string path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"Docker","Docker","resources","bin","docker.exe");
+                if(File.Exists(path))return path;
+                path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","DockerDesktop","resources","bin","docker.exe");
                 return File.Exists(path)?path:"docker.exe"; }
         }
+        static readonly SemaphoreSlim dockerStartup=new SemaphoreSlim(1,1);
+        internal static async Task<Dictionary<string,object>> DockerStatus(Func<Task<string>> inspect=null,Func<bool> engineActive=null) {
+            var state=new Dictionary<string,object>{{"docker_ready",false},{"detail","Docker Desktop 尚未启动。"}};
+            if(engineActive==null)engineActive=DesktopDockerRecovery.EngineActive;
+            if(!engineActive())return state;
+            try {
+                string output=inspect==null?await Run(10000,DockerCli,new[]{"--context","desktop-linux","info","--format","{{json .}}"}):await inspect();
+                var value=App.Json.Deserialize<Dictionary<string,object>>(output);
+                state["docker_ready"]=App.Text(value,"ID").Length>0&&App.Text(value,"OSType")=="linux";
+                state["detail"]=App.Flag(state,"docker_ready")?"Docker Linux 引擎已就绪。":"Docker Linux 引擎尚未就绪。";
+            } catch(Exception ex) {state["detail"]="Docker 尚未连接："+ex.Message;}
+            return state;
+        }
         internal static async Task StartDocker() {
-            await Task.Run(()=> {
-                try { App.RunWithTimeout(120000,DockerCli,"desktop","start");return; }
-                catch(Exception) { }
+            await dockerStartup.WaitAsync();
+            try {await Task.Run(()=> {
+                string local=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if(DesktopDockerRecovery.DesktopActive()) {
+                    if(DesktopDockerRecovery.EngineActive())return;
+                    string failure=DesktopDockerRecovery.Failure(local,DateTime.UtcNow.AddMinutes(-10));
+                    if(failure.Length>0)throw new IOException(failure);
+                    return;
+                }
+                var preserved=DesktopDockerRecovery.Prepare(local);
+                if(preserved.Count>0)App.Write(Path.Combine(App.SettingsRoot,"docker-recovery.json"),new{time=DateTime.UtcNow.ToString("o"),preserved=preserved});
+                if(DesktopDockerRecovery.DesktopActive())return;
                 string executable=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"Docker","Docker","Docker Desktop.exe");
-                if(!File.Exists(executable))executable=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","DockerDesktop","Docker Desktop.exe");
+                if(!File.Exists(executable))executable=Path.Combine(local,"Programs","DockerDesktop","Docker Desktop.exe");
                 if(!File.Exists(executable))throw new IOException("未找到 Docker Desktop。请先安装，并启用所选 Ubuntu 的 WSL 集成。");
+                // Launch once, then observe the engine. A timed-out desktop CLI
+                // must never trigger a second GUI launch or leave start helpers.
                 Process.Start(new ProcessStartInfo(executable){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden});
-            });
+            });}finally{dockerStartup.Release();}
         }
         internal static async Task<bool> EnsureDocker(Func<Task<Dictionary<string,object>>> inspect,
                 Func<Dictionary<string,object>,bool> confirmStart,Func<Task> start,Action<string> progress,
-                Func<Task> delay=null,TimeSpan? timeout=null) {
+                Func<Task> delay=null,TimeSpan? timeout=null,Func<string> startupFailure=null) {
             var state=await inspect();
             if(App.Flag(state,"docker_ready"))return true;
             // Manual activation is allowed even when this client originally
@@ -58,6 +85,7 @@ namespace ExperimentManagerDesktop {
             while(watch.Elapsed<(timeout??TimeSpan.FromMinutes(2))) {
                 if(delay==null)await Task.Delay(2000);else await delay();
                 state=await inspect();if(App.Flag(state,"docker_ready"))return true;
+                string failure=startupFailure==null?"":startupFailure();if(failure.Length>0)throw new IOException(failure);
             }
             throw new IOException("Docker 尚未就绪。请检查 Docker Desktop 的 Linux containers、所选 Ubuntu 的 WSL 集成，以及本机 Docker context。然后重试。");
         }

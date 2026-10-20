@@ -431,6 +431,7 @@ namespace ExperimentManagerDesktop {
         readonly DesktopIcons trayIcons=new DesktopIcons();
         NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
         DesktopHostControl hostControl;bool hostPumping;DateTime nextHost=DateTime.MinValue,nextHostAttempt=DateTime.MinValue;
+        readonly DesktopRetrySchedule hostRestoreRetry=new DesktopRetrySchedule();string lastWorkerStartError="";
         UpdateForm updateDialog;
         BrowserAppWindow browserWindowIcons;
         bool resumeWorkerAfterUpdate;
@@ -734,17 +735,22 @@ namespace ExperimentManagerDesktop {
                         await Task.Run(()=>hostControl.Sync());DisplayInactive();
                     } finally {busy=false;}
                 } else if(mode=="available"&&App.Flag(settings,"host_managed_release")) {
-                    if(DateTime.UtcNow<nextHostAttempt)return;
-                    nextHostAttempt=DateTime.UtcNow.AddSeconds(30);
+                    if(!hostRestoreRetry.Ready(intent,DateTime.UtcNow))return;
                     if(App.Flag(desired,"require_ac")&&SystemInformation.PowerStatus.PowerLineStatus!=PowerLineStatus.Online) {
+                        hostRestoreRetry.Failed(DateTime.UtcNow);
                         hostControl.Observe(intent,"blocked","仍要求接通电源；Docker / WSL 保持关闭。 ");
                         await Task.Run(()=>hostControl.Sync());return;
                     }
                     hostControl.Observe(intent,"restarting","中控已恢复接单，Windows 正在恢复 Docker / WSL 和原节点。");
                     await Task.Run(()=>hostControl.Sync());bool restarted=await StartWorkerAsync(true);
                     if(restarted) {
+                        hostRestoreRetry.Completed();
                         settings["host_managed_release"]=false;App.Write(App.SettingsFile,settings);
                         hostControl.Observe(intent,"retained","运行环境已恢复；实验执行状态由 Worker 继续回报。");
+                        await Task.Run(()=>hostControl.Sync());
+                    } else {
+                        hostRestoreRetry.Failed(DateTime.UtcNow);
+                        hostControl.Observe(intent,"blocked","恢复接单失败："+lastWorkerStartError+"；稍后自动重试。");
                         await Task.Run(()=>hostControl.Sync());
                     }
                 }
@@ -791,16 +797,23 @@ namespace ExperimentManagerDesktop {
         async void RefreshState(){if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
         async void StartWorker(){await StartWorkerAsync(false);}
         async Task<bool> StartWorkerAsync(bool automatic){
-            bool started=false;
+            bool started=false;lastWorkerStartError="未能启动原节点，请检查客户端状态。";
             await Execute(async()=>{
-                if(!await EnsureDocker(automatic))return;
-                summary.Text="正在准备算力…";var state=await WorkerCommand("install");Display(state);
-                if(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing")
-                    throw new InvalidOperationException(App.Text(state,"detail","算力尚未启动，请检查状态后重试。"));
-                hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
-                deactivated=false;settings["deactivated"]=false;settings["resources_released"]=false;
-                if(!automatic){settings["host_managed_release"]=false;settings["host_local_hold"]=false;}
-                App.Write(App.SettingsFile,settings);started=true;
+                try {
+                    if(!await EnsureDocker(automatic))return;
+                    settings["resources_released"]=false;App.Write(App.SettingsFile,settings);
+                    summary.Text="正在准备算力…";var state=await WorkerCommand("install");Display(state);
+                    if(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing")
+                        throw new InvalidOperationException(App.Text(state,"detail","算力尚未启动，请检查状态后重试。"));
+                    hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
+                    deactivated=false;settings["deactivated"]=false;settings["resources_released"]=false;
+                    if(!automatic){settings["host_managed_release"]=false;settings["host_local_hold"]=false;}
+                    App.Write(App.SettingsFile,settings);started=true;
+                } catch(Exception ex) {
+                    lastWorkerStartError=ex.Message;
+                    settings["release_detail"]="恢复接单失败："+ex.Message;
+                    App.Write(App.SettingsFile,settings);throw;
+                }
             });
             return started;
         }
@@ -861,10 +874,13 @@ namespace ExperimentManagerDesktop {
             }catch(Exception ex){summary.Text="粘贴失败："+ex.Message;}
         }
         async Task<bool> EnsureDocker(bool automatic=false){
-            return await DesktopRuntime.EnsureDocker(()=>WorkerCommand("runtime-status"),
+            DateTime attempt=DateTime.UtcNow;
+            return await DesktopRuntime.EnsureDocker(()=>DesktopRuntime.DockerStatus(),
                 state=>automatic||MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",
                     App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)==DialogResult.Yes,
-                DesktopRuntime.StartDocker,message=>summary.Text=message);
+                DesktopRuntime.StartDocker,message=>{
+                    settings["resources_released"]=false;settings["release_detail"]=message;App.Write(App.SettingsFile,settings);summary.Text=message;
+                },startupFailure:()=>DesktopDockerRecovery.Failure(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),attempt));
         }
         void ReleaseWorkerHold(){
             if(workerHold!=null){try{if(!workerHold.HasExited)workerHold.Kill();}catch(InvalidOperationException){}workerHold.Dispose();workerHold=null;}heldDistribution="";

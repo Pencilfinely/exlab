@@ -22,6 +22,7 @@ EXTRA_SOURCES = (ROOT / 'deploy/desktop/DesktopUpdates.cs', ROOT / 'deploy/deskt
                  ROOT / 'deploy/desktop/DesktopIcons.cs', ROOT / 'deploy/desktop/BrowserAppWindow.cs',
                  ROOT / 'deploy/desktop/WorkerGpuForm.cs', ROOT / 'deploy/desktop/DesktopRuntime.cs',
                  ROOT / 'deploy/desktop/DesktopHostControl.cs',
+                 ROOT / 'deploy/desktop/DesktopDockerRecovery.cs',
                  ROOT / 'deploy/desktop/ComputePauseForm.cs')
 MANIFEST = ROOT / 'deploy/desktop/app.manifest'
 ICONS = {'controller': ROOT / 'assets/center.ico', 'worker': ROOT / 'assets/worker.ico'}

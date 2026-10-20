@@ -52,7 +52,7 @@ cd mobile/android
 
 测试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`；用 `adb install -r app/build/outputs/apk/debug/app-debug.apk` 安装。正式分发须另行配置发布签名，仓库不含签名密钥。
 
-已分发 APK 的后续更新必须沿用原签名材料、包名，并递增 `versionCode`；不要使用临时 CI 运行器新建的调试密钥。0.5.17 继续沿用原本机调试密钥，版本码由 7 增至 8。原密钥应单独安全备份，不能提交仓库；本机丢失密钥后不能直接覆盖原安装。桌面发布工作流不自动发布临时签名的 APK。
+已分发 APK 的后续更新必须沿用原签名材料、包名，并递增 `versionCode`；不要使用临时 CI 运行器新建的调试密钥。0.5.20 继续沿用原本机调试密钥，版本码由 10 增至 11。原密钥应单独安全备份，不能提交仓库；本机丢失密钥后不能直接覆盖原安装。桌面发布工作流不自动发布临时签名的 APK。
 
 当前测试包的交付名称为 `ExLabMonitor-0.5.17-android-debug.apk`，与桌面安装包一同放在 `dist/0.5.17/`（相对仓库根目录），校验值写入 `SHA256SUMS.txt`。它沿用原 Android 调试签名和应用标识，以便覆盖升级并保留 WebView 配对数据；真机验收仍需实际手机执行。
 
@@ -92,7 +92,7 @@ Mate 70 Pro / HarmonyOS 6 也可以先尝试通过卓易通安装此 APK。[华�
 
 2026-10-18 / 0.5.17 构建验证：
 
-- Android 单元测试、APK 构建与 Lint 均通过。包名仍为 `com.pencilfinely.expmonitor`，版本 `0.5.17`、versionCode `8`，最低 API 28、目标 API 35。
+- Android 单元测试、APK 构建与 Lint 均通过。包名仍为 `com.pencilfinely.expmonitor`，版本 `0.5.20`、versionCode `11`，最低 API 28、目标 API 35。
 - `apksigner verify` 通过，签名证书 SHA-256 与 0.5.2 已分发包完全相同；原配对数据可在覆盖升级时保留。新 APK 的文件校验值见本次发布的 `SHA256SUMS.txt`。
 - AI 托管、动态节点和执行状态页面随 Center 更新，旧外壳也能加载共享页面。此次修复 Windows Worker 停用时误将 ExLab 自带算法镜像仓库当成其他容器的释放阻塞；列明其他容器并支持确认停止，区分停用与资源释放完成。HarmonyOS 工程版本同步至 0.5.17，未生成原生 HAP；两端均未执行真机验收。
 

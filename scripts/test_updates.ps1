@@ -446,6 +446,60 @@ static class InstallProbeTests {
                 ()=>{starts++;return Task.FromResult(0);},message=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();
         } catch(IOException){timedOut=true;}
         Assert(timedOut&&starts==1,"Unavailable Docker was incorrectly accepted after startup timeout.");
+        probes=0;bool reported=false;
+        try {
+            DesktopRuntime.EnsureDocker(
+                ()=>{probes++;return Task.FromResult(new Dictionary<string,object>{{"docker_ready",false}});},state=>true,
+                ()=>Task.FromResult(0),message=>{},()=>Task.FromResult(0),startupFailure:()=>"sailor-ingest.sock startup failure").GetAwaiter().GetResult();
+        }catch(IOException ex){reported=ex.Message.Contains("sailor-ingest.sock");}
+        Assert(reported&&probes==2,"Known Docker startup failure was swallowed or retried until the generic timeout.");
+        var dormant=DesktopRuntime.DockerStatus(()=>{throw new Exception("Missing engine invoked a daemon query.");},()=>false).GetAwaiter().GetResult();
+        Assert(!App.Flag(dormant,"docker_ready"),"Missing Windows engine was called ready.");
+        foreach(string info in new[]{"{}","{\"ID\":\"original\",\"OSType\":\"windows\"}","not json"})
+            Assert(!App.Flag(DesktopRuntime.DockerStatus(()=>Task.FromResult(info),()=>true).GetAwaiter().GetResult(),"docker_ready"),"Unusable Windows engine was accepted.");
+        Assert(App.Flag(DesktopRuntime.DockerStatus(()=>Task.FromResult("{\"ID\":\"original\",\"OSType\":\"linux\"}"),()=>true).GetAwaiter().GetResult(),"docker_ready"),"Windows-only Linux engine probe rejected a ready Docker.");
+    }
+    static void DockerRecovery(string folder) {
+        string root=Path.Combine(folder,"docker recovery");Directory.CreateDirectory(root);
+        string secrets=Path.Combine(root,"docker-secrets-engine"),run=Path.Combine(root,"Docker","run");
+        Directory.CreateDirectory(secrets);Directory.CreateDirectory(run);
+        string engine=Path.Combine(secrets,"engine.sock"),ingest=Path.Combine(run,"sailor-ingest.sock");
+        File.WriteAllText(engine,"socket marker");File.WriteAllText(ingest,"socket marker");
+        File.WriteAllText(Path.Combine(secrets,"keep.txt"),"preserve whole directory");
+        string persistence=Path.Combine(root,"Docker","wsl","data");Directory.CreateDirectory(persistence);
+        File.WriteAllText(Path.Combine(persistence,"disk.vhdx"),"original docker data");
+        Assert(!DesktopDockerRecovery.IsUnixSocket(engine),"A normal file was identified as a native AF_UNIX socket.");
+        Assert(!DesktopDockerRecovery.IsUnixSocket(Path.Combine(run,"absent.sock")),"Missing socket requested recovery.");
+        Assert(DesktopDockerRecovery.Prepare(root,()=>true).Count==0,"Normal files in a Docker runtime directory were moved.");
+        Func<string,bool> socket=path=>File.Exists(path)&&File.ReadAllText(path)=="socket marker";
+        Assert(DesktopDockerRecovery.Prepare(root,()=>false,socket).Count==0&&File.Exists(engine),"An active Docker runtime was relocated.");
+        int checks=0;bool blocked=false;
+        try{DesktopDockerRecovery.Prepare(root,()=>++checks==1,socket);}catch(IOException){blocked=true;}
+        Assert(blocked&&File.Exists(engine)&&File.Exists(ingest),"Recovery did not recheck for a concurrent Docker start before moving files.");
+        var moved=DesktopDockerRecovery.Prepare(root,()=>true,socket);
+        Assert(moved.Count==2&&Directory.Exists(secrets)&&Directory.Exists(run),"Both known runtime directories were not recreated.");
+        Assert(File.ReadAllText(Path.Combine(moved[0],"engine.sock"))=="socket marker"&&File.Exists(Path.Combine(moved[0],"keep.txt")),"Secrets runtime was not preserved intact.");
+        Assert(File.Exists(Path.Combine(moved[1],"sailor-ingest.sock"))&&Directory.GetFileSystemEntries(run).Length==0,"Ingest runtime was not preserved and cleared for startup.");
+        Assert(File.ReadAllText(Path.Combine(persistence,"disk.vhdx"))=="original docker data","Docker persistent data was touched.");
+        File.WriteAllText(Path.Combine(run,"unrelated.sock"),"socket marker");
+        Assert(DesktopDockerRecovery.Prepare(root,()=>true,socket).Count==0,"Unknown endpoints triggered a directory move.");
+        File.WriteAllText(engine,"socket marker");var second=DesktopDockerRecovery.Prepare(root,()=>true,socket);
+        Assert(second.Count==1&&second[0]!=moved[0]&&Directory.Exists(moved[0]),"A repeated recovery overwrote a previous preserved runtime.");
+        string error=Path.Combine(root,"Docker","backend.error.json");
+        File.WriteAllText(error,"rename sailor-ingest.sock: The file cannot be accessed by the system.");
+        Assert(DesktopDockerRecovery.Failure(root,DateTime.UtcNow.AddMinutes(-1)).Contains("sailor-ingest.sock"),"Ingest startup cause was lost.");
+        Assert(DesktopDockerRecovery.Failure(root,DateTime.UtcNow.AddMinutes(1))=="","An earlier failure poisoned a new startup.");
+        File.WriteAllText(error,"unrelated startup failure");
+        Assert(DesktopDockerRecovery.Failure(root,DateTime.UtcNow.AddMinutes(-1))=="","Unrelated errors triggered socket recovery instructions.");
+        var retry=new DesktopRetrySchedule();var now=DateTime.UtcNow;
+        Assert(retry.Ready("intent-a",now),"Initial policy could not start.");
+        for(int i=0;i<8;i++) {
+            retry.Failed(now);double seconds=(retry.Next-now).TotalSeconds;
+            Assert(seconds==Math.Min(600,30*Math.Pow(2,Math.Min(i,5)))&&!retry.Ready("intent-a",now.AddSeconds(seconds-1)),"Restore retry did not back off or exceeded the limit.");
+            now=retry.Next;Assert(retry.Ready("intent-a",now),"Restore stopped retrying after a failure.");
+        }
+        Assert(retry.Ready("intent-b",now.AddMinutes(-1)),"A new policy inherited an earlier policy's delay.");
+        retry.Failed(now);retry.Completed();Assert(retry.Ready("intent-b",now),"Successful startup did not reset backoff.");
     }
     static void WorkerCompletion() {
         string package="/mnt/c/Package with spaces/\u7b97\u529b";
@@ -795,7 +849,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);
+            WorkerCompletion();InstallerWiring();ComputeActivation();DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
@@ -845,7 +899,7 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','ComputePauseForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }
