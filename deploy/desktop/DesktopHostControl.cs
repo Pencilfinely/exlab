@@ -6,11 +6,14 @@ using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 
 namespace ExperimentManagerDesktop {
     // This connection runs in Windows and never needs a running WSL distribution.
     internal sealed class DesktopHostControl {
         readonly string path;
+        readonly object syncGate=new object();
+        readonly object stateGate=new object();
         Dictionary<string,object> link;
         internal Dictionary<string,object> Report { get; private set; }
         internal bool Linked { get { return link!=null; } }
@@ -34,32 +37,45 @@ namespace ExperimentManagerDesktop {
                 throw new InvalidDataException("Windows 控制连接无效，请启用算力后重新连接。");
         }
         void Save(){App.Write(path,new Dictionary<string,object>{{"link",link},{"report",Report}});}
-        internal void Disconnect(){link=null;Report=null;Save();}
+        internal void Disconnect(){lock(stateGate){link=null;Report=null;Save();}}
         internal void Connect(Dictionary<string,object> info,string distribution) {
             var next=new Dictionary<string,object>{{"node_id",App.Text(info,"node_id")},{"hub_url",App.Text(info,"hub_url")},
                 {"token",App.Text(info,"token")},{"distribution",distribution},{"host_id",Guid.NewGuid().ToString("N")}};
-            Validate(next);link=next;Report=null;Save();
+            Validate(next);lock(stateGate){link=next;Report=null;Save();}
         }
         internal void Observe(string intent,string phase,string detail,Dictionary<string,object> runtime=null) {
             bool released=runtime!=null&&App.Flag(runtime,"resources_released")&&App.Flag(runtime,"docker_stopped")&&App.Flag(runtime,"wsl_stopped");
             if(phase=="released"&&!released)throw new InvalidDataException("尚未确认 Docker / WSL 已释放。");
+            lock(stateGate) {
             Report=new Dictionary<string,object>{{"intent",intent},{"phase",phase},{"detail",detail.Length>1000?detail.Substring(0,1000):detail},
                 {"experiments_stopped",runtime!=null&&App.Flag(runtime,"agents_stopped")},
                 {"docker_stopped",runtime!=null&&App.Flag(runtime,"docker_stopped")},
                 {"wsl_stopped",runtime!=null&&App.Flag(runtime,"wsl_stopped")},{"resources_released",released}};
             Save();
+            }
         }
         internal Dictionary<string,object> Sync() {
+            // A runtime operation and the regular heartbeat can both request a
+            // sync. Serialize requests and snapshot the immutable link/report so
+            // an older response cannot validate a newly connected node.
+            lock(syncGate) {
+                Dictionary<string,object> currentLink,currentReport;
+                lock(stateGate){currentLink=link;currentReport=Report;}
+                return SyncSnapshot(currentLink,currentReport);
+            }
+        }
+        static Dictionary<string,object> SyncSnapshot(Dictionary<string,object> link,Dictionary<string,object> report) {
             if(link==null)throw new InvalidOperationException("尚未连接 Windows 控制代理。");
+            var json=new JavaScriptSerializer {MaxJsonLength=8*1024*1024};
             var request=(HttpWebRequest)WebRequest.Create(App.Text(link,"hub_url").TrimEnd('/')+"/api/host/sync");
             request.Method="POST";request.ContentType="application/json";request.Timeout=10000;request.ReadWriteTimeout=10000;
             request.Proxy=null;request.AllowAutoRedirect=false;
             request.Headers[HttpRequestHeader.Authorization]="Bearer "+App.Text(link,"token");
-            byte[] bytes=Encoding.UTF8.GetBytes(App.Json.Serialize(new Dictionary<string,object>{{"node_id",App.Text(link,"node_id")},
-                {"host_id",App.Text(link,"host_id")},{"report",Report}}));
+            byte[] bytes=Encoding.UTF8.GetBytes(json.Serialize(new Dictionary<string,object>{{"node_id",App.Text(link,"node_id")},
+                {"host_id",App.Text(link,"host_id")},{"report",report}}));
             request.ContentLength=bytes.Length;using(var output=request.GetRequestStream())output.Write(bytes,0,bytes.Length);
             using(var response=request.GetResponse())using(var input=new StreamReader(response.GetResponseStream(),Encoding.UTF8)) {
-                var value=App.Json.Deserialize<Dictionary<string,object>>(input.ReadToEnd());object raw;
+                var value=json.Deserialize<Dictionary<string,object>>(input.ReadToEnd());object raw;
                 var desired=value.TryGetValue("desired",out raw)?raw as Dictionary<string,object>:null;
                 if(App.Text(value,"protocol")!="1"||App.Text(value,"node_id")!=App.Text(link,"node_id")||desired==null||
                         !Regex.IsMatch(App.Text(desired,"intent"),"\\A[a-f0-9]{64}\\z")||
@@ -79,6 +95,30 @@ namespace ExperimentManagerDesktop {
         internal static async Task<bool> RuntimeClosed(Func<Task<string>> readInventory,Func<Task<bool>> dockerStopped) {
             string inventory=await readInventory();
             return DesktopRuntime.RunningDistributions(inventory).Length==0&&await dockerStopped();
+        }
+    }
+    // Keep the Windows connection alive while a single runtime operation waits
+    // for Docker or WSL. Tick never waits for that operation to complete.
+    internal sealed class DesktopHostLoop {
+        bool pulsing;
+        internal bool Applying {get;private set;}
+        internal Task Operation {get;private set;}
+        internal async Task Tick(Func<Task<Dictionary<string,object>>> sync,
+                Func<Dictionary<string,object>,Task> apply,Func<bool> canApply,Action<Exception> failed) {
+            if(pulsing)return;
+            pulsing=true;
+            try {
+                var desired=await sync();
+                if(!Applying&&canApply()) {
+                    Applying=true;
+                    Operation=Run(desired,apply,failed);
+                }
+            } finally {pulsing=false;}
+        }
+        async Task Run(Dictionary<string,object> desired,Func<Dictionary<string,object>,Task> apply,Action<Exception> failed) {
+            try {await apply(desired);}
+            catch(Exception ex){failed(ex);}
+            finally {Applying=false;}
         }
     }
 }

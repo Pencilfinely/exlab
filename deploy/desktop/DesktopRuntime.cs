@@ -43,7 +43,7 @@ namespace ExperimentManagerDesktop {
         internal static async Task<Dictionary<string,object>> DockerStatus(Func<Task<string>> inspect=null,Func<bool> engineActive=null) {
             var state=new Dictionary<string,object>{{"docker_ready",false},{"detail","Docker Desktop 尚未启动。"}};
             if(engineActive==null)engineActive=DesktopDockerRecovery.EngineActive;
-            if(!engineActive())return state;
+            if(!await Task.Run(engineActive))return state;
             try {
                 string output=inspect==null?await Run(10000,DockerCli,new[]{"--context","desktop-linux","info","--format","{{json .}}"}):await inspect();
                 var value=App.Json.Deserialize<Dictionary<string,object>>(output);

@@ -847,9 +847,33 @@ static class InstallProbeTests {
         Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult(""),()=>Task.FromResult(false)).GetAwaiter().GetResult(),"WSL-only closure masqueraded as Docker closure.");
         File.Delete(path);
     }
+    static async Task HostHeartbeatDuringRestore() {
+        var loop=new DesktopHostLoop();var pending=new TaskCompletionSource<bool>();
+        int beats=0,starts=0,errors=0;bool allowed=true;
+        var desired=new Dictionary<string,object>{{"mode","available"}};
+        Func<Task<Dictionary<string,object>>> sync=()=>{beats++;return Task.FromResult(desired);};
+        Func<Dictionary<string,object>,Task> restore=request=>{starts++;return pending.Task;};
+        await loop.Tick(sync,restore,()=>allowed,error=>errors++);
+        Assert(loop.Applying&&starts==1&&!loop.Operation.IsCompleted,"Slow restore was not started independently.");
+        for(int i=0;i<20;i++)await loop.Tick(sync,restore,()=>allowed,error=>errors++);
+        Assert(beats==21&&starts==1,"Docker startup blocked Windows heartbeats or started duplicate restores.");
+        allowed=false;pending.SetResult(true);await loop.Operation;
+        await loop.Tick(sync,restore,()=>allowed,error=>errors++);
+        Assert(!loop.Applying&&beats==22&&starts==1,"Busy runtime prevented heartbeat or allowed a new operation.");
+        allowed=true;
+        await loop.Tick(sync,request=>{throw new IOException("restore failed");},()=>allowed,error=>errors++);
+        await loop.Operation;
+        Assert(errors==1&&!loop.Applying,"A failed operation stranded the Windows control loop.");
+        await loop.Tick(sync,request=>{starts++;return Task.FromResult(0);},()=>allowed,error=>errors++);
+        Assert(beats==24&&starts==2,"Restore failure prevented subsequent heartbeats and operations.");
+        var gated=new TaskCompletionSource<Dictionary<string,object>>();
+        Task first=loop.Tick(()=>gated.Task,restore,()=>false,error=>errors++);
+        await loop.Tick(()=>{throw new Exception("Duplicate heartbeat");},restore,()=>false,error=>errors++);
+        gated.SetResult(desired);await first;
+    }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);
+            WorkerCompletion();InstallerWiring();ComputeActivation();DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");

@@ -101,6 +101,21 @@ namespace ExperimentManagerDesktop {
                 time=DateTime.UtcNow.ToString("o"),role=Role,version=Version,stage=stage,status=status,detail=detail }); }
             catch(IOException) { } catch(UnauthorizedAccessException) { }
         }
+        internal static void ClientTrace(string stage,string detail="") {
+            try {
+                string path=Path.Combine(SettingsRoot,"client-lifecycle.jsonl");
+                var lines=File.Exists(path)&&new FileInfo(path).Length<131072?new List<string>(File.ReadAllLines(path)):new List<string>();
+                if(lines.Count>=100)lines.RemoveRange(0,lines.Count-99);
+                lines.Add(Json.Serialize(new{time=DateTime.UtcNow.ToString("o"),pid=Process.GetCurrentProcess().Id,
+                    role=Role,stage=stage,detail=detail.Length>2000?detail.Substring(0,2000):detail}));
+                Directory.CreateDirectory(SettingsRoot);File.WriteAllLines(path,lines,new UTF8Encoding(false));
+            } catch(IOException) {}catch(UnauthorizedAccessException) {}
+        }
+        internal static void ClientError(string stage,Exception error) {
+            ClientTrace(stage,error.Message);
+            try {Write(Path.Combine(SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),stage=stage,detail=error.Message});}
+            catch(IOException) {}catch(UnauthorizedAccessException) {}
+        }
         internal static bool CleanupInstalledPackage() {
             string receipt=Path.Combine(SettingsRoot,"installer-cleanup.json");
             using(var guard=new Mutex(false,InstanceKey+"-InstallerCleanup")) {
@@ -235,6 +250,9 @@ namespace ExperimentManagerDesktop {
                     if(role!=null) using(var reader=new StreamReader(role)) Worker=reader.ReadToEnd().Trim()=="worker";
                     else Worker=File.ReadAllText(Path.Combine(Package,"release-role.json")).Contains("worker");
                 }
+                AppDomain.CurrentDomain.UnhandledException+=(sender,eventArgs)=>{
+                    var error=eventArgs.ExceptionObject as Exception;if(error!=null)ClientError("unhandled_exception",error);
+                };
                 if(Has(args,"--cleanup-installer")) {
                     var until=DateTime.UtcNow.AddMinutes(5);
                     while(DateTime.UtcNow<until) {
@@ -278,12 +296,13 @@ namespace ExperimentManagerDesktop {
                 using(var mutex=new Mutex(true,key,out created)) using(var show=new EventWaitHandle(false,EventResetMode.AutoReset,key+"-Open")) {
                     if(!created) { show.Set(); return; }
                     using(var form=new ClientForm(args)) {
+                        ClientTrace("client_started");
                         var handle=form.Handle;
                         var monitor=new Thread(()=> { while(show.WaitOne()) { if(form.IsDisposed) break; try { form.BeginInvoke((Action)(()=>form.OpenFromTray())); } catch(InvalidOperationException) { break; } } });
                         monitor.IsBackground=true; monitor.Start(); Application.Run(form); show.Set();
                     }
                 }
-            } catch(Exception ex) { if(Has(args,"--cleanup-installer")){UpdateReport("installer_cleanup","pending",ex.Message);Environment.ExitCode=1;return;} if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,Title,MessageBoxButtons.OK,MessageBoxIcon.Error); }
+            } catch(Exception ex) { ClientError("main_failed",ex); if(Has(args,"--cleanup-installer")){UpdateReport("installer_cleanup","pending",ex.Message);Environment.ExitCode=1;return;} if(Has(args,"--apply-update")||Has(args,"--after-update"))UpdateReport(Has(args,"--after-update")?"client_start":"installer_start","failed",ex.Message); if(Has(args,"--self-test")||Has(args,"--install")) {Write(Arg(args,"--report")??Path.Combine(Path.GetTempPath(),"expman-desktop-error.json"),new{status="failed",detail=ex.Message});Environment.ExitCode=1;}else MessageBox.Show(ex.Message,Title,MessageBoxButtons.OK,MessageBoxIcon.Error); }
         }
     }
 
@@ -375,6 +394,13 @@ namespace ExperimentManagerDesktop {
                         command.AddRange(arguments);
                         return App.Command("wsl.exe",command.ToArray());
                     });
+                    // Bind the Windows control connection during installation,
+                    // even when compute intentionally remains deactivated.
+                    var host=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));
+                    var info=App.Command("wsl.exe","-d",distribution,"--exec","bash",package+"/Client-Worker.sh","host-info",
+                        "--service-root",App.Text(stopped,"service_root"));
+                    if(App.Text(info,"node_id")!=App.Text(stopped,"node_id"))throw new InvalidDataException("Windows 控制连接与原节点不一致，安装交接未完成。");
+                    host.Connect(info,distribution);
                 }
                 if(!App.Worker) settings["data_root"]=Path.GetFullPath(dataPath);
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
@@ -431,6 +457,7 @@ namespace ExperimentManagerDesktop {
         readonly DesktopIcons trayIcons=new DesktopIcons();
         NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
         DesktopHostControl hostControl;bool hostPumping;DateTime nextHost=DateTime.MinValue,nextHostAttempt=DateTime.MinValue;
+        readonly DesktopHostLoop hostLoop=new DesktopHostLoop();
         readonly DesktopRetrySchedule hostRestoreRetry=new DesktopRetrySchedule();string lastWorkerStartError="";
         UpdateForm updateDialog;
         BrowserAppWindow browserWindowIcons;
@@ -528,6 +555,7 @@ namespace ExperimentManagerDesktop {
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
             timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpHostControl();await PumpUpdates();if(!exiting)RefreshState();};
             Shown+=async (s,e)=> {
+                timer.Start();App.ClientTrace("client_shown");
                 if(startingAfterUpdate)App.UpdateReport("client_start","launched");
                 if(App.Worker) {
                     await Execute(async()=>{
@@ -540,7 +568,7 @@ namespace ExperimentManagerDesktop {
                     else RefreshState();
                     if(background)Hide();
                 } else if(deactivated)DisplayInactive();else if(background) { await Execute(async()=>{await Controller("controller-start");Hide();}); } else OpenController();
-                timer.Start();NotifyUpdates();await PumpHostControl();await PumpUpdates();
+                NotifyUpdates();await PumpHostControl();await PumpUpdates();
             };
             ResumeLayout(true);
         }
@@ -557,7 +585,7 @@ namespace ExperimentManagerDesktop {
         async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;if(startingAfterUpdate)App.UpdateReport("backend_start","failed",ex.Message);try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}catch(UnauthorizedAccessException){}}finally{busy=false;} }
         internal void ShowStatus(){Show();WindowState=FormWindowState.Normal;Activate();RefreshState();}
         async void ExitFromTray() {
-            if(busy){Show();WindowState=FormWindowState.Normal;Activate();return;}
+            if(busy||hostLoop.Applying){Show();WindowState=FormWindowState.Normal;Activate();return;}
             busy=true;timer.Stop();Enabled=false;tray.ContextMenuStrip.Enabled=false;
             Show();WindowState=FormWindowState.Normal;
             summary.Text=App.Worker?"正在保存并停止实验，完成后退出算力客户端…":"正在停止管理服务并退出实验台…";
@@ -627,7 +655,7 @@ namespace ExperimentManagerDesktop {
                 if(autoUpdate.Checked&&UpdateQueue.Active&&!UpdateQueue.State.InstallRequested)
                     UpdateQueue.Enqueue(UpdateQueue.State.Release,true,true);
                 if(autoUpdate.Checked&&!UpdateQueue.Active&&DateTime.UtcNow>=nextAutoCheck)await CheckForUpdates(true);
-                await UpdateQueue.Tick(DateTime.UtcNow,busy,
+                await UpdateQueue.Tick(DateTime.UtcNow,busy||hostLoop.Applying,
                     (release,progress,token)=>Task.Run(()=>UpdateService.Download(release,Path.Combine(App.SettingsRoot,"updates"),progress,token)),
                     ()=>App.Worker?WorkerCommand("update-status"):Controller("controller-update-status"),InstallUpdate,
                     (release,path)=>Task.Run(()=>UpdateService.ValidateDownloaded(release,path)));
@@ -636,7 +664,7 @@ namespace ExperimentManagerDesktop {
             finally {pumpingUpdates=false;}
         }
         internal async Task InstallUpdate(UpdateRelease release,string installer) {
-            if(busy)throw new Exception("当前操作尚未完成，请稍后安装。");
+            if(busy||hostLoop.Applying)throw new Exception("当前操作尚未完成，请稍后安装。");
             busy=true;timer.Stop();
             bool wasRunning=false,stopRequested=false;
             Exception failure=null;
@@ -691,17 +719,26 @@ namespace ExperimentManagerDesktop {
         async Task PumpHostControl() {
             if(!App.Worker||hostPumping||exiting||DateTime.UtcNow<nextHost)return;
             hostPumping=true;nextHost=DateTime.UtcNow.AddSeconds(5);
-            string intent="";
             try {
+                if(distro.SelectedItem==null) {
+                    if(hostControl.Linked)await Task.Run(()=>hostControl.Sync());
+                    return;
+                }
                 if(!hostControl.Linked||hostControl.Distribution!=SelectedDistribution) {
                     if(deactivated||busy)return;
                     string[] running=DesktopRuntime.RunningDistributions(await Task.Run(()=>App.RunWithTimeout(15000,"wsl.exe","--list","--running","--quiet")));
                     if(!Array.Exists(running,name=>name.Equals(SelectedDistribution,StringComparison.OrdinalIgnoreCase)))return;
                     hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
                 }
-                var desired=await Task.Run(()=>hostControl.Sync());
-                intent=App.Text(desired,"intent");string mode=App.Text(desired,"mode");
-                if(busy)return;
+                await hostLoop.Tick(()=>Task.Run(()=>hostControl.Sync()),ApplyHostControl,()=>!busy&&!exiting,
+                    ex=>App.ClientError("host_operation_failed",ex));
+            } catch(Exception ex) {
+                nextHost=DateTime.UtcNow.AddSeconds(15);App.ClientError("host_heartbeat_failed",ex);
+            } finally {hostPumping=false;}
+        }
+        async Task ApplyHostControl(Dictionary<string,object> desired) {
+            string intent=App.Text(desired,"intent"),mode=App.Text(desired,"mode");
+            try {
                 if(mode=="release"&&App.Text(desired,"source")=="center") {
                     // This read-only Windows check cannot start WSL. It also
                     // revalidates a receipt restored after a client restart.
@@ -742,26 +779,30 @@ namespace ExperimentManagerDesktop {
                         await Task.Run(()=>hostControl.Sync());return;
                     }
                     hostControl.Observe(intent,"restarting","中控已恢复接单，Windows 正在恢复 Docker / WSL 和原节点。");
+                    App.ClientTrace("host_restore_started");
                     await Task.Run(()=>hostControl.Sync());bool restarted=await StartWorkerAsync(true);
                     if(restarted) {
                         hostRestoreRetry.Completed();
                         settings["host_managed_release"]=false;App.Write(App.SettingsFile,settings);
                         hostControl.Observe(intent,"retained","运行环境已恢复；实验执行状态由 Worker 继续回报。");
                         await Task.Run(()=>hostControl.Sync());
+                        App.ClientTrace("host_restore_completed");
                     } else {
                         hostRestoreRetry.Failed(DateTime.UtcNow);
                         hostControl.Observe(intent,"blocked","恢复接单失败："+lastWorkerStartError+"；稍后自动重试。");
                         await Task.Run(()=>hostControl.Sync());
+                        App.ClientTrace("host_restore_failed",lastWorkerStartError);
                     }
                 }
             } catch(Exception ex) {
+                App.ClientError("host_operation_failed",ex);
                 nextHost=DateTime.UtcNow.AddSeconds(15);
                 // A network failure never starts a dormant WSL or grants a new
                 // release action. Existing queued policy can be checked later.
                 if(intent.Length>0&&hostControl.Linked) {
                     try {hostControl.Observe(intent,"blocked","Windows 资源交接未完成："+ex.Message);}catch(Exception){}
                 }
-            } finally {hostPumping=false;}
+            }
         }
         internal void FinishUpdateExit(){exiting=true;if(updateDialog!=null)updateDialog.Close();Close();}
         internal void OpenFromTray(){if(App.Worker)ShowStatus();else OpenController();}
@@ -794,8 +835,8 @@ namespace ExperimentManagerDesktop {
                 return result;
             });
         }
-        async void RefreshState(){if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
-        async void StartWorker(){await StartWorkerAsync(false);}
+        async void RefreshState(){if(busy||hostLoop.Applying)return;if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
+        async void StartWorker(){if(hostLoop.Applying)return;await StartWorkerAsync(false);}
         async Task<bool> StartWorkerAsync(bool automatic){
             bool started=false;lastWorkerStartError="未能启动原节点，请检查客户端状态。";
             await Execute(async()=>{
@@ -828,7 +869,7 @@ namespace ExperimentManagerDesktop {
             using(var form=new ComputePauseForm(policy,await WorkerCommand("status"),options=>WorkerCommand("compute-policy",options)))form.ShowDialog(this);
             Display(await WorkerCommand("status"));
         });}
-        async void Stop(){if(!App.Worker&&deactivated)return;await Execute(async()=>{
+        async void Stop(){if(hostLoop.Applying||(!App.Worker&&deactivated))return;await Execute(async()=>{
             timer.Stop();bool workerStopped=false;try {
                 if(App.Worker) {
                     var state=await DesktopRuntime.PrepareWorkerRelease(SelectedDistribution,action=>WorkerCommand(action),
