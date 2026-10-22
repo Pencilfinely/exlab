@@ -843,9 +843,12 @@ namespace ExperimentManagerDesktop {
                 try {
                     if(!await EnsureDocker(automatic))return;
                     settings["resources_released"]=false;App.Write(App.SettingsFile,settings);
-                    summary.Text="正在准备算力…";var state=await WorkerCommand("install");Display(state);
-                    if(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing")
-                        throw new InvalidOperationException(App.Text(state,"detail","算力尚未启动，请检查状态后重试。"));
+                    summary.Text="正在准备算力…";
+                    var state=automatic?await WorkerCommand("status"):null;
+                    if(state==null||(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing"))
+                        state=await WorkerCommand("install");
+                    Display(state);
+                    await DesktopRuntime.WaitForWorkerReady(()=>WorkerCommand("status"),Display);
                     hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
                     deactivated=false;settings["deactivated"]=false;settings["resources_released"]=false;
                     if(!automatic){settings["host_managed_release"]=false;settings["host_local_hold"]=false;}

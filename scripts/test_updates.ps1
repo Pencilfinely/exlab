@@ -847,6 +847,26 @@ static class InstallProbeTests {
         Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult(""),()=>Task.FromResult(false)).GetAwaiter().GetResult(),"WSL-only closure masqueraded as Docker closure.");
         File.Delete(path);
     }
+    static void WorkerRestoreReadiness() {
+        var states=new Queue<Dictionary<string,object>>(new[]{
+            new Dictionary<string,object>{{"status","preparing"},{"running",true},{"online",false}},
+            new Dictionary<string,object>{{"status","running"},{"running",true},{"online",false}},
+            new Dictionary<string,object>{{"status","running"},{"running",true},{"online",true}}});
+        int seen=0,delays=0;
+        var ready=DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(states.Dequeue()),s=>seen++,
+            ()=>{delays++;return Task.FromResult(0);}).GetAwaiter().GetResult();
+        Assert(App.Flag(ready,"online")&&seen==3&&delays==2,"Docker readiness or a preparing process was mistaken for restored compute.");
+        bool failed=false;
+        try {DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(new Dictionary<string,object>{
+            {"status","failed"},{"running",false},{"detail","WSL integration failed"}}),s=>{}).GetAwaiter().GetResult();}
+        catch(IOException ex){failed=ex.Message=="WSL integration failed";}
+        Assert(failed,"Asynchronous Worker startup failure was called a successful restore.");
+        failed=false;
+        try {DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(new Dictionary<string,object>{
+            {"status","running"},{"running",true},{"online",false}}),s=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();}
+        catch(IOException){failed=true;}
+        Assert(failed,"An offline Worker was accepted after its readiness timeout.");
+    }
     static async Task HostHeartbeatDuringRestore() {
         var loop=new DesktopHostLoop();var pending=new TaskCompletionSource<bool>();
         int beats=0,starts=0,errors=0;bool allowed=true;
@@ -873,7 +893,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
+            WorkerCompletion();InstallerWiring();ComputeActivation();DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness();HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");

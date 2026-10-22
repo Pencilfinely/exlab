@@ -89,6 +89,21 @@ namespace ExperimentManagerDesktop {
             }
             throw new IOException("Docker 尚未就绪。请检查 Docker Desktop 的 Linux containers、所选 Ubuntu 的 WSL 集成，以及本机 Docker context。然后重试。");
         }
+        internal static async Task<Dictionary<string,object>> WaitForWorkerReady(
+                Func<Task<Dictionary<string,object>>> inspect,Action<Dictionary<string,object>> progress,
+                Func<Task> delay=null,TimeSpan? timeout=null) {
+            var watch=Stopwatch.StartNew();
+            while(true) {
+                var state=await inspect();progress(state);
+                string status=App.Text(state,"status");
+                if(status=="running"&&App.Flag(state,"running")&&App.Flag(state,"online"))return state;
+                if(status!="starting"&&status!="preparing"&&status!="running")
+                    throw new IOException(App.Text(state,"detail","原节点尚未启动，请检查算力客户端。"));
+                if(watch.Elapsed>=(timeout??TimeSpan.FromMinutes(10)))
+                    throw new IOException("原节点仍在准备或连接中，尚未确认恢复接单；Windows 控制连接保持在线，稍后继续检查。");
+                if(delay==null)await Task.Delay(2000);else await delay();
+            }
+        }
         internal static bool CanShutdownAll(string distribution,IEnumerable<string> running) {
             foreach(string name in running)if(name.Length>0&&!name.Equals(distribution,StringComparison.OrdinalIgnoreCase)&&
                     !name.Equals("docker-desktop",StringComparison.OrdinalIgnoreCase)&&!name.Equals("docker-desktop-data",StringComparison.OrdinalIgnoreCase))return false;
