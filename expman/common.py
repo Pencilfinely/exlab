@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import http.client
 import itertools
 import json
 import math
@@ -259,5 +260,11 @@ def api_request(url, token, payload=None, timeout=10):
     data = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers={
         "Authorization": "Bearer " + token, "Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except http.client.HTTPException as error:
+        # IncompleteRead and malformed HTTP framing are not OSError subclasses.
+        # Keep these transport failures on callers' existing offline/retry paths;
+        # never accept a partial reply or replay a potentially committed POST here.
+        raise OSError(f"HTTP response interrupted: {type(error).__name__}") from error
