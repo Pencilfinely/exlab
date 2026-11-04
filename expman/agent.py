@@ -25,7 +25,7 @@ import time
 import urllib.parse
 
 from . import common, scheduler, node_policy
-from . import compute_policy
+from . import compute_policy, worker_database
 
 TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
@@ -202,7 +202,22 @@ class Agent:
         except OSError as error:
             self.lock.close()
             raise RuntimeError(f"Another agent already owns {self.root}") from error
-        self.db = sqlite3.connect(self.root / "node.sqlite3")
+        self.closed = False
+        self.db = None
+        self.preparation = None
+        self.prep_process = None
+        self.prep_mutex = threading.Lock()
+        self.project_delivery = None
+        self.result_delivery = None
+        self.execution_transfer = None
+        try:
+            self._initialize()
+        except BaseException:
+            self.close()
+            raise
+
+    def _initialize(self):
+        self.db = worker_database.connect(self.root / "node.sqlite3")
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
@@ -271,13 +286,16 @@ class Agent:
                 process.wait(timeout=5)
         if self.preparation:
             self.preparation["thread"].join(timeout=6)
-        if self.project_delivery.installing:
+        if self.project_delivery and self.project_delivery.installing:
             # Installation only writes immutable project snapshots; finish it before
             # releasing agent.lock so another agent cannot install concurrently.
             self.project_delivery.installing["thread"].join()
-        self.execution_transfer.close()
-        self.result_delivery.close()
-        self.db.close()
+        if self.execution_transfer:
+            self.execution_transfer.close()
+        if self.result_delivery:
+            self.result_delivery.close()
+        if self.db is not None:
+            self.db.close()
         if os.name == "nt":
             import msvcrt
             self.lock.seek(0)
@@ -363,7 +381,8 @@ class Agent:
             result = subprocess.run(argv, timeout=timeout, **kwargs)
         if check and result.returncode:
             # Tokens are never command-line arguments; limit logs returned to Hub.
-            raise RuntimeError(f"{argv[0]} failed ({result.returncode}): {result.stderr[-1500:]}")
+            detail = result.stderr.strip() or result.stdout.strip() or 'No error output'
+            raise RuntimeError(f"{argv[0]} failed ({result.returncode}): {detail[-1500:]}")
         return result
 
     def _docker_environment(self):

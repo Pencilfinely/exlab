@@ -794,25 +794,29 @@ def _agent_loop(root, agent):
 
 def _run_agent(root, config_path):
     from .agent import Agent
+    from . import worker_database
     recoveries = 0
     while True:
-        agent = Agent(config_path)
+        agent = None
         try:
+            agent = Agent(config_path)
             _agent_loop(root, agent)
             return
-        except sqlite3.InterfaceError as error:
-            if _shutdown_requested(root):
+        except sqlite3.Error as error:
+            recoverable = isinstance(error, sqlite3.InterfaceError) or worker_database.transient(error)
+            if not recoverable or _shutdown_requested(root):
                 raise  # A failed save/exit must remain visible, not be retried silently.
             _log_exception(root, error)
             recoveries += 1
-            detail = 'Database interface error; reconnecting worker / 数据库接口异常，正在恢复管理代理'
+            detail = 'Transient database error; reconnecting worker / 数据库暂时异常，正在恢复管理代理'
             _write_status(root, status='offline', online=False, detail=detail,
                           database_recoveries=recoveries, last_database_error=_redact(root, str(error)),
                           last_database_error_at=time.time())
         finally:
             # Releases the SQLite connections and execution lock; Docker
             # containers keep running and the next Agent reads the same records.
-            agent.close()
+            if agent is not None:
+                agent.close()
         for _ in range(50):
             if _shutdown_requested(root) or _update_pending(root):
                 break

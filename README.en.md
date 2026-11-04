@@ -7,7 +7,7 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.22. Monitor APK: 0.5.22.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.22 release notes](docs/RELEASE-0.5.22.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
+**Desktop version: 0.5.28. Monitor APK: 0.5.22.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.28 release notes](docs/RELEASE-0.5.28.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
 
 The algorithm library now supports search, deployment filters, bounded pagination and import timestamps. A five-step import opens node deployment when complete. Project dialogs provide experiment forms, allocation previews and matrix conversion, retaining inputs within the current page when switching presets or closing and reopening.
 
@@ -15,7 +15,7 @@ Experiment and matrix lists now have bounded scrolling, pagination, creation and
 
 Dynamic compute supports node maintenance, AC-only admission, timed resource release, queue controls and checkpoint handoffs. Mutable execution state supports scheduling and recovery while final results retain the lightweight protocol. Optional AI can propose reviewed policy changes or intervene automatically when enabled. See the [dynamic compute guide (Chinese)](docs/DYNAMIC-COMPUTE.zh-CN.md).
 
-Version 0.5.22 fixes workers exiting when an HTTP reply is truncated. Incomplete replies and malformed HTTP framing now follow the existing offline/retry path, preserving task ownership and unacknowledged reports without restarting training. Includes the Windows runtime restoration and control heartbeat fixes from 0.5.21.
+Version 0.5.25 prevents multiple Windows Centers from sharing one port, reports workspace/authentication conflicts clearly, and records the physical settings path to diagnose redirected profiles. It also retains the 0.5.24 fixes: it serializes short Worker database writes and recovers transient SQLite lock errors without replacing experiments. It also retains the Center backlog fixes from 0.5.23. Heartbeats read only actionable tasks; polling and deterministic inspection use transactionally maintained compact state, and inspection batches changed observations. Health checks run independently of the scheduler lock and HTTP concurrency is bounded. Includes the Worker transport recovery fix from 0.5.22.
 
 AI management combines frequent deterministic inspections with infrequent AI reviews and bounded declarative rule authoring. Reports open on demand. Node operations are verified through worker receipts; external GPT/Codex agents can inspect, operate or delegate through scoped MCP/HTTP tools. See the [AI agent guide (Chinese)](docs/AI-AGENT.zh-CN.md).
 

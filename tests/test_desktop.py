@@ -109,6 +109,78 @@ class DesktopTests(unittest.TestCase):
             self.assertFalse(desktop.controller_status(self.root)["running"])
         self.assertEqual(self.errors, [])
 
+    def test_wrong_workspace_credentials_report_conflict_without_spawning_another_backend(self):
+        state = self.serve()
+        other = self.root.parent / 'other-center'
+        Hub(other).close()
+        original = (other / 'hub.json').read_bytes()
+        common.atomic_json(other / 'launcher.json', {'port': state['port']})
+        status = desktop.controller_status(other)
+        self.assertFalse(status['running'])
+        self.assertFalse(status['responsive'])
+        self.assertEqual(status['status'], 'port_conflict')
+        self.assertEqual(status['health_error'], 'authentication_failed')
+        self.assertEqual(status['http_status'], 401)
+        self.assertIn(str(other), status['detail'])
+        with patch.object(desktop.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 401'):
+                desktop.controller_start(other)
+            spawn.assert_not_called()
+        self.assertEqual((other / 'hub.json').read_bytes(), original)
+        self.assertFalse((other / 'desktop-process.json').exists())
+        self.assertTrue(desktop.controller_status(self.root)['responsive'])
+
+    def test_same_token_different_workspace_is_not_mistaken_for_current_backend(self):
+        state = self.serve()
+        other = self.root.parent / 'copied-token-center'
+        Hub(other).close()
+        config = common.read_json(other / 'hub.json')
+        config['admin_token'] = common.read_json(self.root / 'hub.json')['admin_token']
+        common.atomic_json(other / 'hub.json', config)
+        common.atomic_json(other / 'launcher.json', {'port': state['port']})
+        status = desktop.controller_status(other)
+        self.assertFalse(status['responsive'])
+        self.assertEqual(status['health_error'], 'workspace_mismatch')
+        with patch.object(desktop.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(RuntimeError, '另一份工作空间'):
+                desktop.controller_start(other)
+            spawn.assert_not_called()
+        self.assertFalse((other / 'desktop-process.json').exists())
+
+    def test_live_owner_auth_failure_keeps_owned_stop_but_explains_401(self):
+        self.serve()
+        with patch.object(desktop.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.side_effect = lambda *args, **kwargs: (_ for _ in ()).throw(
+                urllib.error.HTTPError('http://127.0.0.1/api/health', 401, 'wrong workspace', {}, None))
+            status = desktop.controller_status(self.root)
+            self.assertTrue(status['running'])
+            self.assertTrue(status['managed'])
+            self.assertEqual(status['health_error'], 'authentication_failed')
+            self.assertIn('HTTP 401', status['detail'])
+            self.assertEqual(desktop.controller_stop(self.root)['status'], 'stopping')
+        self.thread.join(4)
+        self.assertFalse(self.thread.is_alive())
+
+    def test_health_timeout_is_distinct_from_authentication_failure(self):
+        self.serve()
+        with patch.object(desktop.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.side_effect = TimeoutError('test timeout')
+            status = desktop.controller_status(self.root)
+        self.assertTrue(status['running'])
+        self.assertEqual(status['health_error'], 'timeout')
+        self.assertIn('超时', status['detail'])
+        self.assertNotIn('http_status', status)
+
+    def test_start_rechecks_workspace_conflict_after_acquiring_start_lock(self):
+        Hub(self.root).close()
+        with patch.object(desktop, 'controller_status', side_effect=[{'running': False},
+                {'running': False, 'health_error': 'authentication_failed', 'detail': 'HTTP 401: another workspace'}]), \
+                patch.object(desktop.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 401'):
+                desktop.controller_start(self.root)
+            spawn.assert_not_called()
+        self.assertFalse((self.root / 'desktop-pending.json').exists())
+
     def test_live_controller_with_invalid_health_response_blocks_update(self):
         self.serve()
         for invalid in (b'null', b'[]', b'{}', b'{"nodes":{},"jobs":[]}',

@@ -37,6 +37,7 @@ jobs:
       - run: python -m unittest discover -s tests -t . -v
       - run: python -m compileall -q expman scripts
       - run: node --check expman/static/app.js
+      - run: node tests/test_desktop_settings_ui.js
       - run: node --check expman/static/records.js
       - run: node --check expman/static/templates.js
       - run: node --check expman/static/projects.js
@@ -64,6 +65,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/test_shortcuts.ps1
+      - name: Center settings persistence
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_settings.ps1
       - name: Windows update selection and download integrity tests
         if: runner.os == 'Windows'
         shell: pwsh
@@ -85,6 +90,7 @@ jobs:
           bash -n deploy/release/Stop-Worker.sh
           bash -n deploy/release/Worker-Status.sh
           bash -n deploy/release/Client-Worker.sh
+          bash -n deploy/release/Check-Unattended-Worker.sh
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

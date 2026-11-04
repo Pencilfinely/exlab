@@ -1,4 +1,4 @@
-param([string]$Python = '')
+﻿param([string]$Python = '')
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -50,6 +50,25 @@ public static class DesktopIconTest {
             if(large[0]!=IntPtr.Zero) DestroyIcon(large[0]);
             if(small[0]!=IntPtr.Zero) DestroyIcon(small[0]);
         }
+    }
+}
+public static class DesktopBootFormTest {
+    public static void Verify(System.Reflection.Assembly assembly,string root) {
+        var stat=System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Static;
+        var inst=System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Instance;
+        var app=assembly.GetType("ExperimentManagerDesktop.App");var directory=app.GetField("SettingsDirectory",stat);object previous=directory.GetValue(null);
+        directory.SetValue(null,System.IO.Path.Combine(root,"boot-form-settings"));
+        try {
+            var type=assembly.GetType("ExperimentManagerDesktop.WorkerBootForm");
+            using(var form=(System.Windows.Forms.Form)Activator.CreateInstance(type,inst,null,new object[]{null},null)) {
+                if(((System.Windows.Forms.Button)type.GetField("enable",inst).GetValue(form)).Enabled)throw new Exception("Unvalidated environment can enable a boot task.");
+                if(!((System.Windows.Forms.TextBox)type.GetField("password",inst).GetValue(form)).UseSystemPasswordChar)throw new Exception("Windows password is visible.");
+                if(((System.Windows.Forms.CheckBox)type.GetField("dedicated",inst).GetValue(form)).Checked)throw new Exception("Unrelated WSL sessions are implicitly authorized for closure.");
+                form.Show();System.Windows.Forms.Application.DoEvents();
+                using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-boot-preview.png"));}
+                form.Close();
+            }
+        } finally {directory.SetValue(null,previous);}
     }
 }
 public static class DesktopWorkerInstallTest {
@@ -188,6 +207,17 @@ public static class DesktopClientControlsTest {
                     if(item.Text==stop)stops++;if(item.Text==old)oldEntries++;
                 }
                 if(stops!=1||oldEntries!=0)throw new Exception("Tray duplicated the unified resource-release action.");
+                var startup=(System.Windows.Forms.CheckBox)type.GetField("startup",instanceFlags).GetValue(form);
+                if(startup.Parent==null)throw new Exception("Login startup control has no settings surface.");
+                bool settingsEntry=false;
+                foreach(System.Windows.Forms.ToolStripItem item in tray.ContextMenuStrip.Items)
+                    if(item.Text=="\u8bbe\u7f6e \u00b7 \u5f00\u673a\u81ea\u542f\u4e0e\u66f4\u65b0")settingsEntry=true;
+                if(!settingsEntry)throw new Exception("Tray has no discoverable startup/settings entry.");
+                if(!worker) {
+                    type.GetMethod("Display",instanceFlags).Invoke(form,new object[]{new System.Collections.Generic.Dictionary<string,object>{{"status","unresponsive"},{"detail","HTTP 401: wrong workspace"}}});
+                    var summary=(System.Windows.Forms.Label)type.GetField("summary",instanceFlags).GetValue(form);
+                    if(!summary.Text.Contains("\u4e3b\u63a7\u8fde\u63a5\u5f02\u5e38")||!summary.Text.Contains("HTTP 401"))throw new Exception("Connection failure hid the human-readable status or concrete cause.");
+                }
                 var preference=(System.Windows.Forms.CheckBox)type.GetField("releaseResources",instanceFlags).GetValue(form);
                 if(preference.Text.IndexOf("\u9000\u51fa",StringComparison.Ordinal)<0||preference.Text.Contains("\u505c\u7528"))
                     throw new Exception("Automatic exit preference still appears to control explicit deactivation.");
@@ -263,6 +293,8 @@ try {
         }
         Write-Output "PASS $role controls: combined stop/release, optional automation defaults, persisted preferences, queue survives view closure, rendered controls."
         if ($role -eq 'worker') {
+            [DesktopBootFormTest]::Verify($assembly, $visualRoot)
+            Write-Output 'PASS unattended Worker: masked password, no implicit shutdown consent, detection required, rendered settings.'
             [DesktopComputePauseTest]::Verify($assembly.GetType('ExperimentManagerDesktop.ComputePauseForm', $true),
                 (Join-Path $visualRoot 'worker-pause-preview.png'))
             Write-Output 'PASS worker pause: clear choices, manual/timed recovery, separate resume, preserved power settings, invalid date guard and rendered window.'

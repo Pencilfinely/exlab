@@ -267,7 +267,7 @@ class ComputePolicyHubMixin:
             return finish(desired)
 
     def _scheduling_nodes(self):
-        from .scheduler import workload_key, duration_estimate
+        from .hub_read_model import workload_keys, TERMINAL_SQL
         nodes = []
         for row in self.db.execute("SELECT * FROM nodes"):
             node = dict(row)
@@ -278,21 +278,26 @@ class ComputePolicyHubMixin:
             nodes.append(node)
         by_id = {node["id"]: node for node in nodes}
         samples = {}
-        rows = self.db.execute("SELECT spec,node_id,state,timing,generation FROM jobs WHERE node_id IS NOT NULL ORDER BY updated DESC").fetchall()
+        keys = workload_keys(self.db)
+        rows = self.db.execute("SELECT id,node_id,state,timing,generation FROM job_summaries WHERE node_id IS NOT NULL ORDER BY updated DESC,id").fetchall()
         for row in rows:
             if row["state"] != "succeeded" or row["generation"] != 1 or not row["timing"]:
                 continue
             timing = json.loads(row["timing"])
             if timing.get("complete") and timing.get("elapsed_seconds", 0) > 0:
-                values = samples.setdefault((row["node_id"], workload_key(json.loads(row["spec"]))), [])
+                values = samples.setdefault((row["node_id"], keys[row["id"]]), [])
                 if len(values) < 10:
                     values.append(timing["elapsed_seconds"])
         for node in nodes:
             node["performance"] = {key: statistics.median(values) for (identity, key), values in samples.items() if identity == node["id"]}
             node["queued_work_seconds"] = 0
-        for row in rows:
-            if row["state"] not in ("succeeded", "failed", "paused", "interrupted", "canceled"):
-                node = by_id[row["node_id"]]
-                elapsed = json.loads(row["timing"]).get("elapsed_seconds", 0) if row["timing"] else 0
-                node["queued_work_seconds"] += max(1, duration_estimate(json.loads(row["spec"]), node) - elapsed)
+        for row in self.db.execute(f"SELECT id,spec,node_id,timing FROM job_summaries WHERE node_id IS NOT NULL AND state NOT IN ({TERMINAL_SQL})"):
+            node = by_id[row["node_id"]]
+            spec = json.loads(row["spec"])
+            elapsed = json.loads(row["timing"]).get("elapsed_seconds", 0) if row["timing"] else 0
+            measured = node["performance"].get(keys[row["id"]])
+            duration = (max(.1, measured) if measured is not None else
+                        (spec.get("planning", {}).get("expected_seconds") or 300) /
+                        max(.1, float(node.get("snapshot", {}).get("policy", {}).get("speed", 1))))
+            node["queued_work_seconds"] += max(1, duration - elapsed)
         return nodes

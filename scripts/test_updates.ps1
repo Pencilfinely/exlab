@@ -421,7 +421,20 @@ static class InstallProbeTests {
     static Dictionary<string,object> Installed(Dictionary<string,object> stopped,string version="0.4.0") {
         var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
     }
-    static void ComputeActivation() {
+    static void ComputeActivation(string folder) {
+        var bootXml=new System.Xml.XmlDocument();bootXml.LoadXml(WorkerBoot.TaskXml(@"C:\Program Files\ExLab\boot.ps1",@"PC\owner"));
+        var bootNs=new System.Xml.XmlNamespaceManager(bootXml.NameTable);bootNs.AddNamespace("t",bootXml.DocumentElement.NamespaceURI);
+        Assert(bootXml.SelectSingleNode("//t:BootTrigger",bootNs)!=null&&bootXml.SelectSingleNode("//t:LogonType",bootNs).InnerText=="Password","Boot task incorrectly requires an interactive logon.");
+        Assert(bootXml.SelectSingleNode("//t:ExecutionTimeLimit",bootNs).InnerText=="PT0S"&&bootXml.SelectSingleNode("//t:MultipleInstancesPolicy",bootNs).InnerText=="IgnoreNew","Boot task would stop after a time limit or duplicate its owner.");
+        Assert(!bootXml.OuterXml.Contains("<Password>")&&bootXml.SelectSingleNode("//t:RunLevel",bootNs).InnerText=="LeastPrivilege","Boot task leaked credentials or runs unnecessarily elevated.");
+        Assert(WorkerBoot.Desired("available",null,false)=="wait","Unknown policy enabled compute before the Center was contacted.");
+        Assert(WorkerBoot.Desired("release",null,false)=="release","An offline local stop was ignored.");
+        Assert(WorkerBoot.Desired("available",new Dictionary<string,object>{{"mode","release"}},true)=="release","A local enable overrode the Center release policy.");
+        Assert(WorkerBoot.Desired("available",new Dictionary<string,object>{{"mode","stop"}},true)=="available","Stop-only policy incorrectly shut down the runtime.");
+        foreach(string phase in new[]{"released","stopping","failed","waiting","suspended"})
+            Assert(!WorkerBoot.CanAutoUpdate(new Dictionary<string,object>{{"status",phase},{"time",DateTime.UtcNow.ToString("o")}}),"Automatic updates would wake an inactive WSL environment: "+phase);
+        Assert(WorkerBoot.CanAutoUpdate(new Dictionary<string,object>{{"status","online"},{"time",DateTime.UtcNow.ToString("o")}}),"Online unattended worker could not use the update queue.");
+        Assert(!WorkerBoot.CanAutoUpdate(new Dictionary<string,object>{{"status","online"},{"time",DateTime.UtcNow.AddMinutes(-5).ToString("o")}}),"Stale online status could wake WSL for an automatic update.");
         int probes=0,starts=0,confirmations=0,delays=0;
         bool ready=DesktopRuntime.EnsureDocker(
             ()=>Task.FromResult(new Dictionary<string,object>{{"docker_ready",++probes>=3}}),
@@ -458,6 +471,16 @@ static class InstallProbeTests {
         foreach(string info in new[]{"{}","{\"ID\":\"original\",\"OSType\":\"windows\"}","not json"})
             Assert(!App.Flag(DesktopRuntime.DockerStatus(()=>Task.FromResult(info),()=>true).GetAwaiter().GetResult(),"docker_ready"),"Unusable Windows engine was accepted.");
         Assert(App.Flag(DesktopRuntime.DockerStatus(()=>Task.FromResult("{\"ID\":\"original\",\"OSType\":\"linux\"}"),()=>true).GetAwaiter().GetResult(),"docker_ready"),"Windows-only Linux engine probe rejected a ready Docker.");
+        var states=App.Json.Deserialize<Dictionary<string,object>[]>(File.ReadAllText(Path.Combine(folder,"worker-docker-fixture.json")));
+        var queue=new Queue<Dictionary<string,object>>(states);int waiting=0;
+        var connected=DesktopRuntime.WaitForWorkerDocker(()=>Task.FromResult(queue.Dequeue()),s=>waiting++,
+            ()=>Task.FromResult(0)).GetAwaiter().GetResult();
+        Assert(waiting==2&&queue.Count==0&&App.Text(connected,"docker_id")=="original-engine",
+            "Windows engine readiness bypassed the real Ubuntu context/socket warmup.");
+        bool integrationFailure=false;
+        try {DesktopRuntime.WaitForWorkerDocker(()=>Task.FromResult(states[0]),s=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();}
+        catch(IOException ex){integrationFailure=ex.Message.Contains(App.Text(states[0],"detail"));}
+        Assert(integrationFailure,"An unavailable Ubuntu integration was accepted or lost its diagnostic.");
     }
     static void DockerRecovery(string folder) {
         string root=Path.Combine(folder,"docker recovery");Directory.CreateDirectory(root);
@@ -584,7 +607,7 @@ static class InstallProbeTests {
                 var called=method.Module.ResolveMethod(BitConverter.ToInt32(code,offset));
                 if(called.DeclaringType==typeof(InstallerForm)&&called.Name=="VerifyBackendStopped")verify=position;
                 if(called.DeclaringType==typeof(InstallerForm)&&called.Name=="CompleteWorkerInstallation")complete=position;
-                if(called.DeclaringType==typeof(App)&&called.Name=="Write"&&write<0)write=position;
+                if(called.DeclaringType==typeof(App)&&called.Name=="SaveSettings"&&write<0)write=position;
             }
             if(opcode==OpCodes.Ldstr&&method.Module.ResolveString(BitConverter.ToInt32(code,offset))=="installed_version")version=position;
             offset+=size;
@@ -847,15 +870,23 @@ static class InstallProbeTests {
         Assert(!DesktopHostControl.RuntimeClosed(()=>Task.FromResult(""),()=>Task.FromResult(false)).GetAwaiter().GetResult(),"WSL-only closure masqueraded as Docker closure.");
         File.Delete(path);
     }
-    static void WorkerRestoreReadiness() {
-        var states=new Queue<Dictionary<string,object>>(new[]{
-            new Dictionary<string,object>{{"status","preparing"},{"running",true},{"online",false}},
-            new Dictionary<string,object>{{"status","running"},{"running",true},{"online",false}},
-            new Dictionary<string,object>{{"status","running"},{"running",true},{"online",true}}});
+    static void WorkerRestoreReadiness(string folder) {
+        // Consume the Python producer's real protocol. Synthetic "running"
+        // statuses previously hid the failure for healthy "online" workers.
+        var produced=App.Json.Deserialize<Dictionary<string,object>[]>(File.ReadAllText(Path.Combine(folder,"worker-status-protocol.json")));
+        Assert(App.Text(produced[1],"status")=="offline"&&App.Text(produced[2],"status")=="online","Worker status fixture does not use the real producer.");
+        var states=new Queue<Dictionary<string,object>>(produced);
         int seen=0,delays=0;
         var ready=DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(states.Dequeue()),s=>seen++,
             ()=>{delays++;return Task.FromResult(0);}).GetAwaiter().GetResult();
         Assert(App.Flag(ready,"online")&&seen==3&&delays==2,"Docker readiness or a preparing process was mistaken for restored compute.");
+        var legacy=new Dictionary<string,object>{{"status","running"},{"running",true},{"online",true}};
+        Assert(DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(legacy),s=>{}).GetAwaiter().GetResult()==legacy,"Legacy running status lost compatibility.");
+        var stale=new Dictionary<string,object>{{"status","online"},{"running",false},{"online",true},{"detail","Connected to controller"}};
+        bool rejected=false;
+        try{DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(stale),s=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();}
+        catch(IOException){rejected=true;}
+        Assert(rejected,"A previous online report without a live owner was accepted.");
         bool failed=false;
         try {DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(new Dictionary<string,object>{
             {"status","failed"},{"running",false},{"detail","WSL integration failed"}}),s=>{}).GetAwaiter().GetResult();}
@@ -863,7 +894,7 @@ static class InstallProbeTests {
         Assert(failed,"Asynchronous Worker startup failure was called a successful restore.");
         failed=false;
         try {DesktopRuntime.WaitForWorkerReady(()=>Task.FromResult(new Dictionary<string,object>{
-            {"status","running"},{"running",true},{"online",false}}),s=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();}
+            {"status","offline"},{"running",true},{"online",false}}),s=>{},timeout:TimeSpan.Zero).GetAwaiter().GetResult();}
         catch(IOException){failed=true;}
         Assert(failed,"An offline Worker was accepted after its readiness timeout.");
     }
@@ -893,7 +924,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation();DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness();HostHeartbeatDuringRestore().GetAwaiter().GetResult();
+            WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
@@ -940,10 +971,17 @@ static class InstallProbeTests {
 }
 '@ | Set-Content -LiteralPath $probeSource -Encoding UTF8
     $probeExe = Join-Path $testRoot 'InstallProbeTests.exe'
+    $pythonCommand = Get-Command python -CommandType Application -All | Where-Object { $_.Source -notlike '*\Microsoft\WindowsApps\*' } | Select-Object -First 1
+    if (-not $pythonCommand) { throw 'No installed Python found for the Worker status protocol fixture.' }
+    Push-Location -LiteralPath $repoRoot
+    try {
+        & $pythonCommand.Source -m tests.worker_status_fixture (Join-Path $testRoot 'worker-status-protocol.json')
+        if ($LASTEXITCODE -ne 0) { throw 'Worker status protocol fixture failed.' }
+    } finally { Pop-Location }
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

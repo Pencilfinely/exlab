@@ -22,6 +22,7 @@ import uuid
 from . import __version__
 from .common import atomic_json, read_json
 from .launcher import InstanceLock, default_controller_root
+from .controller_paths import validate_controller_workspace
 from .update_protocol import UPDATE_STOP_PROTOCOL, manual_stop_required, supports_update_stop
 
 # Published desktop backends whose owner file predates its version field.
@@ -62,6 +63,24 @@ try {
         raise RuntimeError('The folder picker could not open; enter the path in the import page')
     selected = result.stdout.strip().lstrip('\ufeff')
     return str(Path(selected).resolve()) if selected else None
+
+
+def controller_preferences(root, *, open_window=False):
+    """Open this edition's settings without starting or stopping the backend."""
+    package = Path(__file__).resolve().parents[1]
+    executable = package / 'ExLabCenter.exe'
+    available = sys.platform == 'win32' and executable.is_file()
+    result = {'available': available, 'data_root': str(Path(root).resolve()),
+              'detail': '在桌面设置中调整开机自启与自动更新。' if available
+              else '请在安装了 ExLab Center 的 Windows 本机打开桌面设置。'}
+    if open_window:
+        if not available:
+            raise ValueError(result['detail'])
+        subprocess.Popen([str(executable), '--settings'], cwd=package, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
+        result['detail'] = '桌面设置已打开，可调整开机自启与自动更新。'
+    return result
 
 
 def _owner_is_running(owner):
@@ -158,6 +177,9 @@ def controller_status(root):
                     or any(type(value.get(key)) is not int or value[key] < 0 for key in ('nodes', 'jobs'))):
                 raise ValueError('Invalid controller health response')
             nodes, jobs = value['nodes'], value['jobs']
+        if value.get('workspace_id') and hub.get('workspace_id') and value['workspace_id'] != hub['workspace_id']:
+            return dict(result, health_error='workspace_mismatch',
+                        detail=f'端口 {port} 回复的是另一份工作空间；请核对数据目录 {root}，不要重新配对或创建空配置')
         # The request may have waited for startup. The owner file is written
         # before serve_forever, so refresh it after the successful health probe.
         state = read_json(root / 'desktop-process.json', {})
@@ -170,23 +192,46 @@ def controller_status(root):
             detail='主控运行中；关闭应用窗口后继续在后台运行')
         if result['managed'] and 'update_stop_protocol' in state:
             result['update_stop_protocol'] = state['update_stop_protocol']
-    except (OSError, ValueError):
+    except (OSError, ValueError) as error:
         # Startup or shutdown may complete while the health request is pending.
         alive = _lock_is_held(root / 'controller.lock')
         result.update(running=alive, status='unresponsive' if alive else 'stopped',
                       detail='主控进程仍在运行，暂时无法连接；请稍候再试'
                       if alive else '主控尚未启动，或仍在启动中')
+        if isinstance(error, urllib.error.HTTPError):
+            result['http_status'] = error.code
+            if error.code in (401, 403):
+                result.update(health_error='authentication_failed',
+                    detail=f'端口 {port} 拒绝当前工作空间的凭证（HTTP {error.code}）；可能连到了另一份主控，请核对数据目录 {root}')
+                if not alive:
+                    result['status'] = 'port_conflict'
+            elif error.code == 503:
+                result.update(health_error='overloaded', detail='主控请求已满，健康检查收到 HTTP 503；请稍候重试')
+            else:
+                result['health_error'] = 'http_error'
+            error.close()
+        elif isinstance(error, TimeoutError) or isinstance(getattr(error, 'reason', None), TimeoutError):
+            result.update(health_error='timeout', detail='健康检查超时；主控进程仍在运行' if alive else '健康检查超时，尚未确认主控启动')
+        elif isinstance(error, ValueError):
+            result.update(health_error='invalid_response', detail='健康检查回复格式无效，请查看主控日志并核对端口')
+        else:
+            result['health_error'] = 'connection_failed'
     return result
 
 
 def controller_start(root, port=8765, host='0.0.0.0'):
     root = Path(root).expanduser().resolve()
+    validate_controller_workspace(root)
     status = controller_status(root)
+    if status.get('health_error') in ('authentication_failed', 'workspace_mismatch'):
+        raise RuntimeError(status['detail'])
     if status['running']:
         return status
     root.mkdir(parents=True, exist_ok=True)
     with InstanceLock(root / 'desktop-start.lock'):
         status = controller_status(root)
+        if status.get('health_error') in ('authentication_failed', 'workspace_mismatch'):
+            raise RuntimeError(status['detail'])
         if status['running']:
             return status
         pending = read_json(root / 'desktop-pending.json', {})
@@ -380,6 +425,7 @@ def controller_stop_for_update(root):
 def controller_serve(root, port, host, *, fixed_port=False, open_browser=False, foreground=False):
     from .hub import Hub, make_server
     root = Path(root).expanduser().resolve()
+    validate_controller_workspace(root)
     # Status probes briefly take this same exclusive lock. Give a probe time
     # to release it, while still refusing another persistent controller owner.
     with InstanceLock(root / 'controller.lock', timeout=0.2):
@@ -468,11 +514,13 @@ def main():
     parser.add_argument('action', choices=('controller-start', 'controller-stop', 'controller-status', 'controller-serve',
                                          'controller-open', 'controller-update-status', 'controller-install-status',
                                          'controller-stop-for-update'))
-    parser.add_argument('--root', default=str(default_controller_root()))
+    parser.add_argument('--root')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--host', default='0.0.0.0')
     args = parser.parse_args()
     try:
+        if args.root is None:
+            args.root = str(default_controller_root())
         release = read_json(Path(__file__).resolve().parents[1] / 'release-role.json', {})
         if release and 'controller' not in release.get('role', ''):
             raise ValueError('This package contains the worker edition. Download the controller edition to manage experiments.')

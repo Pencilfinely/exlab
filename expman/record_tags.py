@@ -46,7 +46,7 @@ class RecordTagsHubMixin:
                 "WHERE mt.tag_id=t.id AND m.deleted_at IS NULL) AS matrix_count "
                 "FROM record_tags t ORDER BY t.name COLLATE NOCASE,t.id")]}
 
-    def _attach_record_tags(self, records, target):
+    def _attach_record_tags(self, records, target, *, db=None):
         # One join per collection, rather than a separate query for every record.
         by_id = {record["id"]: record for record in records}
         for record in records:
@@ -59,7 +59,7 @@ class RecordTagsHubMixin:
         if len(by_id) <= 400:
             where = "WHERE r.record_id IN (" + ",".join("?" for _ in by_id) + ") "
             parameters = tuple(by_id)
-        for row in self.db.execute(
+        for row in (self.db if db is None else db).execute(
                 f"SELECT r.record_id,t.* FROM {table} r JOIN record_tags t ON t.id=r.tag_id "
                 + where + "ORDER BY t.name COLLATE NOCASE,t.id", parameters):
             if row["record_id"] in by_id:

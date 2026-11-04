@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections;
 using System.Diagnostics;
@@ -85,14 +85,29 @@ namespace ExperimentManagerDesktop {
         internal static string Text(Dictionary<string,object> obj, string key, string fallback="") { return obj.ContainsKey(key) && obj[key]!=null ? Convert.ToString(obj[key]) : fallback; }
         internal static bool Flag(Dictionary<string,object> obj, string key) { return obj.ContainsKey(key) && obj[key] is bool && (bool)obj[key]; }
         internal static Dictionary<string,object> Read(string path) {
-            if(!File.Exists(path)) return new Dictionary<string,object>();
-            return Json.Deserialize<Dictionary<string,object>>(File.ReadAllText(path, Encoding.UTF8));
+            try {
+                using(var stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete))
+                using(var reader=new StreamReader(stream,Encoding.UTF8))return Json.Deserialize<Dictionary<string,object>>(reader.ReadToEnd());
+            }
+            catch(FileNotFoundException) {return new Dictionary<string,object>();}
+            catch(DirectoryNotFoundException) {return new Dictionary<string,object>();}
         }
-        internal static void Write(string path, object value) {
+        internal static Dictionary<string,object> ReadSettings(){return DesktopSettings.Load(SettingsFile,Worker);}
+        internal static void SaveSettings(Dictionary<string,object> settings){DesktopSettings.Save(SettingsFile,settings,Worker);}
+        internal static void Write(string path, object value,Action<string,string> replace=null) {
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             string tmp=path+"."+Guid.NewGuid().ToString("N")+".tmp";
-            File.WriteAllText(tmp, Json.Serialize(value), new UTF8Encoding(false));
-            if(File.Exists(path)) File.Replace(tmp,path,null); else File.Move(tmp,path);
+            try {
+                byte[] bytes=new UTF8Encoding(false).GetBytes(Json.Serialize(value));
+                using(var stream=new FileStream(tmp,FileMode.CreateNew,FileAccess.Write,FileShare.None)){stream.Write(bytes,0,bytes.Length);stream.Flush(true);}
+                for(int attempt=0;;attempt++) {
+                    try {if(File.Exists(path)){if(replace==null)File.Replace(tmp,path,null);else replace(tmp,path);}else File.Move(tmp,path);break;}
+                    // ReplaceFile can report 1175 for a temporarily busy destination.
+                    // Both names remain intact in this case; retry the same atomic
+                    // replacement. Do not retry 1176/1177, which can move a name.
+                    catch(IOException ex) {int code=ex.HResult&0xffff;if(attempt==7||(code!=32&&code!=33&&code!=1175))throw;Thread.Sleep(Math.Min(25*(1<<attempt),200));}
+                }
+            } finally {if(File.Exists(tmp))File.Delete(tmp);}
         }
         internal static void UpdateReport(string stage,string status,string detail="") {
             // A failure after the old client exits must remain diagnosable.
@@ -222,11 +237,11 @@ namespace ExperimentManagerDesktop {
                 return OwnsShortcutTarget(DesktopShortcuts.Target(link),installRoot);
             } catch { return false; }
         }
-        internal static void InstallShortcuts(string desktopFolder,string menuFolder,string installRoot,string target,bool makeDesktop) {
+        internal static void InstallShortcuts(string desktopFolder,string menuFolder,string installRoot,string target,bool makeDesktop,string arguments="") {
             string menu=Path.Combine(menuFolder,"ExLab",ShortcutName),desktop=Path.Combine(desktopFolder,ShortcutName);
             if(File.Exists(menu)&&!OwnedShortcut(menu,installRoot))throw new IOException("同名开始菜单快捷方式不属于 ExLab，请先为其改名。");
             if(makeDesktop&&File.Exists(desktop)&&!OwnedShortcut(desktop,installRoot))throw new IOException("同名桌面快捷方式不属于 ExLab，请先为其改名。");
-            Shortcut(menu,target,"");if(makeDesktop)Shortcut(desktop,target,"");
+            Shortcut(menu,target,arguments);if(makeDesktop)Shortcut(desktop,target,arguments);
             else if(OwnedShortcut(desktop,installRoot))File.Delete(desktop);
             foreach(string old in new[]{Path.Combine(desktopFolder,LegacyShortcutName),
                 Path.Combine(menuFolder,"ExLab",(Worker?"Worker":"Center")+".lnk"),
@@ -253,6 +268,10 @@ namespace ExperimentManagerDesktop {
                 AppDomain.CurrentDomain.UnhandledException+=(sender,eventArgs)=>{
                     var error=eventArgs.ExceptionObject as Exception;if(error!=null)ClientError("unhandled_exception",error);
                 };
+                if(Worker&&Has(args,"--boot-run")) {
+                    try {Environment.ExitCode=WorkerBoot.Run();}catch(Exception ex){ClientError("boot_failed",ex);Environment.ExitCode=1;}return;
+                }
+                if(Worker&&Has(args,"--boot-settings")) {using(var form=new WorkerBootForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
                 if(Has(args,"--cleanup-installer")) {
                     var until=DateTime.UtcNow.AddMinutes(5);
                     while(DateTime.UtcNow<until) {
@@ -283,7 +302,7 @@ namespace ExperimentManagerDesktop {
                     if(Has(args,"--apply-update"))UpdateReport("waiting_for_previous_client","running");
                     WaitForPreviousClient(args);
                     if(Has(args,"--install")) {
-                        string dataRoot=Arg(args,"--data-root")??Text(Read(SettingsFile),"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller"));
+                        string dataRoot=Arg(args,"--data-root")??DesktopSettings.Root(ReadSettings());
                         bool startup=Has(args,"--startup");
                         startup=startup||DesktopRuntime.AutoStart;
                         string installed=InstallerForm.Install(dataRoot,Arg(args,"--pairing"),Has(args,"--desktop"),startup);
@@ -293,12 +312,13 @@ namespace ExperimentManagerDesktop {
                     return;
                 }
                 string key=InstanceKey; bool created;
-                using(var mutex=new Mutex(true,key,out created)) using(var show=new EventWaitHandle(false,EventResetMode.AutoReset,key+"-Open")) {
-                    if(!created) { show.Set(); return; }
+                using(var mutex=new Mutex(true,key,out created)) using(var show=new EventWaitHandle(false,EventResetMode.AutoReset,key+"-Open"))
+                using(var preferences=new EventWaitHandle(false,EventResetMode.AutoReset,key+"-Settings")) {
+                    if(!created) { if(Has(args,"--settings"))preferences.Set();else show.Set(); return; }
                     using(var form=new ClientForm(args)) {
                         ClientTrace("client_started");
                         var handle=form.Handle;
-                        var monitor=new Thread(()=> { while(show.WaitOne()) { if(form.IsDisposed) break; try { form.BeginInvoke((Action)(()=>form.OpenFromTray())); } catch(InvalidOperationException) { break; } } });
+                        var monitor=new Thread(()=> { while(true) { int requested=WaitHandle.WaitAny(new WaitHandle[]{show,preferences});if(form.IsDisposed) break; try { form.BeginInvoke((Action)(()=>{if(requested==1)form.ShowStatus();else form.OpenFromTray();})); } catch(InvalidOperationException) { break; } } });
                         monitor.IsBackground=true; monitor.Start(); Application.Run(form); show.Set();
                     }
                 }
@@ -317,7 +337,7 @@ namespace ExperimentManagerDesktop {
         internal InstallerForm(string[] args) {
             Text="安装 "+App.Title; Size=new Size(610,460); MinimumSize=Size; StartPosition=FormStartPosition.CenterScreen;
             startup.Checked=DesktopRuntime.AutoStart;
-            var saved=App.Read(App.SettingsFile);
+            var saved=App.ReadSettings();
             if(App.Has(args,"--apply-update"))desktop.Checked=saved.ContainsKey("desktop_shortcut")?App.Flag(saved,"desktop_shortcut"):
                 (File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.ShortcutName))||
                  File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),App.LegacyShortcutName)));
@@ -332,7 +352,7 @@ namespace ExperimentManagerDesktop {
             row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             var browse=new Button { Text="选择…", AutoSize=true };
             if(App.Worker) { row.Controls.Add(pairing,0,0); browse.Click+=(s,e)=>{ using(var f=new OpenFileDialog { Filter="节点凭证 (*.json)|*.json" }) if(f.ShowDialog()==DialogResult.OK) pairing.Text=f.FileName; }; }
-            else { data.Text=App.Arg(args,"--data-root")??App.Text(App.Read(App.SettingsFile),"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller")); row.Controls.Add(data,0,0); browse.Click+=(s,e)=>{ using(var f=new FolderBrowserDialog { Description="选择实验台数据目录",SelectedPath=data.Text }) if(f.ShowDialog()==DialogResult.OK) data.Text=f.SelectedPath; }; }
+            else { data.Text=App.Arg(args,"--data-root")??DesktopSettings.Root(saved); row.Controls.Add(data,0,0); browse.Click+=(s,e)=>{ using(var f=new FolderBrowserDialog { Description="选择实验台数据目录",SelectedPath=data.Text }) if(f.ShowDialog()==DialogResult.OK) data.Text=f.SelectedPath; }; }
             row.Controls.Add(browse,1,0); panel.Controls.Add(row); panel.Controls.Add(desktop); panel.Controls.Add(startup); panel.Controls.Add(status); panel.Controls.Add(install); Controls.Add(panel);
             install.Click+=async (s,e)=> {
                 if(installing)return;installing=true;install.Enabled=false; status.Text="正在安装…";
@@ -349,7 +369,7 @@ namespace ExperimentManagerDesktop {
                     launched.Dispose();
                     await Task.Run(()=>App.ScheduleInstallerCleanup(destination));
                     installing=false;Close();
-                } catch(Exception ex) { App.UpdateReport(stage,"failed",ex.Message);status.Text=ex.Message; installing=false;install.Enabled=true; }
+                } catch(Exception ex) { App.UpdateReport(stage,"failed",ex.Message);status.Text=ex.Message;try{if(WorkerBoot.Managed&&File.Exists(WorkerBoot.SuspendPath))WorkerBoot.ResumeAfterUpdate();}catch(Exception recovery){status.Text+="\n后台恢复失败："+recovery.Message;}installing=false;install.Enabled=true; }
             };
             FormClosing+=(s,e)=>{if(installing){e.Cancel=true;status.Text="正在安装，请等待完成后再关闭。";}};
             if(App.Has(args,"--apply-update"))Shown+=(s,e)=>install.PerformClick();
@@ -384,36 +404,34 @@ namespace ExperimentManagerDesktop {
                         else File.WriteAllBytes(path,bytes);
                     }
                 }
-                var settings=App.Read(App.SettingsFile);
+                var settings=App.ReadSettings();
                 var stopped=VerifyBackendStopped(destination,dataPath,settings);
                 if(App.Worker&&stopped!=null) {
                     string distribution=App.Text(settings,"distribution");
                     string package=App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",destination).Trim();
                     CompleteWorkerInstallation(package,version,stopped,arguments=> {
-                        var command=new List<string>{"-d",distribution,"--exec","bash"};
+                        var command=new List<string>{"-d",distribution};
+                        if(WorkerBoot.Managed){command.Add("-u");command.Add(WorkerBoot.Load().LinuxUser);}
+                        command.Add("--exec");command.Add("bash");
                         command.AddRange(arguments);
                         return App.Command("wsl.exe",command.ToArray());
                     });
                     // Bind the Windows control connection during installation,
                     // even when compute intentionally remains deactivated.
                     var host=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));
-                    var info=App.Command("wsl.exe","-d",distribution,"--exec","bash",package+"/Client-Worker.sh","host-info",
-                        "--service-root",App.Text(stopped,"service_root"));
+                    var info=App.Command("wsl.exe",WorkerBoot.InstalledCommand(distribution,package,"host-info","--service-root",App.Text(stopped,"service_root")));
                     if(App.Text(info,"node_id")!=App.Text(stopped,"node_id"))throw new InvalidDataException("Windows 控制连接与原节点不一致，安装交接未完成。");
                     host.Connect(info,distribution);
                 }
-                if(!App.Worker) settings["data_root"]=Path.GetFullPath(dataPath);
+                if(!App.Worker) DesktopSettings.SelectRoot(settings,dataPath);
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
-                settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.Write(App.SettingsFile,settings);
+                settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.SaveSettings(settings);
+                if(App.Worker&&WorkerBoot.Managed&&File.Exists(WorkerBoot.SuspendPath))File.Delete(WorkerBoot.SuspendPath);
                 string target=Path.Combine(destination,App.Executable);
                 App.InstallShortcuts(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs"),
-                    Directory.GetParent(destination).FullName,target,makeDesktop);
-                using(var run=Registry.CurrentUser.OpenSubKey("Software\\Microsoft\\Windows\\CurrentVersion\\Run",true)) {
-                    run.DeleteValue("ExperimentManager-"+App.Role,false);
-                    if(autoStart) run.SetValue("ExLab-"+App.Role,App.Quote(target)+" --background");
-                    else run.DeleteValue("ExLab-"+App.Role,false);
-                }
+                    Directory.GetParent(destination).FullName,target,makeDesktop,App.Worker?"":App.Arguments("--data-root",dataPath));
+                DesktopRuntime.SetAutoStart(autoStart,target,dataPath);
                 return destination;
             }
         }
@@ -424,7 +442,7 @@ namespace ExperimentManagerDesktop {
                 // A fresh worker installation has no selected Linux service yet.
                 if(string.IsNullOrEmpty(distribution))return null;
                 string package=App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",destination).Trim();
-                state=App.Command("wsl.exe","-d",distribution,"--exec","bash",package+"/Client-Worker.sh","install-status");
+                state=App.Command("wsl.exe",WorkerBoot.InstalledCommand(distribution,package,"install-status"));
             } else state=App.Command(Path.Combine(destination,"runtime","python.exe"),"-m","expman.desktop",
                 "controller-install-status","--root",Path.GetFullPath(dataPath));
             DesktopLifecycle.RequireInstallReady(state,App.Worker);
@@ -456,15 +474,16 @@ namespace ExperimentManagerDesktop {
     sealed class ClientForm : IconForm {
         readonly DesktopIcons trayIcons=new DesktopIcons();
         NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
-        DesktopHostControl hostControl;bool hostPumping;DateTime nextHost=DateTime.MinValue,nextHostAttempt=DateTime.MinValue;
+        DesktopHostControl hostControl;bool hostPumping;DateTime nextHost=DateTime.MinValue;
         readonly DesktopHostLoop hostLoop=new DesktopHostLoop();
-        readonly DesktopRetrySchedule hostRestoreRetry=new DesktopRetrySchedule();string lastWorkerStartError="";
+        readonly DesktopRetrySchedule hostRestoreRetry=new DesktopRetrySchedule(),hostReleaseRetry=new DesktopRetrySchedule();string lastWorkerStartError="";
         UpdateForm updateDialog;
         BrowserAppWindow browserWindowIcons;
         bool resumeWorkerAfterUpdate;
         bool startingAfterUpdate;
         bool deactivated;
-        CheckBox startup=new CheckBox { Text="登录 Windows 后启动",AutoSize=true };
+        bool updatingStartup;
+        CheckBox startup=new CheckBox { Text="开机自启（登录 Windows 后）",AutoSize=true };
         CheckBox autoEnableCompute=new CheckBox { Text="启动客户端后自动启用算力",AutoSize=true };
         CheckBox autoUpdate=new CheckBox { Text="自动检查、下载并排队安装更新",AutoSize=true };
         CheckBox releaseResources=new CheckBox { Text="退出客户端时自动释放空闲的 Docker 与 WSL",AutoSize=true };
@@ -484,7 +503,7 @@ namespace ExperimentManagerDesktop {
         List<string> configs=new List<string>();
         System.Windows.Forms.Timer timer=new System.Windows.Forms.Timer { Interval=5000 };
         internal ClientForm(string[] args) {
-            settings=App.Read(App.SettingsFile); background=App.Has(args,"--background");
+            settings=App.ReadSettings(); background=App.Has(args,"--background");
             if(App.Worker)hostControl=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));
             UpdateQueueState restored=null;
             string queueFile=Path.Combine(App.SettingsRoot,"update-queue.json");
@@ -497,7 +516,7 @@ namespace ExperimentManagerDesktop {
             UpdateQueue.Changed+=NotifyUpdates;
             deactivated=App.Flag(settings,"deactivated");
             startingAfterUpdate=App.Has(args,"--after-update");
-            string supplied=App.Arg(args,"--data-root"); if(supplied!=null) { settings["data_root"]=Path.GetFullPath(supplied); App.Write(App.SettingsFile,settings); }
+            string supplied=App.Arg(args,"--data-root"); if(supplied!=null&&!App.Worker) { DesktopSettings.SelectRoot(settings,supplied); App.SaveSettings(settings); }
             Text=App.Title; Size=new Size(900,650); MinimumSize=new Size(700,510); StartPosition=FormStartPosition.CenterScreen;
             Font=new Font("Microsoft YaHei UI",10); BackColor=Color.FromArgb(246,248,251);
             var layout=new TableLayoutPanel { Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=7 };
@@ -510,15 +529,21 @@ namespace ExperimentManagerDesktop {
                 controls.Controls.Add(new Label {Text="Ubuntu",AutoSize=true},0,0); controls.Controls.Add(distro,1,0);
                 controls.Controls.Add(new Label {Text="节点凭证",AutoSize=true},0,1); controls.Controls.Add(pairing,1,1);
                 pairing.Text=App.Text(settings,"pairing_file"); var choose=new Button {Text="选择文件…",AutoSize=true};
-                choose.Click+=(s,e)=>{ using(var picker=new OpenFileDialog {Filter="主控配对凭证 (*.json)|*.json"}) if(picker.ShowDialog()==DialogResult.OK) { pairing.Text=picker.FileName; settings["pairing_file"]=pairing.Text; App.Write(App.SettingsFile,settings); } }; controls.Controls.Add(choose,2,1);
+                choose.Click+=(s,e)=>{ using(var picker=new OpenFileDialog {Filter="主控配对凭证 (*.json)|*.json"}) if(picker.ShowDialog()==DialogResult.OK) { pairing.Text=picker.FileName; settings["pairing_file"]=pairing.Text; App.SaveSettings(settings); } }; controls.Controls.Add(choose,2,1);
                 controls.Controls.Add(new Label {Text="已有配置",AutoSize=true},0,2); controls.Controls.Add(existing,1,2);
                 configs.Add(""); existing.Items.Add("自动选择 / 新节点使用凭证"); existing.SelectedIndex=0;
-                distro.SelectedIndexChanged+=(s,e)=>{settings["distribution"]=Convert.ToString(distro.SelectedItem);App.Write(App.SettingsFile,settings);};
+                distro.SelectedIndexChanged+=(s,e)=>{settings["distribution"]=Convert.ToString(distro.SelectedItem);App.SaveSettings(settings);};
                 var paste=new Button {Text="粘贴连接凭证",AutoSize=true};paste.Click+=(s,e)=>ImportClipboard();controls.Controls.Add(paste,2,2);
             } else {
-                data.Text=App.Text(settings,"data_root",Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"ExperimentManager","controller"));
+                data.Text=DesktopSettings.Root(settings);
+                DesktopSettings.SelectRoot(settings,data.Text);App.SaveSettings(settings);
+                App.ClientTrace("settings_source",DesktopSettings.PhysicalPath(App.SettingsFile));
+                App.ClientTrace("workspace_selected",data.Text);
                 controls.Controls.Add(new Label {Text="数据目录",AutoSize=true},0,0); controls.Controls.Add(data,1,0);
-                var choose=new Button {Text="选择目录…",AutoSize=true}; choose.Click+=(s,e)=>{using(var picker=new FolderBrowserDialog {SelectedPath=data.Text,Description="选择已有或新建的主控数据目录"}) if(picker.ShowDialog()==DialogResult.OK) {data.Text=picker.SelectedPath;settings["data_root"]=data.Text;App.Write(App.SettingsFile,settings);RefreshState();}};controls.Controls.Add(choose,2,0);
+                var choose=new Button {Text="选择目录…",AutoSize=true}; choose.Click+=async(s,e)=>{using(var picker=new FolderBrowserDialog {SelectedPath=data.Text,Description="选择已有或新建的主控数据目录"}) if(picker.ShowDialog()==DialogResult.OK) {
+                    string selected=Path.GetFullPath(picker.SelectedPath);if(string.Equals(selected,data.Text,StringComparison.OrdinalIgnoreCase))return;
+                    await Execute(async()=>{var previous=await Controller("controller-status");if(App.Flag(previous,"running"))throw new InvalidOperationException("请先停用当前主控，再切换数据目录；节点中的 Docker 实验可继续运行。");DesktopSettings.SelectRoot(settings,selected);App.SaveSettings(settings);data.Text=DesktopSettings.Root(settings);RefreshLaunchers();});RefreshState();
+                }};controls.Controls.Add(choose,2,0);
             }
             layout.Controls.Add(controls);
             var actions=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
@@ -528,9 +553,14 @@ namespace ExperimentManagerDesktop {
             if(App.Worker) AddButton(actions,"暂停 / 恢复",()=>OpenComputeSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
+            if(App.Worker)AddButton(actions,"无人值守启动…",()=>OpenBootSettings());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
             var preferences=new FlowLayoutPanel {Dock=DockStyle.Top,AutoSize=true};
-            startup.Checked=DesktopRuntime.AutoStart;startup.CheckedChanged+=(s,e)=>{try{DesktopRuntime.AutoStart=startup.Checked;}catch(Exception ex){summary.Text=ex.Message;}};
+            startup.Checked=DesktopRuntime.AutoStart;startup.CheckedChanged+=(s,e)=>{
+                if(updatingStartup)return;
+                try{DesktopRuntime.AutoStart=startup.Checked;summary.Text=startup.Checked?"已开启：登录 Windows 后在后台启动客户端。":"已关闭开机自启。";}
+                catch(Exception ex){updatingStartup=true;try{startup.Checked=DesktopRuntime.AutoStart;}finally{updatingStartup=false;}summary.Text="开机自启设置失败："+ex.Message;}
+            };
             autoEnableCompute.Checked=App.Flag(settings,"auto_enable_compute");
             autoEnableCompute.CheckedChanged+=(s,e)=>SavePreference("auto_enable_compute",autoEnableCompute.Checked);
             autoUpdate.Checked=App.Flag(settings,"auto_update");
@@ -541,7 +571,7 @@ namespace ExperimentManagerDesktop {
                 if(!autoUpdate.Checked&&UpdateQueue.State.Automatic&&UpdateQueue.CanCancel)UpdateQueue.Cancel();
             };
             releaseResources.Checked=!settings.ContainsKey("release_resources")||App.Flag(settings,"release_resources");
-            releaseResources.CheckedChanged+=(s,e)=>{settings["release_resources"]=releaseResources.Checked;App.Write(App.SettingsFile,settings);};
+            releaseResources.CheckedChanged+=(s,e)=>{settings["release_resources"]=releaseResources.Checked;App.SaveSettings(settings);};
             preferences.Controls.Add(startup);if(App.Worker)preferences.Controls.Add(autoEnableCompute);
             preferences.Controls.Add(autoUpdate);if(App.Worker)preferences.Controls.Add(releaseResources);
             layout.Controls.Add(preferences);
@@ -551,12 +581,15 @@ namespace ExperimentManagerDesktop {
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
             menu.Items.Add("停用并释放 Docker / WSL",null,(s,e)=>Stop());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
+            menu.Items.Add("设置 · 开机自启与更新",null,(s,e)=>ShowStatus());
             menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
+            ApplyBootControls();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
             timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpHostControl();await PumpUpdates();if(!exiting)RefreshState();};
             Shown+=async (s,e)=> {
                 timer.Start();App.ClientTrace("client_shown");
                 if(startingAfterUpdate)App.UpdateReport("client_start","launched");
+                if(!App.Worker&&App.Has(args,"--settings")){RefreshState();NotifyUpdates();return;}
                 if(App.Worker) {
                     await Execute(async()=>{
                         string inventory=await Task.Run(()=>App.Run("wsl.exe","--list","--quiet"));
@@ -564,6 +597,7 @@ namespace ExperimentManagerDesktop {
                         if(distro.Items.Count==0) throw new Exception("请先安装 WSL2 和 Ubuntu，并在 Ubuntu 中创建普通用户。");
                         string chosen=App.Text(settings,"distribution"); distro.SelectedItem=chosen; if(distro.SelectedIndex<0) distro.SelectedIndex=0;
                     });
+                    if(WorkerBoot.Managed)WorkerBoot.EnsureHost();
                     if(DesktopLifecycle.ShouldEnableCompute(settings,App.Worker,App.Has(args,"--resume-service")))await StartWorkerAsync(autoEnableCompute.Checked);
                     else RefreshState();
                     if(background)Hide();
@@ -583,8 +617,16 @@ namespace ExperimentManagerDesktop {
         }
         static void AddButton(Control parent,string text,Action action) {var button=new Button {Text=text,AutoSize=true,Margin=new Padding(0,8,12,8)};button.Click+=(s,e)=>action();parent.Controls.Add(button);}
         async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;if(startingAfterUpdate)App.UpdateReport("backend_start","failed",ex.Message);try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}catch(UnauthorizedAccessException){}}finally{busy=false;} }
+        void ApplyBootControls(){bool editable=!WorkerBoot.Managed;distro.Enabled=editable;existing.Enabled=editable;pairing.Enabled=editable;autoEnableCompute.Enabled=editable;releaseResources.Enabled=editable;}
+        void OpenBootSettings() {
+            if(busy||hostLoop.Applying||hostPumping||pumpingUpdates){summary.Text="当前后台操作尚未结束，请稍后打开无人值守设置。";return;}
+            busy=true;timer.Stop();
+            try {using(var form=new WorkerBootForm())form.ShowDialog(this);}
+            finally {settings=App.ReadSettings();deactivated=App.Flag(settings,"deactivated");ApplyBootControls();hostControl=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));busy=false;timer.Start();RefreshState();}
+        }
         internal void ShowStatus(){Show();WindowState=FormWindowState.Normal;Activate();RefreshState();}
         async void ExitFromTray() {
+            if(WorkerBoot.Managed){exiting=true;Close();return;}
             if(busy||hostLoop.Applying){Show();WindowState=FormWindowState.Normal;Activate();return;}
             busy=true;timer.Stop();Enabled=false;tray.ContextMenuStrip.Enabled=false;
             Show();WindowState=FormWindowState.Normal;
@@ -602,7 +644,7 @@ namespace ExperimentManagerDesktop {
                     ()=>App.Worker?WorkerCommand("status"):Controller("controller-status"),Display,
                     App.Worker?(TimeSpan?)null:TimeSpan.FromSeconds(30),finalStatus:App.Worker?"stopped":null);
                 if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
-                deactivated=true;settings["deactivated"]=true;App.Write(App.SettingsFile,settings);
+                deactivated=true;settings["deactivated"]=true;App.SaveSettings(settings);
                 if(App.Worker)await ReleaseWorkerResources();
                 exiting=true;Close();
             } catch(Exception ex) {
@@ -619,7 +661,7 @@ namespace ExperimentManagerDesktop {
             finally {updateDialog=null;}
         }
         void SavePreference(string name,bool value) {
-            try {settings[name]=value;App.Write(App.SettingsFile,settings);}
+            try {settings[name]=value;App.SaveSettings(settings);}
             catch(Exception ex) {summary.Text="设置保存失败："+ex.Message;}
         }
         void NotifyUpdates() {
@@ -644,7 +686,7 @@ namespace ExperimentManagerDesktop {
             UpdateQueue.Enqueue(UpdateQueue.State.Release??AvailableUpdate,install,false);NotifyUpdates();
         }
         async Task PumpUpdates() {
-            if(App.Worker&&deactivated&&(!UpdateQueue.Active||UpdateQueue.State.Automatic))return;
+            if(App.Worker&&(WorkerBoot.Managed?!WorkerBoot.CanAutoUpdate(App.Read(WorkerBoot.StatusPath)):deactivated)&&(!UpdateQueue.Active||UpdateQueue.State.Automatic))return;
             if(pumpingUpdates||exiting)return;pumpingUpdates=true;
             try {
                 if(DateTime.UtcNow>=nextCleanup) {
@@ -670,6 +712,7 @@ namespace ExperimentManagerDesktop {
             Exception failure=null;
             try {
                 await Task.Run(()=>UpdateService.ValidateDownloaded(release,installer));
+                if(WorkerBoot.Managed)await WorkerBoot.SuspendForUpdate();
                 string report=Path.Combine(App.SettingsRoot,"updates","verify-"+Guid.NewGuid().ToString("N")+".json");
                 try {
                     await Task.Run(()=>App.Run(installer,"--self-test","--report",report));
@@ -700,9 +743,10 @@ namespace ExperimentManagerDesktop {
                 }
             } catch(Exception ex) {failure=ex;}
             if(failure!=null) {
+                if(WorkerBoot.Managed)WorkerBoot.ResumeAfterUpdate();
                 App.UpdateReport("preparing_install","failed",failure.Message);
                 string recovery="";
-                if(stopRequested&&wasRunning) {
+                if(stopRequested&&wasRunning&&!WorkerBoot.Managed) {
                     try {
                         var current=App.Worker?await WorkerCommand("status"):await Controller("controller-status");
                         if(!App.Flag(current,"running")) {
@@ -717,6 +761,7 @@ namespace ExperimentManagerDesktop {
             }
         }
         async Task PumpHostControl() {
+            if(WorkerBoot.Managed)return;
             if(!App.Worker||hostPumping||exiting||DateTime.UtcNow<nextHost)return;
             hostPumping=true;nextHost=DateTime.UtcNow.AddSeconds(5);
             try {
@@ -747,19 +792,19 @@ namespace ExperimentManagerDesktop {
                         deactivated=true;settings["deactivated"]=true;settings["resources_released"]=true;
                         settings["host_managed_release"]=!App.Flag(settings,"host_local_hold");ReleaseWorkerHold();
                         settings["release_detail"]="Docker / WSL 已关闭，内存已释放；Windows 控制连接保持在线，可从中控恢复。";
-                        App.Write(App.SettingsFile,settings);
+                        App.SaveSettings(settings);
                         hostControl.Observe(intent,"released",App.Text(settings,"release_detail"),new Dictionary<string,object>{
                             {"agents_stopped",true},{"docker_stopped",true},{"wsl_stopped",true},{"resources_released",true}});
                         await Task.Run(()=>hostControl.Sync());return;
                     }
-                    if(DateTime.UtcNow<nextHostAttempt)return;
-                    nextHostAttempt=DateTime.UtcNow.AddSeconds(30);busy=true;
+                    if(!hostReleaseRetry.Ready(intent,DateTime.UtcNow))return;
+                    busy=true;
                     try {
                         hostControl.Observe(intent,"releasing","中控请求释放；Windows 正在保存实验、停用算力并关闭空闲 Docker / WSL。");
                         await Task.Run(()=>hostControl.Sync());
                         var state=await DesktopRuntime.PrepareWorkerRelease(SelectedDistribution,action=>WorkerCommand(action),()=>true,Display,()=>{
                             deactivated=true;settings["deactivated"]=true;settings["host_managed_release"]=!App.Flag(settings,"host_local_hold");
-                            settings["resources_released"]=false;ReleaseWorkerHold();App.Write(App.SettingsFile,settings);
+                            settings["resources_released"]=false;ReleaseWorkerHold();App.SaveSettings(settings);
                         });
                         var latest=await Task.Run(()=>hostControl.Sync());
                         if(App.Text(latest,"intent")!=intent||App.Text(latest,"mode")!="release") {
@@ -767,7 +812,8 @@ namespace ExperimentManagerDesktop {
                         }
                         string detail=await DesktopRuntime.Release(SelectedDistribution,state,false);
                         settings["resources_released"]=App.Flag(state,"resources_released");settings["release_detail"]=detail;
-                        App.Write(App.SettingsFile,settings);
+                        if(App.Flag(state,"resources_released"))hostReleaseRetry.Completed();else hostReleaseRetry.Failed(DateTime.UtcNow);
+                        App.SaveSettings(settings);
                         hostControl.Observe(intent,App.Flag(state,"resources_released")?"released":"blocked",detail,state);
                         await Task.Run(()=>hostControl.Sync());DisplayInactive();
                     } finally {busy=false;}
@@ -783,7 +829,7 @@ namespace ExperimentManagerDesktop {
                     await Task.Run(()=>hostControl.Sync());bool restarted=await StartWorkerAsync(true);
                     if(restarted) {
                         hostRestoreRetry.Completed();
-                        settings["host_managed_release"]=false;App.Write(App.SettingsFile,settings);
+                        settings["host_managed_release"]=false;App.SaveSettings(settings);
                         hostControl.Observe(intent,"retained","运行环境已恢复；实验执行状态由 Worker 继续回报。");
                         await Task.Run(()=>hostControl.Sync());
                         App.ClientTrace("host_restore_completed");
@@ -796,6 +842,7 @@ namespace ExperimentManagerDesktop {
                 }
             } catch(Exception ex) {
                 App.ClientError("host_operation_failed",ex);
+                if(mode=="release")hostReleaseRetry.Failed(DateTime.UtcNow);
                 nextHost=DateTime.UtcNow.AddSeconds(15);
                 // A network failure never starts a dormant WSL or grants a new
                 // release action. Existing queued policy can be checked later.
@@ -806,12 +853,27 @@ namespace ExperimentManagerDesktop {
         }
         internal void FinishUpdateExit(){exiting=true;if(updateDialog!=null)updateDialog.Close();Close();}
         internal void OpenFromTray(){if(App.Worker)ShowStatus();else OpenController();}
+        void RefreshLaunchers() {
+            if(App.Worker)return;
+            string installRoot=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ExperimentManager",App.Role);
+            string target=Path.Combine(App.Package,App.Executable);
+            if(!App.OwnsShortcutTarget(target,installRoot))return;
+            App.InstallShortcuts(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs"),installRoot,target,
+                App.Flag(settings,"desktop_shortcut"),App.Arguments("--data-root",data.Text));
+            if(DesktopRuntime.AutoStart)DesktopRuntime.AutoStart=true;
+        }
         async Task<Dictionary<string,object>> Controller(string action) {
             string root=data.Text; var value=await Task.Run(()=>App.Command(Path.Combine(App.Package,"runtime","python.exe"),"-m","expman.desktop",action,"--root",root));
+            if((action=="controller-start"||action=="controller-open")&&App.Flag(value,"responsive")) {
+                var identity=App.Read(Path.Combine(root,"hub.json"));settings["hub_initialized"]=true;
+                settings["workspace_id"]=App.Text(identity,"workspace_id");App.SaveSettings(settings);
+            }
             Display(value);return value;
         }
         string SelectedDistribution {get{if(distro.SelectedItem==null)throw new Exception("选择原节点使用的 Ubuntu。");return Convert.ToString(distro.SelectedItem);}}
         async Task<Dictionary<string,object>> WorkerCommand(string action,params string[] options) {
+            if(WorkerBoot.Managed)return await Task.Run(()=>WorkerBoot.Command(WorkerBoot.Load(),action,options));
             string distribution=SelectedDistribution,credential=pairing.Text;
             string selected=existing.SelectedIndex>0?configs[existing.SelectedIndex]:"";
             return await Task.Run(()=> {
@@ -821,7 +883,7 @@ namespace ExperimentManagerDesktop {
                 if(action=="start"||action=="install") {
                     if(action=="install") {argv.Add("--backend");argv.Add("detached");}
                     if(!string.IsNullOrEmpty(selected)) {argv.Add("--config");argv.Add(selected);}
-                    else if(!string.IsNullOrEmpty(credential)&&File.Exists(credential)) {argv.Add("--pairing");argv.Add(App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",credential).Trim());}
+                    else if((action=="start"||action=="install")&&!string.IsNullOrEmpty(credential)&&File.Exists(credential)) {argv.Add("--pairing");argv.Add(App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",credential).Trim());}
                 }
                 var result=App.CommandWithTimeout(action=="gpu-enable"?300000:120000,"wsl.exe",argv.ToArray());
                 if(action=="update-status")return result;
@@ -835,28 +897,40 @@ namespace ExperimentManagerDesktop {
                 return result;
             });
         }
-        async void RefreshState(){if(busy||hostLoop.Applying)return;if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
-        async void StartWorker(){if(hostLoop.Applying)return;await StartWorkerAsync(false);}
+        async void RefreshState(){if(WorkerBoot.Managed){summary.Text=WorkerBoot.DisplayStatus();return;}if(busy||hostLoop.Applying)return;if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
+        async void StartWorker(){if(WorkerBoot.Managed){WorkerBoot.Request("available");WorkerBoot.EnsureHost();RefreshState();return;}if(hostLoop.Applying||busy){summary.Text="当前操作尚未完成。若主控仍要求释放资源，请先在主控将此节点恢复为允许接单。\n"+(hostControl.Report==null?"":App.Text(hostControl.Report,"detail"));return;}await StartWorkerAsync(false);}
         async Task<bool> StartWorkerAsync(bool automatic){
+            if(WorkerBoot.Managed){WorkerBoot.EnsureHost();RefreshState();return false;}
             bool started=false;lastWorkerStartError="未能启动原节点，请检查客户端状态。";
             await Execute(async()=>{
                 try {
+                    App.ClientTrace("worker_activation_requested",automatic?"automatic":"manual");
+                    if(hostControl.Linked) {
+                        Dictionary<string,object> desired=null;
+                        try {desired=await Task.Run(()=>hostControl.Sync());}
+                        catch(System.Net.WebException ex){App.ClientTrace("activation_policy_unreachable",ex.Message);}
+                        if(desired!=null&&App.Text(desired,"mode")=="release"&&App.Text(desired,"source")=="center")
+                            throw new IOException("主控仍要求此节点停止实验并释放资源。请先在主控恢复为“允许接单”，再启用算力。");
+                    }
                     if(!await EnsureDocker(automatic))return;
-                    settings["resources_released"]=false;App.Write(App.SettingsFile,settings);
+                    settings["resources_released"]=false;App.SaveSettings(settings);
+                    await DesktopRuntime.WaitForWorkerDocker(()=>WorkerCommand("runtime-status"),message=>summary.Text=message);
                     summary.Text="正在准备算力…";
-                    var state=automatic?await WorkerCommand("status"):null;
-                    if(state==null||(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing"))
+                    var state=await WorkerCommand("status");
+                    if(!App.Flag(state,"running")&&App.Text(state,"status")!="starting"&&App.Text(state,"status")!="preparing")
                         state=await WorkerCommand("install");
                     Display(state);
-                    await DesktopRuntime.WaitForWorkerReady(()=>WorkerCommand("status"),Display);
+                    var ready=await DesktopRuntime.WaitForWorkerReady(()=>WorkerCommand("status"),Display);
                     hostControl.Connect(await WorkerCommand("host-info"),SelectedDistribution);
                     deactivated=false;settings["deactivated"]=false;settings["resources_released"]=false;
+                    settings["release_detail"]="算力已启用，原节点已连接管理端。";lastWorkerStartError="";
                     if(!automatic){settings["host_managed_release"]=false;settings["host_local_hold"]=false;}
-                    App.Write(App.SettingsFile,settings);started=true;
+                    App.SaveSettings(settings);started=true;App.ClientTrace("worker_activation_ready",App.Text(ready,"node_id")+" "+App.Text(ready,"status"));
                 } catch(Exception ex) {
+                    App.ClientError("worker_activation_failed",ex);
                     lastWorkerStartError=ex.Message;
                     settings["release_detail"]="恢复接单失败："+ex.Message;
-                    App.Write(App.SettingsFile,settings);throw;
+                    App.SaveSettings(settings);throw;
                 }
             });
             return started;
@@ -872,7 +946,7 @@ namespace ExperimentManagerDesktop {
             using(var form=new ComputePauseForm(policy,await WorkerCommand("status"),options=>WorkerCommand("compute-policy",options)))form.ShowDialog(this);
             Display(await WorkerCommand("status"));
         });}
-        async void Stop(){if(hostLoop.Applying||(!App.Worker&&deactivated))return;await Execute(async()=>{
+        async void Stop(){if(WorkerBoot.Managed){WorkerBoot.Request("release");WorkerBoot.EnsureHost();RefreshState();return;}if(hostLoop.Applying||(!App.Worker&&deactivated))return;await Execute(async()=>{
             timer.Stop();bool workerStopped=false;try {
                 if(App.Worker) {
                     var state=await DesktopRuntime.PrepareWorkerRelease(SelectedDistribution,action=>WorkerCommand(action),
@@ -883,7 +957,7 @@ namespace ExperimentManagerDesktop {
                             settings["host_managed_release"]=false;settings["host_local_hold"]=true;
                             settings["resources_released"]=false;
                             settings["release_detail"]="算力已停用；正在检查 Docker 与 WSL 的释放状态。";
-                            ReleaseWorkerHold();App.Write(App.SettingsFile,settings);
+                            ReleaseWorkerHold();App.SaveSettings(settings);
                         });
                     if(state==null)return;
                     await ReleaseWorkerResources(true,state);
@@ -892,7 +966,7 @@ namespace ExperimentManagerDesktop {
             }catch(Exception ex){
                 if(workerStopped) {
                     settings["release_detail"]="算力已停用；资源释放未完成："+ex.Message+"。可再次点击“停用并释放 Docker / WSL”重试。";
-                    App.Write(App.SettingsFile,settings);DisplayInactive();Show();
+                    App.SaveSettings(settings);DisplayInactive();Show();
                     // Execute's general error display would hide that compute
                     // already stopped and resource release remains retryable.
                     return;
@@ -903,10 +977,10 @@ namespace ExperimentManagerDesktop {
         async Task StopBackend(){
             Display(App.Worker?await WorkerCommand("deactivate"):await Controller("controller-stop"));
             await DesktopLifecycle.WaitForStopped(()=>App.Worker?WorkerCommand("status"):Controller("controller-status"),Display,App.Worker?(TimeSpan?)null:TimeSpan.FromSeconds(30),finalStatus:App.Worker?"stopped":null);
-            deactivated=true;settings["deactivated"]=true;App.Write(App.SettingsFile,settings);
+            deactivated=true;settings["deactivated"]=true;App.SaveSettings(settings);
             if(!App.Worker&&browserWindowIcons!=null)await Task.Run(()=>browserWindowIcons.CloseOwnedWindows());
         }
-        async void OpenController(){await Execute(async()=>{deactivated=false;settings["deactivated"]=false;App.Write(App.SettingsFile,settings);var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
+        async void OpenController(){await Execute(async()=>{deactivated=false;settings["deactivated"]=false;App.SaveSettings(settings);var result=await Controller("controller-open");string url=App.Text(result,"url");if(!string.IsNullOrEmpty(url)){OpenAppWindow(url);Hide();}});}
         void DisplayInactive(){summary.Text=(App.Worker?(App.Flag(settings,"resources_released")?"已停用 · 资源已释放":"已停用 · 资源释放未完成"):"已停用")+" · 点击“"+(App.Worker?"启用算力":"打开工作空间")+"”恢复\n"+App.Text(settings,"release_detail","实验记录与连接身份已保留。");}
         void ImportClipboard(){
             try {
@@ -914,7 +988,7 @@ namespace ExperimentManagerDesktop {
                 if(text.StartsWith("exlab://connect/",StringComparison.Ordinal)) {string raw=text.Substring("exlab://connect/".Length).Replace('-','+').Replace('_','/');text=Encoding.UTF8.GetString(Convert.FromBase64String(raw.PadRight((raw.Length+3)/4*4,'=')));}
                 var value=App.Json.Deserialize<Dictionary<string,object>>(text);
                 if(App.Text(value,"node_id").Length==0||App.Text(value,"token").Length<20||App.Text(value,"hub_url").Length==0)throw new Exception("这是算力端，请复制 Worker 连接凭证。");
-                string path=Path.Combine(App.SettingsRoot,"clipboard.pairing.json");App.Write(path,value);pairing.Text=path;settings["pairing_file"]=path;App.Write(App.SettingsFile,settings);summary.Text="连接凭证已导入，点击“启用算力”。";
+                string path=Path.Combine(App.SettingsRoot,"clipboard.pairing.json");App.Write(path,value);pairing.Text=path;settings["pairing_file"]=path;App.SaveSettings(settings);summary.Text="连接凭证已导入，点击“启用算力”。";
             }catch(Exception ex){summary.Text="粘贴失败："+ex.Message;}
         }
         async Task<bool> EnsureDocker(bool automatic=false){
@@ -923,7 +997,7 @@ namespace ExperimentManagerDesktop {
                 state=>automatic||MessageBox.Show(this,App.Text(state,"detail")+"\n启动 Docker Desktop 并等待连接吗？",
                     App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Question)==DialogResult.Yes,
                 DesktopRuntime.StartDocker,message=>{
-                    settings["resources_released"]=false;settings["release_detail"]=message;App.Write(App.SettingsFile,settings);summary.Text=message;
+                    settings["resources_released"]=false;settings["release_detail"]=message;App.SaveSettings(settings);summary.Text=message;
                 },startupFailure:()=>DesktopDockerRecovery.Failure(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),attempt));
         }
         void ReleaseWorkerHold(){
@@ -932,7 +1006,7 @@ namespace ExperimentManagerDesktop {
         async Task ReleaseWorkerResources(bool explicitRelease=false,Dictionary<string,object> state=null){
             ReleaseWorkerHold();
             settings["resources_released"]=false;
-            if(!explicitRelease&&!releaseResources.Checked){settings["release_detail"]="算力已停用；退出时自动释放选项未开启，Docker 与 WSL 保留。";App.Write(App.SettingsFile,settings);return;}
+            if(!explicitRelease&&!releaseResources.Checked){settings["release_detail"]="算力已停用；退出时自动释放选项未开启，Docker 与 WSL 保留。";App.SaveSettings(settings);return;}
             if(state==null)state=await WorkerCommand("runtime-release");
             bool closeOtherProcesses=explicitRelease&&App.Flag(state,"can_terminate_wsl");
             var containers=DesktopRuntime.OtherContainers(state);
@@ -953,19 +1027,19 @@ namespace ExperimentManagerDesktop {
                 if(!App.Flag(state,"docker_ready"))message+="Docker 未连接，无法核查其容器；可能仍有其他任务。\n";
                 message+="请先保存这些程序中的工作。Center 保持运行，容器、数据卷、实验文件和连接凭证保留。\n确认停止列出的容器、关闭会话并释放 Docker / WSL 内存吗？";
                 if(MessageBox.Show(this,message,App.Title,MessageBoxButtons.YesNo,MessageBoxIcon.Warning)!=DialogResult.Yes) {
-                    settings["release_detail"]="资源释放未完成：已保留列出的容器或会话。可再次点击“停用并释放 Docker / WSL”确认关闭。";App.Write(App.SettingsFile,settings);return;
+                    settings["release_detail"]="资源释放未完成：已保留列出的容器或会话。可再次点击“停用并释放 Docker / WSL”确认关闭。";App.SaveSettings(settings);return;
                 }
                 closeOtherProcesses=true;
             }
             summary.Text="正在释放 WSL 内存…";
             settings["release_detail"]=await DesktopRuntime.Release(SelectedDistribution,state,closeOtherProcesses,confirmContainers?DesktopRuntime.ContainerIds(state):null);
-            settings["resources_released"]=App.Flag(state,"resources_released");App.Write(App.SettingsFile,settings);
+            settings["resources_released"]=App.Flag(state,"resources_released");App.SaveSettings(settings);
         }
         void Display(Dictionary<string,object> value) {
             if(App.Worker&&hostControl!=null&&hostControl.Linked&&App.Text(value,"node_id").Length>0&&App.Text(value,"node_id")!=hostControl.NodeId)
                 hostControl.Disconnect();
             string state=App.Text(value,"status");
-            string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state=="online"?"已连接":state=="offline"?"主控离线":state=="preparing"?"准备中":state=="starting"?"启动中":state=="stopped"?"已停止":state=="running"?"运行中":state=="failed"?"启动失败":state;
+            string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state=="online"?"已连接":state=="offline"?"主控离线":state=="unresponsive"?"主控连接异常":state=="port_conflict"?"主控端口冲突":state=="preparing"?"准备中":state=="starting"?"启动中":state=="stopped"?"已停止":state=="running"?"运行中":state=="failed"?"启动失败":state;
             summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
             object agentRaw;var agent=value.TryGetValue("controller_agent",out agentRaw)?agentRaw as Dictionary<string,object>:null;
             if(agent!=null)summary.Text+="\nAI 托管："+(App.Flag(agent,"enabled")&&App.Flag(agent,"provider_enabled")?"已开启 · 主控按需规划与检查":"未开启")+(string.IsNullOrEmpty(App.Text(agent,"active_run"))?"":" · 正在处理");

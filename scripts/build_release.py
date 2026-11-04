@@ -25,7 +25,7 @@ PYTHON_URL = f'https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON
 PYTHON_SHA256 = 'd1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf'
 ROLES = {
     'windows-controller-x64': ('Start-Controller.cmd', 'Allow-Worker-Connections.cmd', 'Allow-Worker-Connections.ps1', 'Import-Algorithm.cmd'),
-    'windows-worker-x64': ('Client-Worker.sh', 'Install-Worker.sh', 'Start-Background-Worker.sh', 'Stop-Worker.sh', 'Worker-Status.sh', 'Start-Worker.cmd', 'Start-Worker.ps1', 'Start-Worker.sh', 'Configure-Project.cmd', 'Configure-Project.sh', 'Update-Worker.cmd', 'Update-Worker.ps1', 'Update-Worker.sh'),
+    'windows-worker-x64': ('Check-Unattended-Worker.sh', 'Client-Worker.sh', 'Install-Worker.sh', 'Start-Background-Worker.sh', 'Stop-Worker.sh', 'Worker-Status.sh', 'Start-Worker.cmd', 'Start-Worker.ps1', 'Start-Worker.sh', 'Configure-Project.cmd', 'Configure-Project.sh', 'Update-Worker.cmd', 'Update-Worker.ps1', 'Update-Worker.sh'),
     'ubuntu-worker-x64': ('Install-Worker.sh', 'Client-Worker.sh', 'Start-Background-Worker.sh', 'Stop-Worker.sh', 'Worker-Status.sh', 'Start-Worker.sh', 'Configure-Project.sh', 'Import-Algorithm.sh', 'Update-Worker.sh'),
 }
 
@@ -51,6 +51,7 @@ def application_files(root=ROOT):
     files['expman/static/favicon.ico'] = (root / 'expman/static/favicon.ico').read_bytes()
     files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
     files['docs/EXPERIMENT-MATRICES.zh-CN.md'] = (root / 'docs/EXPERIMENT-MATRICES.zh-CN.md').read_bytes()
+    files['docs/UNATTENDED-WORKER.zh-CN.md'] = (root / 'docs/UNATTENDED-WORKER.zh-CN.md').read_bytes()
     files['mobile/README.md'] = (root / 'mobile/README.md').read_bytes()
     files['docs/RELEASE-0.5.0.md'] = (root / 'docs/RELEASE-0.5.0.md').read_bytes()
     files['docs/LIGHTWEIGHT-RESULTS.zh-CN.md'] = (root / 'docs/LIGHTWEIGHT-RESULTS.zh-CN.md').read_bytes()
@@ -149,7 +150,8 @@ def build(output, python_zip, compiler=None, android_apk=None, legacy_updater=Fa
             f'Extract the whole ZIP. Entry point: {entry}\n'
             f'请先完整解压。启动入口：{entry}\n\n'
             'Windows controller: Python is included; no Docker/WSL required.\n'
-            'Windows worker: install WSL2 Ubuntu, Docker Desktop and NVIDIA driver first.\n'
+            'Windows worker: WSL2 Ubuntu + NVIDIA driver; interactive mode uses Docker Desktop.\n'
+            'Unattended startup: native Docker Engine + NVIDIA Container Toolkit inside WSL2; see docs/UNATTENDED-WORKER.zh-CN.md.\n'
             'Ubuntu worker: install Docker Engine, NVIDIA driver and Container Toolkit first.\n'
             'Windows: double-click the EXE. The app keeps running in the tray when its window closes.\n'
             'Windows：双击 EXE 启动；关闭窗口后软件继续在托盘运行。\n'
