@@ -102,11 +102,13 @@ class ControllerPathTests(unittest.TestCase):
 
     def test_settings_opens_existing_native_client_without_starting_backend(self):
         with patch.object(desktop.sys, 'platform', 'win32'), patch.object(Path, 'is_file', return_value=True), \
+                patch.object(desktop.subprocess, 'CREATE_NO_WINDOW', 0x08000000, create=True), \
                 patch.object(desktop.subprocess, 'Popen') as spawn:
             self.assertTrue(desktop.controller_preferences(self.root)['available'])
             spawn.assert_not_called()
             desktop.controller_preferences(self.root, open_window=True)
         self.assertEqual(spawn.call_args.args[0][1:], ['--settings'])
+        self.assertEqual(spawn.call_args.kwargs['creationflags'], 0x08000000)
         self.assertNotIn('--data-root', spawn.call_args.args[0])
         self.assertFalse(self.root.exists())
 

@@ -56,7 +56,9 @@ class CenterResponsivenessTests(unittest.TestCase):
         try:
             yield
         finally:
-            self.hub.db.set_authorizer(None)
+            # Python 3.10 does not support disabling this callback with None.
+            # Restore unrestricted access after the read-isolation assertion.
+            self.hub.db.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
 
     @contextmanager
     def server(self, **options):
