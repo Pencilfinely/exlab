@@ -91,6 +91,19 @@ namespace ExperimentManagerDesktop {
             folder.RegisterTask(TaskName,TaskXml(launcher,account),6,account,password,1,null);
             c.Enabled=true;App.Write(FilePath,c);
         }
+        internal static void CheckCredentials(string password) {
+            if(String.IsNullOrEmpty(password))throw new ArgumentException("请输入 Windows 账户密码（不是 PIN）。");
+            dynamic scheduler=Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));scheduler.Connect();
+            dynamic folder=scheduler.GetFolder("\\");
+            string name=TaskName+"-CredentialCheck-"+Guid.NewGuid().ToString("N"),account=WindowsIdentity.GetCurrent().Name;
+            var doc=new XmlDocument();doc.LoadXml(TaskXml(Path.Combine(App.SettingsRoot,"boot-launcher.ps1"),account));
+            var ns=new XmlNamespaceManager(doc.NameTable);ns.AddNamespace("t",doc.DocumentElement.NamespaceURI);
+            var enabled=doc.CreateElement("Enabled",doc.DocumentElement.NamespaceURI);enabled.InnerText="false";
+            doc.SelectSingleNode("//t:Settings",ns).AppendChild(enabled);
+            bool created=false;
+            try {folder.RegisterTask(name,doc.OuterXml,2,account,password,1,null);created=true;}
+            finally {if(created)folder.DeleteTask(name,0);}
+        }
         internal static void DisableAutostart() {
             dynamic scheduler=Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));scheduler.Connect();
             scheduler.GetFolder("\\").GetTask(TaskName).Enabled=false;
@@ -100,7 +113,7 @@ namespace ExperimentManagerDesktop {
             App.Write(Path.Combine(App.SettingsRoot,"boot-request.json"),new{mode=mode});
         }
         internal static void EnsureHost() {
-            if(!Managed||File.Exists(SuspendPath))return;
+            if(!Managed||File.Exists(SuspendPath)||WorkerMigration.Pending)return;
             try {using(new FileStream(Path.Combine(App.SettingsRoot,"boot-owner.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None)){} }
             catch(IOException){return;}
             string version=App.Text(App.ReadSettings(),"installed_version");
@@ -142,7 +155,7 @@ namespace ExperimentManagerDesktop {
                 Dictionary<string,object> desired=null;bool known=false;
                 try {while(Load().Enabled) {
                     try {
-                        if(File.Exists(SuspendPath)){WriteStatus("suspended","等待软件更新交接。");return 0;}
+                        if(File.Exists(SuspendPath)||WorkerMigration.Pending){WriteStatus("suspended","等待更新或迁移交接。");return 0;}
                         if(host.Linked) {
                             if(host.NodeId!=c.NodeId||host.Distribution!=c.Distribution)throw new IOException("Windows 控制连接与无人值守节点不一致，请重新检测并配置。");
                             try {desired=host.Sync();known=true;}catch(System.Net.WebException){ /* Retain last confirmed policy during an outage. */ }

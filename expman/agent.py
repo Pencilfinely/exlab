@@ -174,6 +174,8 @@ class Agent:
 
     def __init__(self, config_path):
         self.config_path = Path(config_path).resolve()
+        if (self.config_path.parent / 'migration-owner.json').exists():
+            raise RuntimeError('节点已由迁移向导锁定；请完成迁移或恢复原节点后启动。')
         self.config = common.read_json(self.config_path)
         if not isinstance(self.config, dict):
             raise ValueError("Node config must be a JSON object")

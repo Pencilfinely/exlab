@@ -25,6 +25,7 @@ EXTRA_SOURCES = (ROOT / 'deploy/desktop/DesktopUpdates.cs', ROOT / 'deploy/deskt
                  ROOT / 'deploy/desktop/DesktopDockerRecovery.cs',
                  ROOT / 'deploy/desktop/ComputePauseForm.cs')
 EXTRA_SOURCES += (ROOT / 'deploy/desktop/DesktopSettings.cs', ROOT / 'deploy/desktop/WorkerBoot.cs', ROOT / 'deploy/desktop/WorkerBootForm.cs')
+EXTRA_SOURCES += (ROOT / 'deploy/desktop/WorkerMigration.cs', ROOT / 'deploy/desktop/WorkerMigrationForm.cs')
 MANIFEST = ROOT / 'deploy/desktop/app.manifest'
 ICONS = {'controller': ROOT / 'assets/center.ico', 'worker': ROOT / 'assets/worker.ico'}
 REFERENCES = ('System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Web.Extensions.dll',
