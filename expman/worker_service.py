@@ -238,6 +238,9 @@ def _spawn_supervisor(root, settings, *, shutdown_only=False):
 
 
 def start(service_root=None, *, config=None, pairing=None, worker_root=None):
+    migration = _root(service_root) / 'migration-owner.json'
+    if migration.exists():
+        raise RuntimeError('此节点正在迁移或已迁往专用 WSL。请在无人值守向导继续或恢复原节点。')
     _require_linux()
     root = _root(service_root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -824,6 +827,8 @@ def _run_agent(root, config_path):
 
 
 def serve(service_root=None, *, shutdown_only=False):
+    if (_root(service_root) / 'migration-owner.json').exists():
+        return 0
     _require_linux()
     root = _root(service_root)
     # Both detached and systemd paths acquire this lock before setting state.

@@ -91,6 +91,8 @@ jobs:
           bash -n deploy/release/Worker-Status.sh
           bash -n deploy/release/Client-Worker.sh
           bash -n deploy/release/Check-Unattended-Worker.sh
+          bash -n deploy/release/Migrate-Worker.sh
+          bash -n deploy/release/Prepare-Unattended-Engine.sh
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

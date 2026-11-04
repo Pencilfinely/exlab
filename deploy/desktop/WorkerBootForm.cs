@@ -18,7 +18,9 @@ namespace ExperimentManagerDesktop {
             Text="Worker · 无人值守启动";Size=new Size(740,650);MinimumSize=Size;Font=new Font("Microsoft YaHei UI",10);StartPosition=FormStartPosition.CenterParent;
             var layout=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(20)};Controls.Add(layout);
             layout.Controls.Add(new Label {Text="开机运行算力后台，无需登录 Windows",AutoSize=true,Font=new Font(Font.FontFamily,15,FontStyle.Bold)});
-            layout.Controls.Add(new Label {Text="需要独立 Docker Engine、NVIDIA 容器支持及已配置的 Worker。\n先准备环境并停止原 Worker，再检测。密码交给 Windows 任务计划程序保存。",AutoSize=true});
+            layout.Controls.Add(new Label {Text="已有 Docker Desktop 节点可使用一键迁移，自动准备环境并保留原节点数据。\n下方手动检测适用于已经准备好独立 Docker 的环境。",AutoSize=true});
+            var migrate=new Button {Text="一键迁移并启用（推荐）…",AutoSize=true};layout.Controls.Add(migrate);
+            migrate.Click+=(s,e)=>{using(var form=new WorkerMigrationForm())form.ShowDialog(this);distribution.Text=App.Text(App.ReadSettings(),"distribution");};
             Add(layout,"WSL 发行版",distribution);Add(layout,"Linux 普通用户名",linuxUser);Add(layout,"Worker 服务目录（可留空）",serviceRoot);
             Add(layout,"Windows 账户 "+WindowsIdentity.GetCurrent().Name+" 的密码（不是 PIN）",password);
             layout.Controls.Add(dedicated);

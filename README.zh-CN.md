@@ -7,7 +7,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**桌面端当前版本：0.5.28 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.28.md)
+**桌面端当前版本：0.5.29 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.29.md)
 
 Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及默认关闭的自动更新。0.5.10 起，Windows Center、Windows Worker 和 Ubuntu Worker 的手动及自动更新均只交接管理进程；Docker 实验继续运行，原任务队列和待回传数据在重启后接续。在原服务目录运行 `bash Update-Worker.sh`，加 `--auto enable` 开启自动更新。[Ubuntu 更新命令](docs/OPERATIONS.zh-CN.md#ubuntu一条命令更新与可选自动更新)。
 
@@ -17,7 +17,7 @@ Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及�
 
 动态算力机制支持节点维护、插电限制、定时释放、队列调控和检查点接手。执行状态用于调度与续训，实验结果保持轻量回传；可选 AI 提供规划建议，也可开启自动化介入。[使用方式与恢复条件](docs/DYNAMIC-COMPUTE.zh-CN.md)。
 
-0.5.28 增加 Windows 无人值守启动设置，适用于已迁移到独立 Docker Engine 的 WSL 环境；需配置账户并完成未登录重启验收。[配置步骤](docs/UNATTENDED-WORKER.zh-CN.md)。0.5.27 等待 Ubuntu 实际连通 Docker 后再启动 Worker，明确主控释放策略与启用操作的冲突，并修复 Docker 状态查询超时导致的退出重试。0.5.26 修复 Windows Worker 将正常连接状态误判为启用失败，正确等待离线重连并复用运行中的原节点。0.5.25 禁止 Windows 多个主控复用同一端口，明确显示工作空间/认证冲突，并记录实际配置文件路径以排查重定向副本。包含 0.5.24 的修复：Worker 因 SQLite 写锁竞争退出后持续离线时，执行、结果和断点回传共用短写事务互斥，暂时锁错误自动退避恢复，保留原实验；同时包含 0.5.23 的 Center 积压修复。心跳只读取当前需要处理的任务，列表与巡检使用随任务事务同步的轻量状态，巡检批量保存变化；健康检查独立于调度锁，请求数量设有上限。包含 0.5.22 的 Worker 网络回复中断恢复修复。
+0.5.29 增加 Windows 无人值守启动设置，适用于已迁移到独立 Docker Engine 的 WSL 环境；需配置账户并完成未登录重启验收。[配置步骤](docs/UNATTENDED-WORKER.zh-CN.md)。0.5.27 等待 Ubuntu 实际连通 Docker 后再启动 Worker，明确主控释放策略与启用操作的冲突，并修复 Docker 状态查询超时导致的退出重试。0.5.26 修复 Windows Worker 将正常连接状态误判为启用失败，正确等待离线重连并复用运行中的原节点。0.5.25 禁止 Windows 多个主控复用同一端口，明确显示工作空间/认证冲突，并记录实际配置文件路径以排查重定向副本。包含 0.5.24 的修复：Worker 因 SQLite 写锁竞争退出后持续离线时，执行、结果和断点回传共用短写事务互斥，暂时锁错误自动退避恢复，保留原实验；同时包含 0.5.23 的 Center 积压修复。心跳只读取当前需要处理的任务，列表与巡检使用随任务事务同步的轻量状态，巡检批量保存变化；健康检查独立于调度锁，请求数量设有上限。包含 0.5.22 的 Worker 网络回复中断恢复修复。
 
 **AI 自动托管**使用高频规则巡检和低频 AI 研判，支持受限规则编写；报告按需打开。节点操作以 Worker 执行回执确认完成；外部 GPT、Codex 等 agent 可通过独立授权的 MCP / HTTP 查询、操作或委托。[配置与接入说明](docs/AI-AGENT.zh-CN.md)。
 

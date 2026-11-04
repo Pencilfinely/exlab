@@ -422,6 +422,11 @@ static class InstallProbeTests {
         var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
     }
     static void ComputeActivation(string folder) {
+        Assert(WorkerMigration.CanRollback(new Dictionary<string,object>{{"committed",false},{"finished",false}}),"Incomplete migration cannot recover its original node.");
+        Assert(!WorkerMigration.CanRollback(new Dictionary<string,object>{{"committed",true},{"finished",false}}),"Committed migration could restore a stale node database.");
+        Assert(!WorkerMigration.CanRollback(new Dictionary<string,object>{{"committed",false},{"finished",true}}),"Already recovered migration could overwrite subsequent user changes.");
+        Assert(WorkerMigration.OwnsImportedPath(@"\\?\E:\ExLabWorker\job\distribution",@"E:\ExLabWorker\job\distribution"),"WSL extended base path was not recognized.");
+        Assert(!WorkerMigration.OwnsImportedPath(@"E:\ExLabWorker\job\distribution-other",@"E:\ExLabWorker\job\distribution"),"Migration cleanup could unregister another distribution.");
         var bootXml=new System.Xml.XmlDocument();bootXml.LoadXml(WorkerBoot.TaskXml(@"C:\Program Files\ExLab\boot.ps1",@"PC\owner"));
         var bootNs=new System.Xml.XmlNamespaceManager(bootXml.NameTable);bootNs.AddNamespace("t",bootXml.DocumentElement.NamespaceURI);
         Assert(bootXml.SelectSingleNode("//t:BootTrigger",bootNs)!=null&&bootXml.SelectSingleNode("//t:LogonType",bootNs).InnerText=="Password","Boot task incorrectly requires an interactive logon.");
@@ -981,7 +986,7 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs','WorkerMigration.cs','WorkerMigrationForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

@@ -272,6 +272,7 @@ namespace ExperimentManagerDesktop {
                     try {Environment.ExitCode=WorkerBoot.Run();}catch(Exception ex){ClientError("boot_failed",ex);Environment.ExitCode=1;}return;
                 }
                 if(Worker&&Has(args,"--boot-settings")) {using(var form=new WorkerBootForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
+                if(Worker&&Has(args,"--migration-settings")) {using(var form=new WorkerMigrationForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
                 if(Has(args,"--cleanup-installer")) {
                     var until=DateTime.UtcNow.AddMinutes(5);
                     while(DateTime.UtcNow<until) {
@@ -686,6 +687,7 @@ namespace ExperimentManagerDesktop {
             UpdateQueue.Enqueue(UpdateQueue.State.Release??AvailableUpdate,install,false);NotifyUpdates();
         }
         async Task PumpUpdates() {
+            if(App.Worker&&WorkerMigration.Pending)return;
             if(App.Worker&&(WorkerBoot.Managed?!WorkerBoot.CanAutoUpdate(App.Read(WorkerBoot.StatusPath)):deactivated)&&(!UpdateQueue.Active||UpdateQueue.State.Automatic))return;
             if(pumpingUpdates||exiting)return;pumpingUpdates=true;
             try {
@@ -761,6 +763,7 @@ namespace ExperimentManagerDesktop {
             }
         }
         async Task PumpHostControl() {
+            if(App.Worker&&WorkerMigration.Pending)return;
             if(WorkerBoot.Managed)return;
             if(!App.Worker||hostPumping||exiting||DateTime.UtcNow<nextHost)return;
             hostPumping=true;nextHost=DateTime.UtcNow.AddSeconds(5);
@@ -900,6 +903,7 @@ namespace ExperimentManagerDesktop {
         async void RefreshState(){if(WorkerBoot.Managed){summary.Text=WorkerBoot.DisplayStatus();return;}if(busy||hostLoop.Applying)return;if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
         async void StartWorker(){if(WorkerBoot.Managed){WorkerBoot.Request("available");WorkerBoot.EnsureHost();RefreshState();return;}if(hostLoop.Applying||busy){summary.Text="当前操作尚未完成。若主控仍要求释放资源，请先在主控将此节点恢复为允许接单。\n"+(hostControl.Report==null?"":App.Text(hostControl.Report,"detail"));return;}await StartWorkerAsync(false);}
         async Task<bool> StartWorkerAsync(bool automatic){
+            if(WorkerMigration.Pending){summary.Text="迁移尚未结束，请打开无人值守启动向导恢复或完成交接。";return false;}
             if(WorkerBoot.Managed){WorkerBoot.EnsureHost();RefreshState();return false;}
             bool started=false;lastWorkerStartError="未能启动原节点，请检查客户端状态。";
             await Execute(async()=>{
