@@ -120,6 +120,11 @@ class HubTimingTests(unittest.TestCase):
         self.hub.close()
         connection = sqlite3.connect(self.root / "hub.sqlite3")
         try:
+            # Model a database from before both timing and read projections.
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='jobs'").fetchall():
+                connection.execute('DROP TRIGGER "' + row[0] + '"')
+            connection.execute("DROP TABLE job_summaries")
+            connection.execute("DROP TABLE job_workload_keys")
             connection.execute("ALTER TABLE jobs DROP COLUMN timing")
             connection.commit()
         finally:

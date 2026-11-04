@@ -9,6 +9,7 @@ import urllib.request
 import webbrowser
 
 from .common import read_json
+from .controller_paths import default_controller_root
 
 
 class InstanceLock:
@@ -46,11 +47,6 @@ class InstanceLock:
     def __exit__(self, *args):
         if self.stream:
             self.stream.close()
-
-
-def default_controller_root():
-    base = Path(os.environ.get('LOCALAPPDATA', Path.home() / '.local' / 'share'))
-    return base / 'ExperimentManager' / 'controller'
 
 
 def browser_url(root, port):
@@ -98,7 +94,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='role', required=True)
     center = sub.add_parser('controller')
-    center.add_argument('--root', default=str(default_controller_root()))
+    center.add_argument('--root')
     center.add_argument('--port', type=int)
     center.add_argument('--host', default='0.0.0.0')
     center.add_argument('--no-browser', action='store_true')
@@ -117,7 +113,7 @@ def main():
         if args.role != permitted:
             raise ValueError(f'This package contains the {permitted} edition. Download the other edition to use both roles.')
     if args.role == 'controller':
-        controller(args.root, args.port, args.host, not args.no_browser)
+        controller(args.root or default_controller_root(), args.port, args.host, not args.no_browser)
     else:
         from .worker_setup import start
         start(args)

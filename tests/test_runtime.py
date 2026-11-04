@@ -22,6 +22,15 @@ def registry(name='expman-worker-registry', component='worker-registry', identit
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_docker_stdout_error_is_not_discarded(self):
+        from expman.agent import Agent
+        agent = Agent.__new__(Agent)
+        agent.preparation = None
+        with patch.object(agent, '_docker_environment', return_value={}), \
+                patch('expman.agent.subprocess.run', return_value=reply('WSL integration is unavailable', 1)):
+            with self.assertRaisesRegex(RuntimeError, 'WSL integration is unavailable'):
+                agent._exec(['docker', 'inspect', 'owned-container'])
+
     def desktop_stopped(self, response, *, probe=None, setup=None, processes=(), kernel='microsoft-standard-WSL2'):
         with patch.object(runtime.sys, 'platform', 'linux'), \
                 patch.object(Path, 'read_text', side_effect=[kernel, *processes]), \
@@ -59,6 +68,25 @@ class RuntimeTests(unittest.TestCase):
                 stopped, _, windows = self.desktop_stopped(reply({'Status': 'stopped'}), **options)
                 self.assertFalse(stopped)
                 windows.assert_not_called()
+
+    def test_hung_desktop_cli_uses_independent_windows_closure_evidence(self):
+        proof = {'processes': 0, 'pipes': 0, 'running': ['U\0b\0u\0n\0t\0u\0', '\0']}
+        for state, expected in ((proof, True), ({**proof, 'processes': 1}, False),
+                ({**proof, 'pipes': 1}, False), ({**proof, 'running': ['docker-desktop']}, False),
+                ({**proof, 'running': ['d\0o\0c\0k\0e\0r\0-\0d\0e\0s\0k\0t\0o\0p\0']}, False),
+                ({}, False), ({**proof, 'running': 'unknown'}, False)):
+            with self.subTest(state=state), patch.object(runtime, '_windows_docker_closed', wraps=runtime._windows_docker_closed):
+                responses = [subprocess.TimeoutExpired('docker.exe', 10), reply(state)]
+                with patch.object(runtime.subprocess, 'run', side_effect=responses):
+                    # Keep the WSL/native-engine guards exercised by the helper.
+                    with patch.object(runtime.sys, 'platform', 'linux'), \
+                            patch.object(Path, 'read_text', return_value='microsoft-standard-WSL2'), \
+                            patch.object(Path, 'glob', return_value=[]), \
+                            patch.object(runtime, 'read_json', return_value={}), \
+                            patch.dict(runtime.os.environ, {}, clear=True), \
+                            patch.object(runtime.shutil, 'which', return_value='/windows/docker.exe'), \
+                            patch.object(runtime, 'docker_command', return_value=reply('', 1)):
+                        self.assertEqual(runtime.docker_desktop_stopped('/worker'), expected)
 
     def test_not_running_docker_is_reported_without_starting_a_daemon(self):
         with patch.object(runtime.shutil, 'which', return_value='/usr/bin/docker'), \

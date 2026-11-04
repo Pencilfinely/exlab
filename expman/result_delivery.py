@@ -17,7 +17,7 @@ import threading
 import time
 import urllib.error
 
-from . import __version__, common
+from . import __version__, common, worker_database
 from . import result_protocol as protocol
 
 
@@ -98,14 +98,19 @@ class ResultDelivery:
         initialize(agent.db)
         self.root = agent.root
         self.result_db = self._connect()
-        self.control_db = self._connect()
+        try:
+            self.control_db = self._connect()
+        except BaseException:
+            self.result_db.close()
+            raise
         self.result_lock = threading.RLock()
         self.stop = threading.Event()
         self.threads = []
         self.catalogued = set()
 
     def _connect(self):
-        db = sqlite3.connect(self.root / "node.sqlite3", check_same_thread=False, timeout=10)
+        db = worker_database.connect(self.root / "node.sqlite3", check_same_thread=False,
+                                     timeout=10, write_lock=self.agent.db.write_lock)
         db.row_factory = sqlite3.Row
         return db
 
@@ -646,7 +651,7 @@ class ResultDelivery:
                 self.results_once()
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                 with self.result_lock:
-                    self._meta(self.result_db, "scan_error", self._error(exc))
+                    self._record_loop_error(self.result_db, "scan_error", exc)
             self.stop.wait(0.25)
 
     def _control_loop(self):
@@ -654,6 +659,18 @@ class ResultDelivery:
             try:
                 self.control_once()
             except (OSError, ValueError, RuntimeError, KeyError, TypeError, sqlite3.Error) as exc:
-                self._meta(self.control_db, "control_error", self._error(exc))
-                self._meta(self.control_db, "control_error_at", common.now())
+                self._record_loop_error(self.control_db, "control_error", exc)
             self.stop.wait(0.5)
+
+    def _record_loop_error(self, db, key, error):
+        # A failed write must not leave an open transaction, or reporting that
+        # error can hold the writer indefinitely and kill another lane too.
+        db.rollback()
+        try:
+            self._meta(db, key, self._error(error))
+            if key == "control_error":
+                self._meta(db, "control_error_at", common.now())
+        except sqlite3.Error as reporting_error:
+            if not worker_database.transient(reporting_error):
+                raise
+            print("Delivery status deferred / 回传状态暂缓: " + self._error(error), flush=True)

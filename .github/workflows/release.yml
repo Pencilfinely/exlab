@@ -5,7 +5,7 @@ on:
       tag:
         description: Existing tag to build, matching VERSION
         required: true
-        default: v0.5.22
+        default: v0.5.28
 permissions:
   contents: write
 env:
@@ -28,6 +28,7 @@ jobs:
         run: python -c "import os; from scripts.build_release import VERSION; assert os.environ['RELEASE_TAG']=='v'+VERSION"
       - run: python -m unittest discover -s tests -t . -v
       - run: node tests/test_timing_ui.js
+      - run: node tests/test_desktop_settings_ui.js
       - run: node tests/test_matrix_ui.js
       - run: node tests/test_resource_ui.js
       - run: node --check expman/static/compute.js
@@ -51,6 +52,7 @@ jobs:
         run: |
           ./scripts/test_desktop.ps1
           ./scripts/test_shortcuts.ps1
+          ./scripts/test_settings.ps1
           ./scripts/test_icons.ps1
           ./scripts/test_browser_icons.ps1
           ./scripts/test_updates.ps1

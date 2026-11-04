@@ -9,7 +9,7 @@ import hashlib
 import sqlite3
 import threading
 
-from . import common
+from . import common, worker_database
 from .execution_control import CHUNK, checkpoint
 
 
@@ -51,6 +51,7 @@ class ExecutionTransfer:
     def __init__(self, agent):
         self.root = agent.root
         self.config = agent.config
+        self.write_lock = agent.db.write_lock
         self.stop = threading.Event()
         self.thread = None
         initialize(agent.db)
@@ -63,12 +64,12 @@ class ExecutionTransfer:
     def close(self):
         self.stop.set()
         if self.thread:
-            self.thread.join(timeout=6)
+            self.thread.join()
 
     @staticmethod
     def _meta(db, key, value):
-        db.execute("INSERT OR REPLACE INTO execution_lane_meta VALUES (?,?)", (key, json.dumps(value, allow_nan=False)))
-        db.commit()
+        with db:
+            db.execute("INSERT OR REPLACE INTO execution_lane_meta VALUES (?,?)", (key, json.dumps(value, allow_nan=False)))
 
     def _request(self, endpoint, payload):
         return common.api_request(self.config["hub_url"].rstrip("/") + endpoint, self.config["token"], payload, timeout=3)
@@ -98,9 +99,9 @@ class ExecutionTransfer:
                 temporary.unlink()
                 return  # The producer replaced a checkpoint while it was copied.
             os.replace(temporary, target)
-        db.execute("INSERT OR IGNORE INTO execution_checkpoint_outbox(job_id,generation,attempt,sha256,manifest,path) VALUES (?,?,?,?,?,?)",
-                   (*key, json.dumps(manifest), str(target)))
-        db.commit()
+        with db:
+            db.execute("INSERT OR IGNORE INTO execution_checkpoint_outbox(job_id,generation,attempt,sha256,manifest,path) VALUES (?,?,?,?,?,?)",
+                       (*key, json.dumps(manifest), str(target)))
 
     def _upload(self, db, record):
         row = db.execute("SELECT * FROM execution_checkpoint_outbox WHERE job_id=? AND generation=? AND attempt=? AND complete=0 ORDER BY rowid LIMIT 1",
@@ -124,9 +125,9 @@ class ExecutionTransfer:
             offset = response["offset"]
         if type(offset) is not int or not 0 <= offset <= manifest["size"] or (response.get("complete") and offset != manifest["size"]):
             raise ValueError("Invalid checkpoint upload acknowledgment")
-        db.execute("UPDATE execution_checkpoint_outbox SET offset=?,complete=? WHERE job_id=? AND generation=? AND attempt=? AND sha256=?",
-                   (offset, int(bool(response.get("complete"))), row["job_id"], row["generation"], row["attempt"], row["sha256"]))
-        db.commit()
+        with db:
+            db.execute("UPDATE execution_checkpoint_outbox SET offset=?,complete=? WHERE job_id=? AND generation=? AND attempt=? AND sha256=?",
+                       (offset, int(bool(response.get("complete"))), row["job_id"], row["generation"], row["attempt"], row["sha256"]))
         if response.get("complete"):
             self._meta(db, "last_checkpoint_received_at", common.now())
 
@@ -169,7 +170,7 @@ class ExecutionTransfer:
             self._meta(db, "restoring", None)
 
     def _run(self):
-        db = sqlite3.connect(self.root / "node.sqlite3", timeout=5)
+        db = worker_database.connect(self.root / "node.sqlite3", timeout=5, write_lock=self.write_lock)
         db.row_factory = sqlite3.Row
         try:
             while not self.stop.is_set():
@@ -200,8 +201,15 @@ class ExecutionTransfer:
                     self.stop.wait(0.25)
                 except (OSError, ValueError, KeyError, TypeError, RuntimeError, sqlite3.Error) as error:
                     # Errors stay in the execution lane and never block state or final results.
-                    self._meta(db, "last_error", str(error)[:500])
-                    self._meta(db, "next_retry_at", common.now() + 3)
+                    db.rollback()
+                    try:
+                        message = str(error).replace(self.config['token'], '[redacted]')[:500]
+                        self._meta(db, "last_error", message)
+                        self._meta(db, "next_retry_at", common.now() + 3)
+                    except sqlite3.Error as reporting_error:
+                        if not worker_database.transient(reporting_error):
+                            raise
+                        print("Checkpoint status deferred / 断点状态暂缓: " + message, flush=True)
                     self.stop.wait(3)
         finally:
             db.close()

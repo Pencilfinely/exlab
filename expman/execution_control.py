@@ -120,17 +120,19 @@ class ExecutionControlHubMixin:
             return False
         raise APIError(403, "Execution generation does not belong to this node")
 
-    def _execution_public(self, job, *, full=False):
+    def _execution_public(self, job, *, full=False, prefetched=None):
         value = job.get("execution_state")
         if isinstance(value, str):
             value = json.loads(value)
         if value and not full:
             value = {key: item for key, item in value.items() if key not in ("diagnostics", "resources")}
         job["execution_state"] = value
-        pending = self.db.execute("SELECT * FROM execution_handoffs WHERE job_id=?", (job["id"],)).fetchone()
+        pending = (prefetched[0].get(job["id"]) if prefetched is not None else
+                   self.db.execute("SELECT * FROM execution_handoffs WHERE job_id=?", (job["id"],)).fetchone())
         job["handoff"] = dict(pending) if pending else None
-        control = self.db.execute("SELECT priority,hold,revision FROM execution_queue_controls WHERE job_id=?", (job["id"],)).fetchone()
-        job["queue_control"] = {**dict(control), "hold": bool(control["hold"])} if control else {"priority": job["spec"].get("priority", 0), "hold": False, "revision": 0}
+        control = (prefetched[1].get(job["id"]) if prefetched is not None else
+                   self.db.execute("SELECT priority,hold,revision FROM execution_queue_controls WHERE job_id=?", (job["id"],)).fetchone())
+        job["queue_control"] = {**{key: control[key] for key in ("priority", "hold", "revision")}, "hold": bool(control["hold"])} if control else {"priority": job["spec"].get("priority", 0), "hold": False, "revision": 0}
         return job
 
     def set_queue_control(self, payload):
@@ -197,7 +199,8 @@ class ExecutionControlHubMixin:
         availability = snapshot.get("availability", {})
         # Stop-and-hold preserves local ownership. Only release hands work off.
         stopping = availability.get("mode") == "release"
-        for row in self.db.execute("SELECT * FROM jobs WHERE node_id=?", (node_id,)).fetchall():
+        for row in self.db.execute("SELECT id,state,action,command_ack,command_id,generation,execution_state FROM job_summaries "
+                                   "WHERE node_id=? AND state NOT IN ('succeeded','canceled','failed')", (node_id,)).fetchall():
             state = json.loads(row["execution_state"]) if row["execution_state"] else {}
             handoff = self.db.execute("SELECT generation,status FROM execution_handoffs WHERE job_id=?", (row["id"],)).fetchone()
             if (row["action"] == "resume" and row["command_ack"] < row["command_id"]) or (
@@ -207,7 +210,7 @@ class ExecutionControlHubMixin:
             # A previously manually paused task must never become an automatic resume.
             if row["state"] not in ("succeeded", "canceled", "failed") and (state.get("release") or
                     (stopping and row["state"] not in ("paused", "interrupted"))):
-                self._queue_handoff(row, reason=state.get("release") or availability.get("reason", "释放资源"))
+                self._queue_handoff(self._find_job(row["id"]), reason=state.get("release") or availability.get("reason", "释放资源"))
 
     def _maintain_handoffs(self, nodes, counts):
         pending = self.db.execute("SELECT h.*,j.state AS job_state FROM execution_handoffs h JOIN jobs j ON j.id=h.job_id "
@@ -232,6 +235,8 @@ class ExecutionControlHubMixin:
                     self.db.execute("UPDATE execution_handoffs SET status='waiting_checkpoint',updated=? WHERE job_id=?", (now(), row["id"]))
                     continue
                 resume = json.loads(received[0])
+            if callable(nodes):
+                nodes = nodes()
             destinations = [n for n in nodes if CAPABILITY in n["snapshot"].get("capabilities", [])]
             if handoff["target_node_id"]:
                 destinations = [n for n in destinations if n["id"] == handoff["target_node_id"]]

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import csv
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import sqlite3
 import threading
 import urllib.error
@@ -40,6 +41,8 @@ from . import host_control
 from .compute_policy import (ComputePolicyHubMixin, initialize as initialize_compute, apply as apply_compute,
                              validate_snapshot as validate_compute_snapshot)
 from .execution_control import ExecutionControlHubMixin, initialize as initialize_execution, validate_state
+from .hub_read_model import initialize as initialize_read_model, PENDING_SQL, TERMINAL_SQL
+from .hub_lock import HubLock
 
 
 TERMINAL = frozenset(("succeeded", "canceled", "failed", "paused", "interrupted"))
@@ -203,13 +206,15 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.lock = threading.RLock()
+        self.lock = HubLock()
         self.updating = False
         self.active_update_requests = 0
         self.project_upload_locks = {}
         self.local_imports = None
         self.config = read_json(self.root / "hub.json")
         if self.config is None:
+            if (self.root / "hub.sqlite3").exists():
+                raise ValueError("Center hub.json is missing while its database exists; restore the original configuration instead of creating a new identity / 请恢复原配置，不要重建连接身份")
             self.config = {"admin_token": secrets.token_urlsafe(32), "nodes": {}}
             atomic_json(self.root / "hub.json", self.config)
             try:
@@ -282,6 +287,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         initialize_results(self.db)
         initialize_compute(self.db)
         initialize_execution(self.db)
+        initialize_read_model(self.db)
         host_control.initialize(self.db)
         from .agent_tools import initialize as initialize_agent_tools
         from .autonomy import initialize as initialize_autonomy, AgentManager
@@ -389,16 +395,17 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         token = header[7:]
         if not token or len(token) > 512:
             raise APIError(401, "Invalid bearer token")
-        with self.lock:
-            self.config = read_json(self.root / "hub.json", self.config)
-            if secrets.compare_digest(token, self.config["admin_token"]):
-                return "admin", None
-            for node_id, configured in self.config["nodes"].items():
-                if secrets.compare_digest(token, configured):
-                    return "node", node_id
-            center_id = self.center_authenticate(token)
-            if center_id:
-                return 'center', center_id
+        # Atomic configuration files give this request one credential snapshot.
+        # Authentication/health must not queue behind scheduling or a large read.
+        config = read_json(self.root / "hub.json", self.config)
+        if secrets.compare_digest(token, config["admin_token"]):
+            return "admin", None
+        for node_id, configured in config["nodes"].items():
+            if secrets.compare_digest(token, configured):
+                return "node", node_id
+        for identity, device in config.get("centers", {}).items():
+            if not device.get("revoked") and secrets.compare_digest(token, device["token"]):
+                return 'center', identity
         raise APIError(401, "Invalid bearer token")
 
     def enroll(self, payload):
@@ -459,42 +466,42 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
 
     def health(self):
         """Local lifecycle probe, independent of experiment payloads and imports."""
-        with self.lock:
-            result = {"health_protocol": 1, "version": __version__,
-                      "nodes": self.db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
-                      "jobs": self.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]}
+        with closing(sqlite3.connect((self.root / "hub.sqlite3").as_uri() + "?mode=ro",
+                                     uri=True, timeout=1)) as reader:
+            result = {"health_protocol": 1, "version": __version__, "workspace_id": self.config['workspace_id'],
+                      "nodes": reader.execute("SELECT COUNT(*) FROM nodes").fetchone()[0],
+                      "jobs": reader.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]}
             owner = getattr(self, 'desktop_owner', None)
             if owner is not None:
                 result['controller_owner'] = {key: owner[key] for key in ('pid', 'nonce', 'version')}
             return result
 
+    @contextmanager
+    def _state_reader(self):
+        if self.lock.owned():
+            # An in-transaction caller must see its own uncommitted changes.
+            yield self.db
+        else:
+            with closing(sqlite3.connect((self.root / "hub.sqlite3").as_uri() + "?mode=ro",
+                                         uri=True, timeout=2)) as reader:
+                reader.row_factory = sqlite3.Row
+                reader.execute("BEGIN")
+                yield reader
+
     def state(self, *, summary=False):
+        with self._state_reader() as reader:
+            table = "job_summaries" if summary else "jobs"
+            rows = reader.execute(f"SELECT * FROM {table} ORDER BY created DESC,id").fetchall()
+            labels = [{"id": row["id"]} for row in rows]
+            self._attach_record_tags(labels, "job", db=reader)
+            handoffs = {row["job_id"]: row for row in reader.execute("SELECT * FROM execution_handoffs")}
+            controls = {row["job_id"]: row for row in reader.execute("SELECT * FROM execution_queue_controls")}
+            deliveries = {(row["job_id"], row["attempt"]): row for row in reader.execute(
+                "SELECT job_id,attempt,COUNT(*) AS received,SUM(independent='passed') AS accepted "
+                "FROM experiment_results GROUP BY job_id,attempt")}
         with self.lock:
-            jobs = [self._job(row, summary=summary) for row in self.db.execute("SELECT * FROM jobs ORDER BY created DESC,id")]
-            self._attach_record_tags(jobs, "job")
-            for job in jobs:
-                self._execution_public(job)
-                job.pop("log_tail", None)
-                if job.get("runtime"):
-                    job["runtime"].pop("diagnostics", None)
-                received = self.db.execute("SELECT COUNT(*),SUM(independent='passed') FROM experiment_results WHERE job_id=? AND attempt=?", (job["id"], max(1, job["attempt"]))).fetchone()
-                job["delivery"] = {"results_received": received[0], "independently_accepted": received[1] or 0}
-            nodes = []
             timestamp = now()
-            for row in self.db.execute("SELECT * FROM nodes ORDER BY id"):
-                item = dict(row)
-                item["snapshot"] = json.loads(item["snapshot"])
-                delivery = self.db.execute("SELECT value,updated FROM node_delivery_status WHERE node_id=?", (item["id"],)).fetchone()
-                if delivery:
-                    item["snapshot"]["delivery"] = {**json.loads(delivery["value"]), "observed_at": delivery["updated"]}
-                item["online"] = timestamp - item["last_seen"] <= 45
-                item["resource_policy"] = self._node_resource_policy(item["id"])
-                item["compute_policy"] = self._compute_policy(item["id"])
-                item["snapshot"]["node_mode"] = item["mode"]
-                if item["compute_policy"] or "compute-control-v2" in item["snapshot"].get("capabilities", []):
-                    apply_compute(item["snapshot"], item["compute_policy"] or {})
-                host_control.overlay(self, item, timestamp)
-                nodes.append(item)
+            nodes = self._state_nodes(timestamp)
             projects, project_deletions = [], []
             for row in self.db.execute("SELECT * FROM projects ORDER BY created DESC"):
                 project = dict(row)
@@ -505,14 +512,64 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             for node in nodes:
                 node["snapshot"]["task_templates"] = [item for item in node["snapshot"].get("task_templates", [])
                     if item.get("project_bundle_id") not in deleted_bundles]
-            result = {"jobs": jobs, "nodes": nodes, "projects": projects, "project_deletions": project_deletions,
+            result = {"nodes": nodes, "projects": projects, "project_deletions": project_deletions,
                       "tags": self.record_tags()["tags"],
                       "time": timestamp, "version": __version__, 'center': self.center_info()}
             result["agent"] = self.autonomy.summary()
             owner = getattr(self, 'desktop_owner', None)
             if owner is not None:
                 result['controller_owner'] = {key: owner[key] for key in ('pid', 'nonce', 'version')}
-            return result
+        # Read a consistent job snapshot without the scheduler lock, then decode
+        # and format historical records outside it. All enrichment below uses
+        # prefetched rows and must not touch the shared database connection.
+        jobs = []
+        for row, tags in zip(rows, labels):
+            job = self._job(row, summary=summary)
+            job.update(tags)
+            self._execution_public(job, prefetched=(handoffs, controls))
+            job.pop("log_tail", None)
+            if job.get("runtime"):
+                job["runtime"].pop("diagnostics", None)
+            received = deliveries.get((job["id"], max(1, job["attempt"])))
+            job["delivery"] = {"results_received": received["received"] if received else 0,
+                               "independently_accepted": (received["accepted"] or 0) if received else 0}
+            jobs.append(job)
+        result["jobs"] = jobs
+        return result
+
+    def inspection_state(self):
+        """Rule facts do not need programs, metrics, labels, projects or deliveries."""
+        with self.lock:
+            jobs = []
+            handoffs = {row["job_id"]: row for row in self.db.execute("SELECT * FROM execution_handoffs")}
+            controls = {row["job_id"]: row for row in self.db.execute("SELECT * FROM execution_queue_controls")}
+            for row in self.db.execute(
+                    "SELECT id,state,node_id,attempt,generation,command_id,command_ack,execution_state,"
+                    "json_extract(spec,'$.backend') AS backend,json_extract(spec,'$.resume_supported') AS resumable,"
+                    "json_extract(spec,'$.priority') AS priority FROM job_summaries ORDER BY created DESC,id"):
+                job = {key: row[key] for key in ("id", "state", "node_id", "attempt", "generation", "command_id", "command_ack", "execution_state")}
+                job["spec"] = {"backend": row["backend"], "resume_supported": bool(row["resumable"]), "priority": row["priority"] or 0}
+                self._execution_public(job, prefetched=(handoffs, controls))
+                jobs.append(job)
+            return {"jobs": jobs, "nodes": self._state_nodes(now())}
+
+    def _state_nodes(self, timestamp):
+        nodes = []
+        for row in self.db.execute("SELECT * FROM nodes ORDER BY id"):
+            item = dict(row)
+            item["snapshot"] = json.loads(item["snapshot"])
+            delivery = self.db.execute("SELECT value,updated FROM node_delivery_status WHERE node_id=?", (item["id"],)).fetchone()
+            if delivery:
+                item["snapshot"]["delivery"] = {**json.loads(delivery["value"]), "observed_at": delivery["updated"]}
+            item["online"] = timestamp - item["last_seen"] <= 45
+            item["resource_policy"] = self._node_resource_policy(item["id"])
+            item["compute_policy"] = self._compute_policy(item["id"])
+            item["snapshot"]["node_mode"] = item["mode"]
+            if item["compute_policy"] or "compute-control-v2" in item["snapshot"].get("capabilities", []):
+                apply_compute(item["snapshot"], item["compute_policy"] or {})
+            host_control.overlay(self, item, timestamp)
+            nodes.append(item)
+        return nodes
 
     def submit(self, payload):
         _object(payload, "request")
@@ -603,18 +660,30 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             return {"id": row["id"], "command_id": command_id, "action": action}
 
     def _assign(self):
-        nodes = self._scheduling_nodes()
+        if (not self.db.execute("SELECT 1 FROM job_summaries j LEFT JOIN execution_queue_controls c ON c.job_id=j.id "
+                                "WHERE j.state='queued' AND j.node_id IS NULL AND COALESCE(c.hold,0)=0 LIMIT 1").fetchone()
+                and not self.db.execute("SELECT 1 FROM execution_handoffs WHERE status IN "
+                                        "('requested','waiting_checkpoint','waiting_capacity') LIMIT 1").fetchone()):
+            return
+        cached_nodes = None
+        def scheduling_nodes():
+            nonlocal cached_nodes
+            if cached_nodes is None:
+                cached_nodes = self._scheduling_nodes()
+            return cached_nodes
         counts = {}
-        for row in self.db.execute("SELECT node_id,state FROM jobs WHERE node_id IS NOT NULL"):
-            if row["state"] not in TERMINAL:
-                counts[row["node_id"]] = counts.get(row["node_id"], 0) + 1
-        pending = list(self.db.execute("SELECT j.id,j.spec,j.created,c.priority AS queue_priority FROM jobs j LEFT JOIN execution_queue_controls c ON c.job_id=j.id "
-                                      "WHERE j.state='queued' AND j.node_id IS NULL AND COALESCE(c.hold,0)=0"))
+        for row in self.db.execute(f"SELECT node_id FROM job_summaries WHERE node_id IS NOT NULL AND state NOT IN ({TERMINAL_SQL})"):
+            counts[row["node_id"]] = counts.get(row["node_id"], 0) + 1
+        pending = [dict(row) for row in self.db.execute("SELECT j.id,j.created,c.priority AS queue_priority FROM job_summaries j LEFT JOIN execution_queue_controls c ON c.job_id=j.id "
+                                                       "WHERE j.state='queued' AND j.node_id IS NULL AND COALESCE(c.hold,0)=0")]
+        for row in pending:
+            row["spec"] = self.db.execute("SELECT spec FROM jobs WHERE id=?", (row["id"],)).fetchone()[0]
         pending.sort(key=lambda row: (-(row["queue_priority"] if row["queue_priority"] is not None else json.loads(row["spec"])["priority"]) - min(20, (now() - row["created"]) / 3600),
                                      json.loads(row["spec"]).get("planning", {}).get("deadline") or float("inf"), row["created"], row["id"]))
-        self._maintain_handoffs(nodes, counts)
+        self._maintain_handoffs(scheduling_nodes, counts)
         for row in pending:
             spec = json.loads(row["spec"])
+            nodes = scheduling_nodes()
             assignment = choose_assignment(spec, nodes, counts)
             if assignment is None:
                 continue
@@ -736,12 +805,12 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             self._policy_handoffs(node_id, effective)
             self._assign()
             jobs = []
-            for row in self.db.execute("SELECT * FROM jobs WHERE node_id=? ORDER BY created,id", (node_id,)):
-                if row["state"] not in TERMINAL or row["command_id"] > row["command_ack"]:
-                    jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "generation": row["generation"],
-                                 "attempt": max(1, row["attempt"]), "resume_checkpoint": json.loads(row["resume_checkpoint"]) if row["resume_checkpoint"] else None,
-                                 "timing": json.loads(row["timing"]) if row["timing"] else None,
-                                 "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
+            for owned in self.db.execute(f"SELECT id FROM job_summaries WHERE node_id=? AND {PENDING_SQL} ORDER BY created,id", (node_id,)).fetchall():
+                row = self._find_job(owned["id"])
+                jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "generation": row["generation"],
+                             "attempt": max(1, row["attempt"]), "resume_checkpoint": json.loads(row["resume_checkpoint"]) if row["resume_checkpoint"] else None,
+                             "timing": json.loads(row["timing"]) if row["timing"] else None,
+                             "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
             mode = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()[0]
             deployments = [dict(row) for row in self.db.execute(
                 "SELECT d.digest,p.size,p.project_id,p.bundle_id,d.revision,CASE WHEN p.deleted_at IS NULL THEN 'install' ELSE 'delete' END AS action FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed','deleted','delete_failed') ORDER BY d.updated LIMIT 100", (node_id,))]
@@ -1093,7 +1162,59 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             return stream.getvalue().encode("utf-8-sig")
 
 
-def make_server(hub, host="127.0.0.1", port=8765):
+class CenterHTTPServer(ThreadingHTTPServer):
+    """Bound connection handlers; rejected work has not entered a Hub operation."""
+    daemon_threads = True
+    request_queue_size = 128
+    allow_reuse_address = os.name != 'nt'
+
+    def server_bind(self):
+        # Windows SO_REUSEADDR lets two workspaces listen on the same port,
+        # delivering health probes/worker traffic to an indeterminate owner.
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+    def __init__(self, address, handler, *, max_request_threads=64):
+        self.request_slots = threading.BoundedSemaphore(max_request_threads)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self.request_slots.acquire(blocking=False):
+            try:
+                request.settimeout(1)
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
+                                b"Retry-After: 1\r\nConnection: close\r\n\r\n")
+                request.shutdown(socket.SHUT_WR)
+                # Closing with unread request headers can replace the 503 with
+                # a TCP reset on Windows. Drain a bounded amount after FIN;
+                # never parse or route an overloaded request.
+                request.settimeout(.05)
+                remaining = 64 * 1024
+                while remaining:
+                    received = request.recv(min(8192, remaining))
+                    if not received:
+                        break
+                    remaining -= len(received)
+            except OSError:
+                pass
+            finally:
+                self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.request_slots.release()
+
+
+def make_server(hub, host="127.0.0.1", port=8765, *, max_request_threads=64):
     class Handler(BaseHTTPRequestHandler):
         server_version = "ExperimentManager/0.2"
 
@@ -1253,7 +1374,10 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     raise APIError(400, f"Exactly one {name} query parameter is required")
                 return values[0]
             if self.command == "GET":
-                if path in ('/api/centers/identity', '/api/local/centers/status'):
+                if path == '/api/local/desktop/settings':
+                    from .desktop import controller_preferences
+                    self._send(controller_preferences(hub.root))
+                elif path in ('/api/centers/identity', '/api/local/centers/status'):
                     info = hub.center_info()
                     if path.startswith('/api/local/'):
                         from .pairing import address_candidates
@@ -1321,6 +1445,10 @@ def make_server(hub, host="127.0.0.1", port=8765):
                     raise APIError(404, "Not found")
             elif self.command == "POST":
                 payload = self._body()
+                if path == '/api/local/desktop/settings':
+                    from .desktop import controller_preferences
+                    self._send(controller_preferences(hub.root, open_window=True))
+                    return
                 routes = {"/api/jobs": hub.submit, "/api/node-mode": hub.set_mode, "/api/action": hub.action,
                           "/api/host/sync": lambda p: host_control.sync(hub, node_id, p),
                           "/api/tags/save": hub.tag_save, "/api/tags/delete": hub.tag_delete,
@@ -1374,23 +1502,25 @@ def make_server(hub, host="127.0.0.1", port=8765):
         def _handle(self):
             self.connection.settimeout(30)
             try:
-                self._route()
+                try:
+                    self._route()
+                except APIError as error:
+                    self._send({"error": str(error)}, error.status)
+                except (ValueError, TypeError, OverflowError) as error:
+                    self._send({"error": str(error)}, 400)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
+                    raise
+                except Exception:
+                    # Do not expose local paths, SQL, or credentials in HTTP errors.
+                    self.log_error("Internal request error")
+                    self._send({"error": "Internal service error; inspect local service state"}, 500)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError):
                 pass  # Peer may retry; persisted operations remain idempotent.
-            except APIError as error:
-                self._send({"error": str(error)}, error.status)
-            except (ValueError, TypeError, OverflowError) as error:
-                self._send({"error": str(error)}, 400)
-            except Exception:
-                # Do not expose local paths, SQL, or credentials in HTTP errors.
-                self.log_error("Internal request error")
-                self._send({"error": "Internal service error; inspect local service state"}, 500)
 
         do_GET = _handle
         do_POST = _handle
 
-    server = ThreadingHTTPServer((host, port), Handler)
-    server.daemon_threads = True
+    server = CenterHTTPServer((host, port), Handler, max_request_threads=max_request_threads)
     server.hub = hub
     hub.autonomy.start()
     return server

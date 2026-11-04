@@ -27,11 +27,17 @@ namespace ExperimentManagerDesktop {
         internal static bool AutoStart {
             get { using(var run=Registry.CurrentUser.OpenSubKey(RunKey))
                 return run!=null&&(run.GetValue("ExLab-"+App.Role)!=null||run.GetValue("ExperimentManager-"+App.Role)!=null); }
-            set { using(var run=Registry.CurrentUser.CreateSubKey(RunKey)) {
+            set { SetAutoStart(value,Path.Combine(App.Package,App.Executable),App.Worker?"":DesktopSettings.Root(App.ReadSettings())); }
+        }
+        internal static string StartupArguments(string root) {
+            return "--background"+(App.Worker?"":" "+App.Arguments("--data-root",root));
+        }
+        internal static void SetAutoStart(bool value,string executable,string root) {
+            using(var run=Registry.CurrentUser.CreateSubKey(RunKey)) {
                 run.DeleteValue("ExperimentManager-"+App.Role,false);
-                if(value)run.SetValue("ExLab-"+App.Role,App.Quote(Path.Combine(App.Package,App.Executable))+" --background");
+                if(value)run.SetValue("ExLab-"+App.Role,App.Quote(executable)+" "+StartupArguments(root));
                 else run.DeleteValue("ExLab-"+App.Role,false);
-            } }
+            }
         }
         internal static string DockerCli {
             get { string path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),"Docker","Docker","resources","bin","docker.exe");
@@ -96,11 +102,28 @@ namespace ExperimentManagerDesktop {
             while(true) {
                 var state=await inspect();progress(state);
                 string status=App.Text(state,"status");
-                if(status=="running"&&App.Flag(state,"running")&&App.Flag(state,"online"))return state;
-                if(status!="starting"&&status!="preparing"&&status!="running")
+                bool active=status=="online"||status=="offline"||status=="running";
+                if((status=="online"||status=="running")&&App.Flag(state,"running")&&App.Flag(state,"online"))return state;
+                if(active&&!App.Flag(state,"running"))
+                    throw new IOException("算力后台进程已退出，不能将上次连接状态当作本次启用成功；请检查后台日志。");
+                if(status!="starting"&&status!="preparing"&&!active)
                     throw new IOException(App.Text(state,"detail","原节点尚未启动，请检查算力客户端。"));
                 if(watch.Elapsed>=(timeout??TimeSpan.FromMinutes(10)))
                     throw new IOException("原节点仍在准备或连接中，尚未确认恢复接单；Windows 控制连接保持在线，稍后继续检查。");
+                if(delay==null)await Task.Delay(2000);else await delay();
+            }
+        }
+        internal static async Task<Dictionary<string,object>> WaitForWorkerDocker(
+                Func<Task<Dictionary<string,object>>> inspect,Action<string> progress,
+                Func<Task> delay=null,TimeSpan? timeout=null) {
+            var watch=Stopwatch.StartNew();
+            while(true) {
+                var state=await inspect();
+                if(App.Flag(state,"docker_ready"))return state;
+                string detail=App.Text(state,"detail","Ubuntu 尚未连接 Docker。");
+                progress("正在等待所选 Ubuntu 的 Docker 连接…\n"+detail);
+                if(watch.Elapsed>=(timeout??TimeSpan.FromMinutes(2)))
+                    throw new IOException("所选 Ubuntu 的 Docker 连接尚未就绪："+detail+"。请检查 Docker Desktop 的 WSL 集成后重试。");
                 if(delay==null)await Task.Delay(2000);else await delay();
             }
         }

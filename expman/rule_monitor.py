@@ -6,12 +6,14 @@ network access or shell commands. Effects use the existing guarded tool gateway.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import math
 import re
 import uuid
 
 from .common import now
+from .hub_read_model import write_batch
 
 FIELDS = {
     "node": {"id", "online", "mode", "active_jobs", "offline_seconds", "ac_power",
@@ -231,13 +233,13 @@ class RuleMonitor:
         return timestamp-prior["since"]
 
     def facts(self, persist=False):
-        state, timestamp = self.hub.state(summary=True), now()
+        state, timestamp = self.hub.inspection_state(), now()
         result = {"job": [], "node": []}
         existing = {row["target"]: json.loads(row["value"]) for row in self.hub.db.execute("SELECT * FROM agent_rule_observations")}
         observations = {}
         for job in state["jobs"]:
             key = "job:" + job["id"]
-            observation = existing.get(key, {})
+            observation = copy.deepcopy(existing.get(key, {}))
             queue, execution, handoff = job.get("queue_control") or {}, job.get("execution_state") or {}, job.get("handoff") or {}
             progress = execution.get("progress") or {}
             pending = job.get("command_id", 0) > job.get("command_ack", 0)
@@ -255,7 +257,7 @@ class RuleMonitor:
             result["job"].append(facts)
         for node in state["nodes"]:
             key, snap = "node:" + node["id"], node["snapshot"]
-            observation = existing.get(key, {})
+            observation = copy.deepcopy(existing.get(key, {}))
             availability = snap.get("availability") or {}
             from .compute_policy import control_matches
             control = (snap.get("compute_control") or {}) if control_matches(snap) else {}
@@ -269,9 +271,11 @@ class RuleMonitor:
                 "delivery_error": delivery.get("last_error") or None})
             observations[key] = observation
         if persist:
-            self.hub.db.executemany("INSERT OR REPLACE INTO agent_rule_observations VALUES (?,?)", [(key, json.dumps(value)) for key, value in observations.items()])
-            for key in existing.keys() - observations.keys():
-                self.hub.db.execute("DELETE FROM agent_rule_observations WHERE target=?", (key,))
+            with write_batch(self.hub.db):
+                self.hub.db.executemany("INSERT OR REPLACE INTO agent_rule_observations VALUES (?,?)",
+                    [(key, json.dumps(value)) for key, value in observations.items() if key not in existing or value != existing[key]])
+                self.hub.db.executemany("DELETE FROM agent_rule_observations WHERE target=?",
+                    [(key,) for key in existing.keys() - observations.keys()])
         return result
 
     def preview(self, document):
@@ -331,38 +335,46 @@ class RuleMonitor:
                 return
             self.manager._runtime(last_rule_attempt_at=timestamp)
             facts = self.facts(persist=True)
-            seen, action_count, evaluations = set(), 0, 0
-            for row in self.hub.db.execute("SELECT * FROM agent_rules WHERE deleted=0").fetchall():
-                document = validate_document(json.loads(row["document"]))
-                if not document["enabled"]:
-                    continue
-                for entity in facts[document["target"]]:
-                    evaluations += 1
-                    if not matches(document["when"], entity):
+            seen, evaluations, pending_actions = set(), 0, []
+            # Persist one inspection atomically. Tool actions run after release,
+            # retaining their own durable reservations/transactions and fencing.
+            with write_batch(self.hub.db):
+                for row in self.hub.db.execute("SELECT * FROM agent_rules WHERE deleted=0").fetchall():
+                    document = validate_document(json.loads(row["document"]))
+                    if not document["enabled"]:
                         continue
-                    key = (document["id"], entity["id"])
-                    seen.add(key)
-                    finding = self.hub.db.execute("SELECT * FROM agent_rule_findings WHERE rule_id=? AND target=?", key).fetchone()
-                    if not finding or finding["status"] == "resolved" or finding["revision"] != row["revision"]:
-                        self.hub.db.execute("INSERT OR REPLACE INTO agent_rule_findings VALUES (?,?,?,?,?,?,'watching',?,?,?,?,NULL)",
-                            (*key, row["revision"], uuid.uuid4().hex, timestamp, timestamp, document["severity"], document["name"], int(document["effect"]["type"] == "escalate"), json.dumps(entity, ensure_ascii=False)))
+                    for entity in facts[document["target"]]:
+                        evaluations += 1
+                        if not matches(document["when"], entity):
+                            continue
+                        key = (document["id"], entity["id"])
+                        seen.add(key)
                         finding = self.hub.db.execute("SELECT * FROM agent_rule_findings WHERE rule_id=? AND target=?", key).fetchone()
-                    self.hub.db.execute("UPDATE agent_rule_findings SET last_seen=?,facts=? WHERE rule_id=? AND target=?", (timestamp, json.dumps(entity, ensure_ascii=False), *key))
-                    if timestamp-finding["first_seen"] < document["for_seconds"]:
-                        continue
-                    if finding["status"] != "open":
-                        self.hub.db.execute("UPDATE agent_rule_findings SET status='open' WHERE rule_id=? AND target=?", key)
-                        self._event("opened", *key, document["name"], "规则条件持续满足，已记录异常")
-                    if action_count < 4:
-                        action_count += self._action(document, entity, finding, config)
-            for row in self.hub.db.execute("SELECT * FROM agent_rule_findings WHERE status!='resolved'").fetchall():
-                if (row["rule_id"], row["target"]) not in seen:
-                    self.hub.db.execute("UPDATE agent_rule_findings SET status='resolved',last_seen=? WHERE rule_id=? AND target=?", (timestamp, row["rule_id"], row["target"]))
-                    if row["status"] == "open":
-                        self._event("resolved", row["rule_id"], row["target"], row["title"], "条件已恢复或规则已停用")
-            self.hub.db.execute("DELETE FROM agent_rule_events WHERE id <= (SELECT COALESCE(MAX(id),0)-2000 FROM agent_rule_events)")
-            self.hub.db.execute("DELETE FROM agent_rule_cooldowns WHERE acted<?", (timestamp-86400,))
-            self.manager._runtime(last_rule_scan_at=timestamp, rule_evaluations=evaluations, rule_scan_error=None)
+                        if not finding or finding["status"] == "resolved" or finding["revision"] != row["revision"]:
+                            self.hub.db.execute("INSERT OR REPLACE INTO agent_rule_findings VALUES (?,?,?,?,?,?,'watching',?,?,?,?,NULL)",
+                                (*key, row["revision"], uuid.uuid4().hex, timestamp, timestamp, document["severity"], document["name"], int(document["effect"]["type"] == "escalate"), json.dumps(entity, ensure_ascii=False)))
+                            finding = self.hub.db.execute("SELECT * FROM agent_rule_findings WHERE rule_id=? AND target=?", key).fetchone()
+                        self.hub.db.execute("UPDATE agent_rule_findings SET last_seen=?,facts=? WHERE rule_id=? AND target=?", (timestamp, json.dumps(entity, ensure_ascii=False), *key))
+                        if timestamp-finding["first_seen"] < document["for_seconds"]:
+                            continue
+                        if finding["status"] != "open":
+                            self.hub.db.execute("UPDATE agent_rule_findings SET status='open' WHERE rule_id=? AND target=?", key)
+                            self._event("opened", *key, document["name"], "规则条件持续满足，已记录异常")
+                        pending_actions.append((document, entity, key))
+                for row in self.hub.db.execute("SELECT * FROM agent_rule_findings WHERE status!='resolved'").fetchall():
+                    if (row["rule_id"], row["target"]) not in seen:
+                        self.hub.db.execute("UPDATE agent_rule_findings SET status='resolved',last_seen=? WHERE rule_id=? AND target=?", (timestamp, row["rule_id"], row["target"]))
+                        if row["status"] == "open":
+                            self._event("resolved", row["rule_id"], row["target"], row["title"], "条件已恢复或规则已停用")
+                self.hub.db.execute("DELETE FROM agent_rule_events WHERE id <= (SELECT COALESCE(MAX(id),0)-2000 FROM agent_rule_events)")
+                self.hub.db.execute("DELETE FROM agent_rule_cooldowns WHERE acted<?", (timestamp-86400,))
+                self.manager._runtime(last_rule_scan_at=timestamp, rule_evaluations=evaluations, rule_scan_error=None)
+            action_count = 0
+            for document, entity, key in pending_actions:
+                if action_count >= 4:
+                    break
+                finding = self.hub.db.execute("SELECT * FROM agent_rule_findings WHERE rule_id=? AND target=?", key).fetchone()
+                action_count += self._action(document, entity, finding, config)
             self.manager.reconcile_feedback()
 
     def summary(self):

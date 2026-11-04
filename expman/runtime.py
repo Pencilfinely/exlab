@@ -108,12 +108,39 @@ def docker_desktop_stopped(worker_root=None):
         environment = dict(os.environ)
         environment.pop('DOCKER_CONTEXT', None)
         environment.pop('DOCKER_HOST', None)
-        reply = subprocess.run([executable, 'desktop', 'status', '--format', 'json'],
+        try:
+            reply = subprocess.run([executable, 'desktop', 'status', '--format', 'json'],
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=environment)
+            state = json.loads(reply.stdout) if reply.returncode == 0 else None
+            status = state.get('Status') if isinstance(state, dict) else None
+            return isinstance(status, str) and status.strip().lower() == 'stopped'
+        except subprocess.TimeoutExpired:
+            # The Desktop CLI can hang precisely when Desktop is closed. Prove
+            # closure from Windows independently; a missing WSL socket alone is
+            # never permission to mark a container interrupted.
+            return _windows_docker_closed(environment)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return False
+
+
+def _windows_docker_closed(environment):
+    script = r"""$ErrorActionPreference='Stop';
+$p=@(Get-Process -Name 'Docker Desktop','com.docker.backend','com.docker.proxy','com.docker.build' -ErrorAction SilentlyContinue);
+$pipes=@([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { [IO.Path]::GetFileName($_) -match '^docker.*engine' });
+$running=@(& wsl.exe --list --running --quiet); if($LASTEXITCODE -ne 0){exit 1};
+@{processes=$p.Count;pipes=$pipes.Count;running=$running} | ConvertTo-Json -Compress"""
+    try:
+        reply = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', script],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, env=environment)
         state = json.loads(reply.stdout) if reply.returncode == 0 else None
-        status = state.get('Status') if isinstance(state, dict) else None
-        return isinstance(status, str) and status.strip().lower() == 'stopped'
-    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        if not isinstance(state, dict) or type(state.get('processes')) is not int or type(state.get('pipes')) is not int:
+            return False
+        running = state.get('running')
+        if not isinstance(running, list) or not all(isinstance(name, str) for name in running):
+            return False
+        return state['processes'] == 0 and state['pipes'] == 0 and not any(
+            name.replace('\0', '').strip().lower().startswith('docker-desktop') for name in running)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
 
 

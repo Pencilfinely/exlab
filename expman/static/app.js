@@ -88,7 +88,7 @@ function showView(view){
   history.replaceState(null,'',location.pathname+location.search+'#'+view);
   if(view==='projects'&&token)void loadImportHistory();
   if(view==='matrices'&&token)void loadMatrices();
-  if(view==='settings'&&token){void loadAISettings();if(typeof loadCenterSettings==='function')void loadCenterSettings();}
+  if(view==='settings'&&token){void loadAISettings();void loadDesktopSettings();if(typeof loadCenterSettings==='function')void loadCenterSettings();}
   if(view==='experiments')requestAnimationFrame(drawChart);
 }
 document.querySelectorAll('[data-view]').forEach(button=>{button.onclick=()=>showView(button.dataset.view);button.title=viewLabels[button.dataset.view][0];button.setAttribute('aria-label',button.title);});
@@ -106,6 +106,18 @@ setSidebarCollapsed(sidebarCollapsed,false);
 document.querySelectorAll('[data-go]').forEach(button=>button.onclick=()=>showView(button.dataset.go));
 document.querySelector('.brand').onclick=event=>{event.preventDefault();showView('overview');};
 $('settings-address').textContent=location.origin;
+async function loadDesktopSettings(){
+  const button=$('desktop-settings-open');if(!button)return;
+  button.disabled=true;
+  try{const value=await api('/api/local/desktop/settings');$('settings-data-root').textContent=value.data_root;button.disabled=!value.available;$('desktop-settings-feedback').textContent=value.detail;}
+  catch{$('settings-data-root').textContent='请在 Center 本机查看';$('desktop-settings-feedback').textContent='开机自启与自动更新在 Center 本机的桌面设置中调整，也可从托盘进入“设置 · 开机自启与更新”。';}
+}
+if($('desktop-settings-open'))$('desktop-settings-open').onclick=async()=>{
+  const button=$('desktop-settings-open');button.disabled=true;
+  try{const value=await api('/api/local/desktop/settings',{});$('desktop-settings-feedback').textContent=value.detail;}
+  catch(error){$('desktop-settings-feedback').textContent=error.message;}
+  finally{button.disabled=false;}
+};
 $('quick-worker').onclick=()=>{showView('compute');$('add-worker').click();};
 $('quick-run').onclick=()=>showView('projects');
 $('quick-import').onclick=()=>{showView('projects');$('import-local').click();};
