@@ -33,7 +33,7 @@ namespace ExperimentManagerDesktop {
                 status.Text="正在检测 Docker、GPU 和节点身份…";
                 var result=await Task.Run(()=>WorkerBoot.Inspect(c));
                 if(!App.Flag(result,"ready"))throw new InvalidOperationException(App.Text(result,"detail"));
-                c.ServiceRoot=App.Text(result,"service_root");c.NodeId=App.Text(result,"node_id");c.EngineId=App.Text(result,"engine_id");WorkerBoot.Validate(c);
+                c.ServiceRoot=App.Text(result,"service_root");c.NodeId=App.Text(result,"node_id");c.EngineId=App.Text(result,"engine_id");c.EngineService=App.Text(result,"engine_service");WorkerBoot.Validate(c);
                 checkedConfig=c;enable.Enabled=true;status.Text=App.Text(result,"detail")+"\n节点："+c.NodeId+"。未登录重启验收尚未完成。";
             });
             actions.Controls.Add(enable);enable.Click+=async(s,e)=>await Execute(async()=>{

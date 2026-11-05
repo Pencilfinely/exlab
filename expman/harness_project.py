@@ -331,7 +331,7 @@ def bundle_asset_aliases(manifest):
             for alias in manifest.get('assets', {})}
 
 
-def install_bundle(bundle, storage_root, node_config):
+def install_bundle(bundle, storage_root, node_config, *, docker_endpoint=None):
     """Install a content-addressed copy; return config without touching a live agent."""
     manifest = read_bundle(bundle)
     storage_root = _local(storage_root)
@@ -393,7 +393,8 @@ def install_bundle(bundle, storage_root, node_config):
                  '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'External project snapshot')
         commit = _git(repo, 'rev-parse', 'HEAD')
         from .harness_environment import ensure_environment
-        environment = ensure_environment(manifest.get('runtime', {}), copy.deepcopy(node_config), root / 'environment')
+        options = {'docker_endpoint': docker_endpoint} if docker_endpoint else {}
+        environment = ensure_environment(manifest.get('runtime', {}), copy.deepcopy(node_config), root / 'environment', **options)
         config = environment['config']
         config['deleted_project_bundles'] = [item for item in config.get('deleted_project_bundles', [])
                                              if item != manifest['bundle_id']]

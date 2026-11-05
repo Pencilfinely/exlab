@@ -7,7 +7,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**桌面端当前版本：0.5.30 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.5.30.md)
+**桌面端当前版本：0.6.0 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.6.0.md)
 
 Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及默认关闭的自动更新。0.5.10 起，Windows Center、Windows Worker 和 Ubuntu Worker 的手动及自动更新均只交接管理进程；Docker 实验继续运行，原任务队列和待回传数据在重启后接续。在原服务目录运行 `bash Update-Worker.sh`，加 `--auto enable` 开启自动更新。[Ubuntu 更新命令](docs/OPERATIONS.zh-CN.md#ubuntu一条命令更新与可选自动更新)。
 
@@ -17,7 +17,7 @@ Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及�
 
 动态算力机制支持节点维护、插电限制、定时释放、队列调控和检查点接手。执行状态用于调度与续训，实验结果保持轻量回传；可选 AI 提供规划建议，也可开启自动化介入。[使用方式与恢复条件](docs/DYNAMIC-COMPUTE.zh-CN.md)。
 
-0.5.30 增加 Windows 无人值守启动设置，适用于已迁移到独立 Docker Engine 的 WSL 环境；需配置账户并完成未登录重启验收。[配置步骤](docs/UNATTENDED-WORKER.zh-CN.md)。0.5.27 等待 Ubuntu 实际连通 Docker 后再启动 Worker，明确主控释放策略与启用操作的冲突，并修复 Docker 状态查询超时导致的退出重试。0.5.26 修复 Windows Worker 将正常连接状态误判为启用失败，正确等待离线重连并复用运行中的原节点。0.5.25 禁止 Windows 多个主控复用同一端口，明确显示工作空间/认证冲突，并记录实际配置文件路径以排查重定向副本。包含 0.5.24 的修复：Worker 因 SQLite 写锁竞争退出后持续离线时，执行、结果和断点回传共用短写事务互斥，暂时锁错误自动退避恢复，保留原实验；同时包含 0.5.23 的 Center 积压修复。心跳只读取当前需要处理的任务，列表与巡检使用随任务事务同步的轻量状态，巡检批量保存变化；健康检查独立于调度锁，请求数量设有上限。包含 0.5.22 的 Worker 网络回复中断恢复修复。
+0.6.0 是存储与后台性能更新：Windows 迁移改为数据原位保留、镜像流式转移；新增“存储与环境”，回收已完成实验的冗余副本和旧缓存；减少历史扫描、空闲轮询和后台页面重绘。[清理规则](docs/STORAGE.zh-CN.md) · [未登录启动](docs/UNATTENDED-WORKER.zh-CN.md)。
 
 **AI 自动托管**使用高频规则巡检和低频 AI 研判，支持受限规则编写；报告按需打开。节点操作以 Worker 执行回执确认完成；外部 GPT、Codex 等 agent 可通过独立授权的 MCP / HTTP 查询、操作或委托。[配置与接入说明](docs/AI-AGENT.zh-CN.md)。
 
@@ -38,7 +38,7 @@ Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及�
 | 使用位置 | 建议下载的文件名后缀 | 安装后打开 | 提前准备 |
 |---|---|---|---|
 | Windows 11 管理电脑 | windows-controller-x64-Setup.exe | **ExLab Center**，程序为 ExLabCenter.exe | Microsoft Edge；不需要 WSL、Docker 或另装 Python |
-| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **ExLab Worker**，程序为 ExLabWorker.exe | WSL2、Ubuntu 22.04+、启用该 Ubuntu 集成的 Docker Desktop、NVIDIA Windows 驱动 |
+| Windows 11 NVIDIA 算力电脑 | windows-worker-x64-Setup.exe | **ExLab Worker**，程序为 ExLabWorker.exe | WSL2、Ubuntu 22.04+、Docker Desktop 或已配置的独立引擎、NVIDIA Windows 驱动 |
 | 原生 Ubuntu 22.04+ NVIDIA 服务器 | ubuntu-worker-x64.zip | 一次安装后在后台运行 | Docker Engine、NVIDIA Linux 驱动、NVIDIA Container Toolkit；普通用户可以运行 Docker |
 
 安装程序按当前 Windows 用户安装，不要求管理员权限；修改防火墙或系统依赖仍可能需要管理员权限。
@@ -108,7 +108,7 @@ Android 与原生 HarmonyOS 6 的轻量客户端源码位于 `mobile/`，主要�
 
 总览、实验列表和详情显示**累计运行时长**：实验开始运行后自动计时，停止或完成后定格，恢复后继续累计，不含排队、环境准备和停止期间。算力端持久化计时，关闭页面或管理端暂时离线不会清零；运行中的页面数字为估算，最终以算力端回传记录为准。详情提供提交、首次开始和最近停止时间，结果 CSV 也包含计时字段。管理端与算力端都需更新后才能记录完整时长；旧记录显示暂无记录，无法确认的历史片段会标注记录不完整。
 
-Windows 算力端关闭窗口后可以继续后台运行，但仍依赖当前用户的 WSL 和 Docker Desktop。
+Windows 算力端关闭窗口后可继续后台运行。默认模式使用 WSL 与 Docker Desktop；完成一键迁移后使用独立引擎，可配置未登录开机启动。
 **后台运行不等于睡眠、注销或关机后仍能训练。** 登录启动选项也不等于 Windows 无人登录系统服务。
 原生 Ubuntu 优先使用用户级 systemd，不可用时使用后台进程；开机未登录/注销后继续运行取决于系统已有的用户服务和 lingering 设置，安装器不会擅自更改这些系统策略。
 

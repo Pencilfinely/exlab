@@ -48,9 +48,7 @@ def digest(path):
 def environment(endpoint):
     if not isinstance(endpoint, str) or not endpoint.startswith('unix:///') or any(c.isspace() for c in endpoint):
         raise ValueError('迁移只支持本机 Docker socket。')
-    value = dict(os.environ, DOCKER_HOST=endpoint)
-    value.pop('DOCKER_CONTEXT', None)
-    return value
+    return runtime.docker_environment(endpoint)
 
 
 def docker(args, endpoint, **options):
@@ -59,6 +57,10 @@ def docker(args, endpoint, **options):
 
 def objects(args, endpoint):
     return json.loads(docker(args, endpoint))
+
+
+def containerd_store(info):
+    return ['driver-type', 'io.containerd.snapshotter.v1'] in (info.get('DriverStatus') or [])
 
 
 def registry(item, name):
@@ -205,7 +207,9 @@ def inspect(service_root=None):
     checked = runtime.docker_status(path.parent, prefer_saved=True)
     if not checked.get('docker_ready'):
         raise ValueError(checked.get('detail', '请先启动原 Docker Desktop。'))
-    endpoint = checked['docker_endpoint']
+    endpoint = 'unix://' + str(Path(checked['docker_endpoint'][7:]).resolve(strict=True))
+    if not endpoint.startswith('unix:///mnt/wsl/'):
+        raise ValueError('无法识别 Docker Desktop 独立连接，请检查 WSL 集成。')
     info = objects(['info', '--format', '{{json .}}'], endpoint)
     if 'docker desktop' not in str(info.get('OperatingSystem', '')).lower() and info.get('Name') != 'docker-desktop':
         raise ValueError('当前已是独立 Docker；请使用“检测独立环境”直接登记开机任务。')
@@ -222,14 +226,19 @@ def inspect(service_root=None):
     helper = next(iter(worker_gpu._profiles(config, gpus[0]['name']).values()))
     used = int(run(['df', '--output=used', '--block-size=1', '/']).splitlines()[-1].strip())
     cache = sum(int(i.get('Size', 0)) for i in all_images if i['Id'] in set(images.values()) | {r['image'] for r in registries})
-    # Account for tar + imported filesystem + image export + restored engine and
-    # registry blobs; intentionally conservative before quiescing anything.
-    required = 2 * used + 5 * cache + 10 * 1024 ** 3
+    from .worker_transfer import summary
+    registry_bytes = sum(summary(endpoint, r['volume'], images[helper])['bytes'] for r in registries)
+    # Original filesystem stays in place. Account for the destination image
+    # store (including compressed/unpacked layers), registry and package setup.
+    required = int(1.15 * (2 * cache + registry_bytes)) + 4 * 1024 ** 3
     return dict(ready=True, service_root=str(root), config=str(path), node_id=candidate['node_id'],
                 worker_root=candidate['root'], linux_user=linux_user,
                 uid=os.getuid(), gid=os.getgid(), engine_id=info['ID'], endpoint=endpoint,
+                containerd_store=containerd_store(info),
                 registries=registries, images=images, helper=helper, gpus=gpus,
-                required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved)
+                required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved,
+                mode='in_place', space={'filesystem_copy_bytes': 0, 'existing_filesystem_bytes': used,
+                    'image_bytes': cache, 'registry_bytes': registry_bytes, 'required_bytes': required})
 
 
 def load_job(job):
@@ -247,6 +256,8 @@ def same_source(value):
     info = objects(['info', '--format', '{{json .}}'], value['endpoint'])
     if info.get('ID') != value['engine_id']:
         raise ValueError('原 Docker 引擎已变化，已阻止迁移。')
+    if 'containerd_store' in value and containerd_store(info) != value['containerd_store']:
+        raise ValueError('原 Docker 镜像存储已变化，请重新检测。')
 
 
 def cancelled(job):
@@ -436,6 +447,10 @@ def sanitize(job):
     return {'ready': True}
 
 
+def native_endpoint(value):
+    return 'unix:///run/exlab-docker/docker.sock' if value.get('mode') == 'in_place' else 'unix:///var/run/docker.sock'
+
+
 def target_identity(value):
     # Normal users can read the public job marker after provisioning.
     marker = common.read_json(MARKER)
@@ -443,7 +458,7 @@ def target_identity(value):
         raise ValueError('目标 WSL 不属于本次迁移，已拒绝修改。')
     if not worker_boot.native_engine():
         raise ValueError('目标没有运行独立 Docker Engine。')
-    info = objects(['info', '--format', '{{json .}}'], 'unix:///var/run/docker.sock')
+    info = objects(['info', '--format', '{{json .}}'], native_endpoint(value))
     if (info.get('ID') == value['engine_id'] or 'docker desktop' in str(info.get('OperatingSystem', '')).lower()
             or info.get('Name') == 'docker-desktop' or 'nvidia' not in info.get('Runtimes', {})):
         raise ValueError('目标 Docker 身份或 NVIDIA runtime 不符合要求。')
@@ -508,12 +523,12 @@ def verify(job):
     for gpu in value['gpus']:
         for image in sorted(set(worker_gpu._profiles(common.read_json(config), gpu['name']).values())):
             cancelled(job)
-            receipts.append(worker_gpu._verify(image, gpu['uuid'], environment('unix:///var/run/docker.sock'), time.monotonic() + 90))
+            receipts.append(worker_gpu._verify(image, gpu['uuid'], environment(native_endpoint(value)), time.monotonic() + 90))
     if not receipts:
         raise ValueError('未完成实际 CUDA 验证。')
     state_path = config.parent / 'setup-state.json'
     state = common.read_json(state_path, {})
-    state.update(docker_id=info['ID'], docker_endpoint='unix:///var/run/docker.sock')
+    state.update(docker_id=info['ID'], docker_endpoint=native_endpoint(value))
     private_write(state_path, state)
     root = Path(value['service_root'])
     result = service.install(root, config=str(config), backend='detached', start_now=False)
@@ -548,7 +563,12 @@ def activate(job):
     verified = common.read_json(job / 'verified.json')
     if verified.get('node_id') != value['node_id'] or verified.get('engine_id') != info['ID'] or not verified.get('cuda'):
         raise ValueError('尚未完成迁移验收。')
-    restore_override(job, value)
+    receipt = common.read_json(job / 'committed.json', {})
+    if receipt and (receipt.get('job_id') != value['job_id'] or receipt.get('engine_id') != info['ID']):
+        raise ValueError('交接记录归属不符')
+    if not receipt:
+        restore_override(job, value)
+        private_write(job / 'committed.json', {'job_id': value['job_id'], 'engine_id': info['ID']})
     for path in (Path(value['service_root']) / FENCE, Path(value['config']).parent / FENCE):
         remove_fence(path, value['job_id'])
     return {'ready': True}
@@ -556,6 +576,8 @@ def activate(job):
 
 def rollback(job):
     job, value = load_job(job)
+    if (job / 'committed.json').exists():
+        raise ValueError('环境已经交接，不能恢复旧配置。')
     if MARKER.exists() and common.read_json(MARKER, {}).get('job_id') == value['job_id']:
         raise ValueError('恢复原节点操作不能在迁移副本中执行。')
     same_source(value)
@@ -581,7 +603,7 @@ def rollback(job):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('inspect', 'prepare', 'export', 'pre-export', 'sanitize', 'restore', 'verify', 'activate', 'rollback', 'quiescent'))
+    parser.add_argument('action', choices=('inspect', 'prepare', 'export', 'pre-export', 'sanitize', 'restore', 'verify', 'activate', 'rollback', 'quiescent', 'transfer', 'cleanup-source'))
     parser.add_argument('--job')
     parser.add_argument('--service-root')
     args = parser.parse_args(argv)
@@ -589,10 +611,12 @@ def main(argv=None):
         if args.action == 'inspect':
             result = inspect(args.service_root)
         else:
+            from .worker_transfer import transfer, cleanup_source
             job, _ = load_job(args.job)
             with InstanceLock(job / 'operation.lock', timeout=60 if args.action in ('rollback', 'quiescent') else 0):
                 result = {'export': export_data, 'pre-export': pre_export, 'prepare': prepare, 'sanitize': sanitize, 'restore': restore,
                           'verify': verify, 'activate': activate, 'rollback': rollback,
+                          'transfer': transfer, 'cleanup-source': cleanup_source,
                           'quiescent': lambda _: {'ready': True}}[args.action](args.job)
         print(json.dumps(result, ensure_ascii=False))
         return 0

@@ -84,6 +84,8 @@ class _Docker:
         actual = list(argv)
         environment = dict(os.environ)
         if argv[0] == "docker" and self.endpoint:
+            from .runtime import docker_environment
+            environment = docker_environment(self.endpoint)
             actual = ["docker", "--host", self.endpoint, *argv[1:]]
             environment.pop("DOCKER_HOST", None)
             environment.pop("DOCKER_CONTEXT", None)
@@ -220,7 +222,7 @@ class _Docker:
         return reference, key
 
 
-def ensure_environment(runtime, node_config, storage_root):
+def ensure_environment(runtime, node_config, storage_root, *, docker_endpoint=None):
     """Return compatible environment choices and an additive configuration copy.
 
     All candidate images must pass actual single-GPU CUDA and import checks.
@@ -240,7 +242,12 @@ def ensure_environment(runtime, node_config, storage_root):
     # installation reuses them without rebuilding/pushing their base again.
     candidates.sort(key=lambda item: 0 if item[1].get("requirements") == runtime["requirements"] else 1)
     docker = _Docker(Path(storage_root) / "environments", setup_network=config.get("setup_network", "bridge"))
-    docker.local_endpoint()
+    if docker_endpoint:
+        docker.endpoint = docker_endpoint
+        if docker_endpoint == 'unix:///run/exlab-docker/docker.sock':
+            docker.setup_network = 'host'
+    else:
+        docker.local_endpoint()
     gpus = docker.inventory(config)
     environments, failures, checked_images, covered_gpus = [], [], set(), set()
     for name, profile in candidates:

@@ -9,6 +9,21 @@ env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: utf-8
 jobs:
+  isolated-engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
+    runs-on: ubuntu-latest
+    env:
+      EXLAB_TEST_IMAGE_STORE: ${{ matrix.store }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Provision, stream and roll back isolated Docker on disposable runner
+        run: PYTHONPATH=. python3 scripts/test_isolated_engine.py
+      - name: Isolated service diagnostics
+        if: failure()
+        run: sudo journalctl -u exlab-docker.service -u exlab-containerd.service --no-pager -n 100
   android:
     runs-on: ubuntu-latest
     steps:
@@ -44,6 +59,7 @@ jobs:
       - run: node tests/test_timing_ui.js
       - run: node tests/test_matrix_ui.js
       - run: node tests/test_resource_ui.js
+      - run: node tests/test_qol_ui.js
       - run: node --check expman/static/compute.js
       - run: node tests/test_compute_ui.js
       - run: node --check expman/static/autonomy.js
@@ -79,6 +95,7 @@ jobs:
         run: |
           ./scripts/test_icons.ps1
           ./scripts/test_browser_icons.ps1
+          ./scripts/test_worker_disk.ps1
       - if: runner.os == 'Linux'
         run: |
           bash -n deploy/release/Start-Worker.sh
@@ -93,6 +110,7 @@ jobs:
           bash -n deploy/release/Check-Unattended-Worker.sh
           bash -n deploy/release/Migrate-Worker.sh
           bash -n deploy/release/Prepare-Unattended-Engine.sh
+          bash -n deploy/release/Prepare-Isolated-Engine.sh
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |

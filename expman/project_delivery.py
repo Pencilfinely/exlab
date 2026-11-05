@@ -245,7 +245,9 @@ class ProjectDelivery:
                 if final.stat().st_size != size or common.sha256_file(final) != digest:
                     final.unlink()
                     raise ValueError("Project SHA256 verification failed; retry distribution")
-                operation["result"] = install_bundle(final, self.agent.root / "distributed-projects", operation["before"])
+                endpoint = self.agent._docker_environment().get('DOCKER_HOST')
+                options = {'docker_endpoint': endpoint} if endpoint else {}
+                operation["result"] = install_bundle(final, self.agent.root / "distributed-projects", operation["before"], **options)
             except Exception as error:
                 operation["error"] = str(error)[:1000]
             finally:

@@ -13,11 +13,15 @@ from . import runtime, worker_service
 from .worker_upgrade import _candidate
 
 
+def engine_service():
+    return 'exlab-docker.service' if Path('/etc/exlab-docker.json').is_file() else 'docker.service'
+
+
 def native_engine(proc=Path('/proc')):
     # A normal user cannot read /proc/<root dockerd>/exe. Query systemd's
     # public service properties instead, then verify the live main process.
     try:
-        reply = subprocess.run(['systemctl', 'show', 'docker.service', '--no-pager',
+        reply = subprocess.run(['systemctl', 'show', engine_service(), '--no-pager',
             '--property=ActiveState,MainPID,ExecStart'], capture_output=True,
             text=True, timeout=15)
         if reply.returncode:
@@ -27,7 +31,7 @@ def native_engine(proc=Path('/proc')):
         pid = int(properties.get('MainPID', '0'))
         return bool(properties.get('ActiveState') == 'active' and pid > 1 and executable
             and executable[1] in ('/usr/bin/dockerd', '/usr/sbin/dockerd', '/bin/dockerd',
-                '/sbin/dockerd', '/usr/local/bin/dockerd', '/usr/local/sbin/dockerd')
+                '/sbin/dockerd', '/usr/local/bin/dockerd', '/usr/local/sbin/dockerd', '/opt/exlab/docker/usr/bin/dockerd')
             and (proc / str(pid) / 'comm').read_text().strip() == 'dockerd')
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
@@ -69,7 +73,7 @@ def inspect(service_root=None, expected_engine=None):
     gpu = subprocess.run(['/usr/lib/wsl/lib/nvidia-smi', '-L'], capture_output=True, text=True, timeout=15)
     if gpu.returncode or 'GPU-' not in gpu.stdout:
         return dict(result, detail='WSL 尚未发现可用 NVIDIA GPU；稍后重试。')
-    return dict(result, ready=True, engine_id=checked['docker_id'], detail='独立 Docker、GPU 与原节点身份检查通过。')
+    return dict(result, ready=True, engine_id=checked['docker_id'], engine_service=engine_service(), detail='独立 Docker、GPU 与原节点身份检查通过。')
 
 
 def main():

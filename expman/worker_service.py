@@ -1080,12 +1080,63 @@ def host_info(service_root=None):
     return {key: config[key] for key in ('node_id', 'hub_url', 'token')}
 
 
+def storage_action(service_root=None, *, action='status', automatic=None):
+    from . import storage
+    settings = _settings(_root(service_root))
+    config_path = settings.get('config')
+    candidate = _candidate(config_path) if config_path else None
+    if not candidate:
+        raise ValueError('请先配置 Worker')
+    root = Path(candidate['root']).resolve()
+    if automatic is not None:
+        common.atomic_json(root / 'storage-policy.json', {'automatic': bool(automatic)})
+    if action == 'status':
+        return dict(common.read_json(root / 'storage-status.json', {'status': 'idle', 'detail': '扫描后可查看空间明细。'}),
+                    automatic=common.read_json(root / 'storage-policy.json', {}).get('automatic', True))
+    if action == 'cancel':
+        request = common.read_json(root / 'storage-request.json', {})
+        common.atomic_json(root / 'storage-cancel.json', {'id': request.get('id')})
+        return {'status': 'cancelling', 'detail': '当前项目处理完后取消。'}
+    if action not in ('scan', 'clean'):
+        raise ValueError('未知存储操作')
+    with InstanceLock(root / 'storage-request.lock'):
+        previous = common.read_json(root / 'storage-status.json', {})
+        request = common.read_json(root / 'storage-request.json', {})
+        pending = request and (previous.get('id') != request.get('id') or previous.get('status') in ('queued', 'running'))
+        if pending and agent_is_running(root):
+            return dict(previous, status='queued' if previous.get('id') != request.get('id') else previous['status'])
+        if not pending:
+            request = {'id': uuid.uuid4().hex, 'action': action}
+            common.atomic_json(root / 'storage-request.json', request)
+            common.atomic_json(root / 'storage-status.json', {'id': request['id'], 'status': 'queued', 'detail': '等待后台处理…'})
+    # The active Agent owns execution admission. When stopped, take its exact
+    # lock so a concurrent start cannot race destructive maintenance.
+    if agent_is_running(root):
+        return common.read_json(root / 'storage-status.json')
+    owner = InstanceLock(root / 'agent.lock')
+    try:
+        owner.__enter__()
+    except RuntimeError:
+        return common.read_json(root / 'storage-status.json')
+    try:
+        def report(value):
+            common.atomic_json(root / 'storage-status.json', dict(value, id=request['id'], time=common.now()))
+        try:
+            report(storage.run_request(config_path, request, report,
+                lambda: common.read_json(root / 'storage-cancel.json', {}).get('id') == request['id']))
+        except (OSError, ValueError, RuntimeError, sqlite3.Error, subprocess.SubprocessError) as error:
+            report({'status': 'failed', 'detail': _redact(_root(service_root), str(error))[:800]})
+    finally:
+        owner.__exit__(None, None, None)
+    return common.read_json(root / 'storage-status.json')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('install', 'start', 'stop', 'status', 'logs', '_serve', '_hold',
                                          'update-status', 'stop-for-update', 'install-status', 'shutdown', 'deactivate',
                                          'runtime-status', 'runtime-release', 'host-info',
-                                         'gpu-status', 'gpu-enable', 'compute-policy'))
+                                         'gpu-status', 'gpu-enable', 'compute-policy', 'storage-status', 'storage-scan', 'storage-clean', 'storage-cancel'))
     parser.add_argument('--shutdown-only', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--service-root')
     parser.add_argument('--root', help='Worker data directory; separate from lifecycle settings')
@@ -1097,6 +1148,7 @@ def main(argv=None):
     parser.add_argument('--gpu', help='GPU UUID to verify and enable from local settings')
     parser.add_argument('--compute-mode', choices=('available', 'drain', 'stop', 'release'))
     parser.add_argument('--minutes', type=float)
+    parser.add_argument('--automatic-cleanup', choices=('yes', 'no'))
     power = parser.add_mutually_exclusive_group()
     power.add_argument('--require-ac', action='store_true')
     power.add_argument('--allow-battery', action='store_true')
@@ -1119,6 +1171,9 @@ def main(argv=None):
             from .worker_gpu import gpu_status, gpu_enable
             value = (gpu_enable(args.service_root, gpu=args.gpu) if args.action == 'gpu-enable'
                      else gpu_status(args.service_root))
+        elif args.action.startswith('storage-'):
+            value = storage_action(args.service_root, action=args.action[8:],
+                automatic=None if args.automatic_cleanup is None else args.automatic_cleanup == 'yes')
         elif args.action == 'logs':
             value = logs(args.service_root, args.lines)
         else:

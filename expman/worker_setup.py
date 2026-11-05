@@ -109,6 +109,8 @@ class WorkerSetup:
         actual = list(argv)
         environment = dict(os.environ)
         if argv[0] == 'docker' and self.endpoint:
+            from .runtime import docker_environment
+            environment = docker_environment(self.endpoint)
             actual = ['docker', '--host', self.endpoint, *argv[1:]]
             environment.pop('DOCKER_CONTEXT', None)
             environment.pop('DOCKER_HOST', None)
@@ -252,11 +254,15 @@ class WorkerSetup:
         print('[1/5] Checking Docker, GPU, disk and controller / 检查环境和连接', flush=True)
         if sys.platform != 'linux' or sys.version_info < (3, 10):
             raise RuntimeError('Worker requires Linux/WSL2 and Python 3.10+; use the Windows worker launcher on Windows.')
+        isolated = self.state.get('docker_endpoint') == 'unix:///run/exlab-docker/docker.sock'
         for program in ('git', 'docker', 'nvidia-smi'):
-            if not shutil.which(program):
+            installed = Path('/opt/exlab/docker/usr/bin/docker').is_file() if program == 'docker' and isolated else shutil.which(program)
+            if not installed:
                 raise RuntimeError(f'Missing {program}. Check prerequisites in README / 缺少系统依赖 {program}。')
-        context = os.environ.get('DOCKER_CONTEXT')
-        if os.environ.get('DOCKER_HOST') and not context:
+        context = None if isolated else os.environ.get('DOCKER_CONTEXT')
+        if isolated:
+            endpoint = self.state['docker_endpoint']
+        elif os.environ.get('DOCKER_HOST') and not context:
             endpoint = os.environ['DOCKER_HOST']
         elif not context and self.state.get('docker_endpoint'):
             endpoint = self.state['docker_endpoint']
@@ -267,6 +273,9 @@ class WorkerSetup:
         if not endpoint.startswith('unix:///') or any(c.isspace() for c in endpoint):
             raise ValueError('Use this machine\'s local Docker socket; remote Docker contexts are not supported.')
         self.endpoint = endpoint
+        if endpoint == 'unix:///run/exlab-docker/docker.sock':
+            self.setup_network = 'host'
+            self.state['setup_network'] = 'host'
         self.state['docker_endpoint'] = endpoint
         try:
             self.command(['docker', 'info', '--format', '{{.ServerVersion}}'], timeout=20)
@@ -274,7 +283,7 @@ class WorkerSetup:
             # A saved socket may have changed after Docker Desktop/WSL restarts.
             # Respect an explicitly selected host or context; repair only the
             # endpoint remembered by this installation.
-            if context or os.environ.get('DOCKER_HOST') or not self.state.get('docker_endpoint'):
+            if isolated or context or os.environ.get('DOCKER_HOST') or not self.state.get('docker_endpoint'):
                 raise
             self.endpoint = None
             _, current = self.command(['docker', 'context', 'inspect', '--format',

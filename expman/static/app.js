@@ -89,6 +89,7 @@ function showView(view){
   if(view==='projects'&&token)void loadImportHistory();
   if(view==='matrices'&&token)void loadMatrices();
   if(view==='settings'&&token){void loadAISettings();void loadDesktopSettings();if(typeof loadCenterSettings==='function')void loadCenterSettings();}
+  if(token)render();
   if(view==='experiments')requestAnimationFrame(drawChart);
 }
 document.querySelectorAll('[data-view]').forEach(button=>{button.onclick=()=>showView(button.dataset.view);button.title=viewLabels[button.dataset.view][0];button.setAttribute('aria-label',button.title);});
@@ -215,7 +216,7 @@ let refreshPending=null;
 function refresh(){
   if(!token)return Promise.resolve();
   if(refreshPending)return refreshPending;
-  refreshPending=(async()=>{try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';refreshTagControls();render();if(localImportAvailable===null)void loadImportHistory();if(selected)await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('暂时无法获取管理中心状态，请检查程序是否运行、网络和令牌。已经准备好的节点任务不依赖此页面继续运行。 '+error.message.slice(0,150));}})().finally(()=>{refreshPending=null;});
+  refreshPending=(async()=>{try{state=await api('/api/state');setTimingClock(state.time);$('login').hidden=true;$('workspace').hidden=false;$('sidebar').hidden=false;document.body.classList.add('authenticated');$('connection').textContent='● 管理中心在线';refreshTagControls();render();if(localImportAvailable===null)void loadImportHistory();if(selected&&currentView==='experiments')await detail(selected,false);}catch(error){$('connection').textContent='○ 无法连接';notify('连接失败，请检查主控、网络或令牌。 '+error.message.slice(0,150));}})().finally(()=>{refreshPending=null;});
   return refreshPending;
 }
 function openNodeResources(id){
@@ -276,7 +277,7 @@ $('node-resource-form').onsubmit=event=>{event.preventDefault();void saveNodeRes
 $('node-resource-close').onclick=()=>{$('node-resource-form').hidden=true;nodeResourceEditor=null;};
 $('node-resource-reload').onclick=()=>nodeResourceEditor&&openNodeResources(nodeResourceEditor.id);
 function render(){if(globalThis.ExLabAutonomousUI)globalThis.ExLabAutonomousUI.render();const jobs=state.jobs||[],nodes=state.nodes||[];const online=n=>Date.now()/1000-n.last_seen<45;$('count-queue').textContent=jobs.filter(j=>['queued','assigned','preparing','ready'].includes(j.state)).length;$('count-running').textContent=jobs.filter(j=>['starting','running'].includes(j.state)).length;$('count-done').textContent=jobs.filter(j=>j.state==='succeeded').length;$('count-nodes').textContent=nodes.filter(online).length;
-  $('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.display_name||n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',globalThis.ExLabCompute?ExLabCompute.nodeState(n).label:n.mode==='drain'?'已暂停接单':online(n)?'可以接单':'等待连接'));
+  if(currentView==='compute'){$('nodes').replaceChildren();for(const n of nodes){const snap=n.snapshot||{},box=node('div',undefined,'node'),heading=node('div',undefined,'node-name');heading.append(node('span',n.display_name||n.id),node('span',online(n)?'在线':'离线','badge'));box.append(heading,node('p',globalThis.ExLabCompute?ExLabCompute.nodeState(n).label:n.mode==='drain'?'已暂停接单':online(n)?'可以接单':'等待连接'));
     const rename=node('button','改名','text-button');rename.onclick=async()=>{const name=prompt('算力端显示名称',n.display_name||n.id);if(!name?.trim())return;try{await api('/api/node-rename',{node_id:n.id,name:name.trim()});await refresh();}catch(error){notify(error.message);}};box.append(rename);
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
     for(const g of snap.gpus||[]){const gpu=node('div',`${g.name} · 空闲 ${Number.isFinite(g.free_mb)?(g.free_mb/1024).toFixed(1):'?'} / ${(g.total_mb/1024).toFixed(1)} GiB`,'gpu'),bar=node('div',undefined,'bar'),fill=node('i');fill.style.width=Math.max(0,Math.min(100,100*(1-g.free_mb/g.total_mb)))+'%';bar.append(fill);gpu.append(bar);box.append(gpu);}
@@ -291,7 +292,10 @@ function render(){if(globalThis.ExLabAutonomousUI)globalThis.ExLabAutonomousUI.r
     if(globalThis.ExLabCompute)ExLabCompute.renderNode(box,n,{node,api,refresh,notify});
     renderNodeTemplates(box,n);$('nodes').append(box);}
   if(!nodes.length)$('nodes').append(node('p','尚无节点。点击“添加算力机”，再启动算力端。','muted'));
-  updateNodeResourceStatus();renderProjects();renderJobs();renderOverview();
+  updateNodeResourceStatus();}
+  if(currentView==='projects')renderProjects();
+  if(currentView==='experiments')renderJobs();
+  if(currentView==='overview')renderOverview();
 }
 function renderJobs(){
   const scrollTop=$('jobs-scroll').scrollTop,jobs=filteredJobs();$('jobs').replaceChildren();$('empty').hidden=jobs.length>0;
@@ -747,4 +751,7 @@ $('matrix-export-config').onclick=()=>{try{const payload=matrixPayload();delete 
 $('matrix-import').onclick=()=>$('matrix-file').click();$('matrix-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>2*1024*1024)throw new Error('配置文件不能超过 2 MiB');const value=JSON.parse((await file.text()).replace(/^\uFEFF/,''));if(!value?.spec||!Array.isArray(value.datasets||[])||!value.grid||Array.isArray(value.grid))throw new Error('请选择包含 spec、datasets、grid 的矩阵配置。');delete value.id;delete value.revision;openMatrix(value);inlineFeedback('matrix-feedback','已导入配置，请预览资源与组合，再保存启动。');}catch(error){notify('导入矩阵失败：'+error.message);}finally{event.target.value='';}};
 function markdownCell(value){return String(value??'—').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\|/g,'\\|').replace(/[\r\n]+/g,' ');}
 $('export-markdown').onclick=()=>{const jobs=filteredJobs(),keys=[...new Set(jobs.flatMap(job=>Object.keys(job.metrics||{})))].filter(key=>!['step','time','attempt'].includes(key));const headers=['实验','算法','状态','节点',...keys],rows=jobs.map(job=>[job.spec.name,job.spec.algorithm,names[job.state]||job.state,job.node_id||'等待分配',...keys.map(key=>job.metrics?.[key])]);const text=['# 实验结果',`\n导出时间：${new Date().toLocaleString('zh-CN')}；共 ${jobs.length} 次实验。指标为最近一次回传值。\n`,'| '+headers.map(markdownCell).join(' | ')+' |','| '+headers.map(()=>'---').join(' | ')+' |',...rows.map(row=>'| '+row.map(markdownCell).join(' | ')+' |'),'\n## 实验参数\n',...jobs.map(job=>'### '+markdownCell(job.spec.name)+'\n\n```json\n'+JSON.stringify(job.spec.params,null,2).replace(/```/g,'\\u0060\\u0060\\u0060')+'\n```\n')].join('\n');downloadContent(text,'实验结果.md','text/markdown;charset=utf-8');};
-initializeRecordTools();initializeNodeTemplateTools();initializeProjectTools();showView(location.hash.slice(1));refresh();setInterval(()=>{void refresh();if(token&&currentView==='matrices'){void loadMatrices();if(matrixResultId&&!$('matrix-result').hidden)void showMatrixResults(matrixResultId,false);}},5000);setInterval(updateTimers,1000);
+initializeRecordTools();initializeNodeTemplateTools();initializeProjectTools();showView(location.hash.slice(1));refresh();
+function refreshVisiblePage(){if(document.hidden)return;void refresh();if(token&&currentView==='matrices'){void loadMatrices();if(matrixResultId&&!$('matrix-result').hidden)void showMatrixResults(matrixResultId,false);}}
+setInterval(refreshVisiblePage,5000);setInterval(()=>{if(!document.hidden)updateTimers();},1000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshVisiblePage();});

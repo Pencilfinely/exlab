@@ -17,7 +17,7 @@ import threading
 import time
 import urllib.error
 
-from . import __version__, common, worker_database
+from . import __version__, common, worker_database, scan_index
 from . import result_protocol as protocol
 
 
@@ -47,8 +47,17 @@ def initialize(db):
         CREATE TABLE IF NOT EXISTS node_progress (
             job_id TEXT NOT NULL, attempt INTEGER NOT NULL, experiment_id TEXT NOT NULL, value TEXT NOT NULL,
             dirty INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(job_id,attempt,experiment_id));
+        CREATE INDEX IF NOT EXISTS results_delivery_status ON node_results(status,next_retry);
+        CREATE INDEX IF NOT EXISTS evidence_delivery_status ON node_evidence(transfer_status);
+        CREATE INDEX IF NOT EXISTS evidence_retention ON node_evidence(retention);
+        CREATE INDEX IF NOT EXISTS evidence_dirty ON node_evidence(dirty);
+        CREATE INDEX IF NOT EXISTS progress_dirty ON node_progress(dirty);
+        CREATE INDEX IF NOT EXISTS commands_dirty ON node_delivery_commands(dirty);
+        CREATE INDEX IF NOT EXISTS results_error_time ON node_results(error_at DESC) WHERE error!='';
+        CREATE INDEX IF NOT EXISTS evidence_error_time ON node_evidence(error_at DESC) WHERE error!='';
     """)
     db.commit()
+    scan_index.initialize(db)
 
 
 def lightweight(db, record):
@@ -64,23 +73,23 @@ def telemetry(db, active=None):
         cursor = db.execute(query)
         names = [column[0] for column in cursor.description]
         return [dict(zip(names, row)) for row in cursor]
-    rows = dictionaries("SELECT * FROM node_results")
-    results = [row for row in rows if row["status"] in ("queued", "retrying", "sending")]
+    pending = db.execute("SELECT COUNT(*),COALESCE(SUM(size),0) FROM node_results WHERE status IN ('queued','retrying','sending')").fetchone()
+    blocked = db.execute("SELECT COUNT(*) FROM node_results WHERE status IN ('conflict','unsupported','invalid')").fetchone()[0]
     evidence = dictionaries("SELECT * FROM node_evidence WHERE transfer_status IN ('queued','uploading','retrying')")
     legacy = db.execute("SELECT COUNT(*),COALESCE(SUM(MAX(0,u.size-u.offset)),0) FROM uploads u "
                         "LEFT JOIN legacy_upload_policy p ON p.job_id=u.job_id AND p.name=u.name AND p.sha=u.sha "
                         "WHERE u.complete=0 AND COALESCE(p.disposition,'automatic')!='retained'").fetchone()
-    errors = [row for row in rows if row["error"]] + [row for row in dictionaries("SELECT * FROM node_evidence") if row["error"]]
+    errors = dictionaries("SELECT error,error_at,retries,next_retry FROM node_results WHERE error!='' ORDER BY error_at DESC LIMIT 1") + dictionaries("SELECT error,error_at,retries,next_retry FROM node_evidence WHERE error!='' ORDER BY error_at DESC LIMIT 1")
     latest = max(errors, key=lambda row: row["error_at"] or 0) if errors else None
     meta = {row[0]: json.loads(row[1]) for row in db.execute("SELECT key,value FROM node_delivery_meta")}
     if meta.get("legacy_error_at", 0) > ((latest["error_at"] or 0) if latest else 0):
         latest = {"error": meta["legacy_error"], "error_at": meta["legacy_error_at"],
                   "retries": meta.get("legacy_retry_count", 0), "next_retry": meta.get("legacy_next_retry_at", 0)}
     return {"agent_version": __version__, "protocol_version": 1,
-            "pending_results": len(results), "pending_result_bytes": sum(row["size"] for row in results),
+            "pending_results": pending[0], "pending_result_bytes": pending[1],
             "pending_evidence": len(evidence), "pending_evidence_bytes": None if any(row["size"] is None for row in evidence) else sum(max(0, row["size"] - row["confirmed_bytes"]) for row in evidence),
             "legacy_pending_files": legacy[0], "legacy_pending_bytes": legacy[1],
-            "blocked_results": sum(row["status"] in ("conflict", "unsupported", "invalid") for row in rows),
+            "blocked_results": blocked,
             "current_result": meta.get("current_result"), "current_evidence": meta.get("current_evidence"),
             "current_legacy": active, "last_byte_progress_at": meta.get("last_byte_progress_at"),
             "last_file_completed_at": meta.get("last_file_completed_at"),
@@ -130,9 +139,13 @@ class ResultDelivery:
         self.control_db.close()
 
     def _meta(self, db, key, value):
+        encoded = json.dumps(value, allow_nan=False)
+        previous = db.execute('SELECT value FROM node_delivery_meta WHERE key=?', (key,)).fetchone()
+        if previous and (previous[0] == encoded or key in ('result_worker_at', 'evidence_worker_at') and value - json.loads(previous[0]) < 5):
+            return
         with db:
             db.execute("INSERT INTO node_delivery_meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                       (key, json.dumps(value, allow_nan=False)))
+                       (key, encoded))
 
     def _error(self, exc):
         message = str(exc)
@@ -265,10 +278,10 @@ class ResultDelivery:
             self.result_db.execute("INSERT OR IGNORE INTO node_results(job_id,attempt,experiment_id,source_hash,sha256,path,size) VALUES(?,?,?,?,?,?,?)",
                 (record["id"], record["attempt"], identity, source_hash, digest, str(final), len(wire)))
 
-    def results_once(self):
+    def results_once(self, *, indexed=False):
         db = self.result_db
         with self.result_lock:
-            records = self._records(db)
+            records = scan_index.due(db, 'results') if indexed else self._records(db)
         for record in records:
             if self.stop.is_set():
                 return
@@ -277,6 +290,8 @@ class ResultDelivery:
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 with self.result_lock:
                     self._meta(db, "scan_error", self._error(exc))
+            else:
+                scan_index.completed(db, 'results', record, 60 if record['state'] in protocol.TERMINAL else 0.25)
         with self.result_lock:
             queue = [dict(row) for row in db.execute("SELECT * FROM node_results WHERE status IN ('queued','retrying','sending') AND next_retry<=? ORDER BY retries,rowid DESC LIMIT 100", (common.now(),))]
         sending_started = time.monotonic()
@@ -324,49 +339,53 @@ class ResultDelivery:
             db.execute("INSERT OR IGNORE INTO node_evidence(job_id,attempt,experiment_id,evidence_id,name,kind,size,sha256,source) VALUES(?,?,?,?,?,?,?,?,?)",
                        (record["id"], record["attempt"], experiment, identity, name, item.get("kind", "file"), item.get("size"), item.get("sha256"), str(source)))
 
-    def _catalog(self):
+    def _catalog(self, *, indexed=False):
         db = self.control_db
-        records = self._records(db)
-        for record in records:
-            config = lightweight(db, record)
-            if config is None:
-                continue
-            results = db.execute("SELECT experiment_id,path FROM node_results WHERE job_id=? AND attempt=?", (record["id"], record["attempt"])).fetchall()
-            for result in results:
-                summary = common.read_json(result["path"])
-                for item in summary["evidence"]:
-                    self._evidence(db, record, result["experiment_id"], item)
-            output = common.safe_child(self.root / "runs", record["id"])
-            progress_dir = common.safe_child(output, f".exlab/progress/attempt-{record['attempt']}")
-            if progress_dir.is_dir():
-                for path in progress_dir.glob("*.json"):
-                    common.safe_child(output, path.relative_to(output).as_posix())
-                    item = common.read_json(path)
-                    if item.get("attempt") != record["attempt"] or item.get("experiment_id") != path.stem:
-                        raise ValueError("Progress identity disagrees with its path")
-                    protocol.identifier(path.stem)
-                    raw = protocol.encoded({"job_id": record["id"], **item}).decode()
-                    with db:
-                        db.execute("INSERT INTO node_progress VALUES (?,?,?,?,1) ON CONFLICT(job_id,attempt,experiment_id) DO UPDATE SET value=excluded.value,dirty=CASE WHEN node_progress.value=excluded.value THEN node_progress.dirty ELSE 1 END",
-                                   (record["id"], record["attempt"], path.stem, raw))
-            key = (record["id"], record["attempt"])
-            if record["state"] not in protocol.TERMINAL or key in self.catalogued or not results:
-                continue
-            experiments = {row["experiment_id"] for row in results}
-            # Batch evidence must be explicitly associated with each experiment by its producer.
-            if len(experiments) == 1:
-                experiment = experiments.pop()
-                result_names = {item["path"] for item in config["files"]}
-                for parent, directories, files in os.walk(output, followlinks=False):
-                    directories[:] = [d for d in directories if d != ".exlab" and not (Path(parent) / d).is_symlink()]
-                    for name in files:
-                        path = Path(parent) / name
-                        relative = path.relative_to(output).as_posix()
-                        if path.is_symlink() or not path.is_file() or name == "STOP" or name.endswith(".tmp") or name.startswith(".write-") or relative in result_names:
-                            continue
-                        common.safe_child(output, relative)
-                        self._evidence(db, record, experiment, {"name": relative, "size": path.stat().st_size})
-            self.catalogued.add(key)
+        for record in (scan_index.due(db, 'evidence') if indexed else self._records(db)):
+            self._catalog_record(record)
+            scan_index.completed(db, 'evidence', record, 60 if record['state'] in protocol.TERMINAL else 0.5)
+
+    def _catalog_record(self, record):
+        db = self.control_db
+        config = lightweight(db, record)
+        if config is None:
+            return
+        results = db.execute("SELECT experiment_id,path FROM node_results WHERE job_id=? AND attempt=?", (record["id"], record["attempt"])).fetchall()
+        for result in results:
+            summary = common.read_json(result["path"])
+            for item in summary["evidence"]:
+                self._evidence(db, record, result["experiment_id"], item)
+        output = common.safe_child(self.root / "runs", record["id"])
+        progress_dir = common.safe_child(output, f".exlab/progress/attempt-{record['attempt']}")
+        if progress_dir.is_dir():
+            for path in progress_dir.glob("*.json"):
+                common.safe_child(output, path.relative_to(output).as_posix())
+                item = common.read_json(path)
+                if item.get("attempt") != record["attempt"] or item.get("experiment_id") != path.stem:
+                    raise ValueError("Progress identity disagrees with its path")
+                protocol.identifier(path.stem)
+                raw = protocol.encoded({"job_id": record["id"], **item}).decode()
+                with db:
+                    db.execute("INSERT INTO node_progress VALUES (?,?,?,?,1) ON CONFLICT(job_id,attempt,experiment_id) DO UPDATE SET value=excluded.value,dirty=CASE WHEN node_progress.value=excluded.value THEN node_progress.dirty ELSE 1 END",
+                               (record["id"], record["attempt"], path.stem, raw))
+        key = (record["id"], record["attempt"])
+        if record["state"] not in protocol.TERMINAL or key in self.catalogued or not results:
+            return
+        experiments = {row["experiment_id"] for row in results}
+        # Batch evidence must be explicitly associated with each experiment by its producer.
+        if len(experiments) == 1:
+            experiment = experiments.pop()
+            result_names = {item["path"] for item in config["files"]}
+            for parent, directories, files in os.walk(output, followlinks=False):
+                directories[:] = [d for d in directories if d != ".exlab" and not (Path(parent) / d).is_symlink()]
+                for name in files:
+                    path = Path(parent) / name
+                    relative = path.relative_to(output).as_posix()
+                    if path.is_symlink() or not path.is_file() or name == "STOP" or name.endswith(".tmp") or name.startswith(".write-") or relative in result_names:
+                        continue
+                    common.safe_child(output, relative)
+                    self._evidence(db, record, experiment, {"name": relative, "size": path.stat().st_size})
+        self.catalogued.add(key)
 
     def _retain_one(self):
         db = self.control_db
@@ -626,9 +645,9 @@ class ResultDelivery:
             with db:
                 db.execute("UPDATE node_delivery_commands SET status=?,report=?,dirty=1 WHERE request_id=?", (status, json.dumps(report), row["request_id"]))
 
-    def control_once(self):
+    def control_once(self, *, indexed=False):
         db = self.control_db
-        self._catalog()
+        self._catalog(indexed=indexed)
         self._retain_one()
         self._report()
         response = self._request("/api/delivery/poll", {"status": telemetry(db, getattr(self.agent, "active_legacy_upload", None))})
@@ -648,7 +667,7 @@ class ResultDelivery:
     def _result_loop(self):
         while not self.stop.is_set():
             try:
-                self.results_once()
+                self.results_once(indexed=True)
             except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                 with self.result_lock:
                     self._record_loop_error(self.result_db, "scan_error", exc)
@@ -657,10 +676,15 @@ class ResultDelivery:
     def _control_loop(self):
         while not self.stop.is_set():
             try:
-                self.control_once()
+                self.control_once(indexed=True)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError, sqlite3.Error) as exc:
                 self._record_loop_error(self.control_db, "control_error", exc)
-            self.stop.wait(0.5)
+            # Evidence transfers stay responsive; idle control need not poll at 2 Hz.
+            try:
+                pending = self.control_db.execute("SELECT 1 FROM node_evidence WHERE retention='pending' OR transfer_status IN ('queued','uploading','retrying') LIMIT 1").fetchone()
+            except sqlite3.Error:
+                pending = True  # Retry transient database contention in the guarded loop.
+            self.stop.wait(0.5 if pending else 2)
 
     def _record_loop_error(self, db, key, error):
         # A failed write must not leave an open transaction, or reporting that

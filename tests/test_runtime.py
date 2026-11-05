@@ -22,6 +22,27 @@ def registry(name='expman-worker-registry', component='worker-registry', identit
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_isolated_engine_does_not_require_desktop_or_follow_ambient_context(self):
+        endpoint = 'unix:///run/exlab-docker/docker.sock'
+        with patch.object(runtime, 'read_json', return_value={'docker_endpoint': endpoint, 'docker_id': 'owned'}), \
+                patch.object(runtime.shutil, 'which', return_value=None), \
+                patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'exists', return_value=True), \
+                patch.dict(runtime.os.environ, {'DOCKER_CONTEXT': 'desktop-linux', 'DOCKER_HOST': 'tcp://other:2375'}), \
+                patch.object(runtime, 'docker_command', return_value=reply({'ID': 'owned', 'OSType': 'linux'})) as command:
+            self.assertTrue(runtime.docker_status('/worker')['docker_ready'])
+            self.assertEqual(command.call_args.args[1], endpoint)
+            env = runtime.docker_environment(endpoint)
+            self.assertEqual(env['DOCKER_HOST'], endpoint)
+            self.assertNotIn('DOCKER_CONTEXT', env)
+            self.assertTrue(env['PATH'].startswith('/opt/exlab/docker/usr/bin:'))
+
+    def test_stopped_isolated_engine_never_falls_back_to_desktop(self):
+        with patch.object(runtime, 'read_json', return_value={'docker_endpoint': 'unix:///run/exlab-docker/docker.sock'}), \
+                patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'exists', return_value=False), \
+                patch.object(runtime, 'docker_command') as command:
+            self.assertFalse(runtime.docker_status('/worker')['docker_ready'])
+            command.assert_not_called()
+
     def test_docker_stdout_error_is_not_discarded(self):
         from expman.agent import Agent
         agent = Agent.__new__(Agent)

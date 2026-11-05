@@ -1,4 +1,4 @@
-﻿param([string]$Python = '')
+﻿param([string]$Python = '', [switch]$KeepArtifacts)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -18,7 +18,8 @@ $Python = (Resolve-Path -LiteralPath $Python).Path
 # that same runtime even when GitHub Actions initially invokes this with pwsh.
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     $frameworkShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    & $frameworkShell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Python $Python
+    if ($KeepArtifacts) { & $frameworkShell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Python $Python -KeepArtifacts }
+    else { & $frameworkShell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath -Python $Python }
     if ($LASTEXITCODE -ne 0) { throw "Native desktop tests failed ($LASTEXITCODE)." }
     exit 0
 }
@@ -82,6 +83,22 @@ public static class DesktopBootFormTest {
                 if(!((System.Windows.Forms.TextBox)migration.GetField("details",inst).GetValue(form)).Text.Contains("notebook"))throw new Exception("Migration lost the specific blocker.");
                 input.Clear();
                 using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-migration-preview.png"));}
+                form.Close();
+            }
+            var storage=assembly.GetType("ExperimentManagerDesktop.WorkerStorageForm");
+            var sample=new System.Collections.Generic.Dictionary<string,object>{{"status","ready"},{"automatic",true},{"reclaimable_bytes",5368709120L},{"free_bytes",10737418240L},
+                {"groups",new object[]{new System.Collections.Generic.Dictionary<string,object>{{"label","Results and weights"},{"bytes",21474836480L}},new System.Collections.Generic.Dictionary<string,object>{{"label","Code working copies"},{"bytes",5368709120L}}}},
+                {"items",new object[]{new System.Collections.Generic.Dictionary<string,object>{{"kind","workspace"}}}}};
+            Func<string,string[],System.Threading.Tasks.Task<System.Collections.Generic.Dictionary<string,object>>> command=(action,options)=>System.Threading.Tasks.Task.FromResult(sample);
+            using(var form=(System.Windows.Forms.Form)Activator.CreateInstance(storage,inst,null,new object[]{command},null)) {
+                form.ShowInTaskbar=false;form.Opacity=0;form.Show();System.Windows.Forms.Application.DoEvents();
+                storage.GetMethod("Display",inst).Invoke(form,new object[]{sample});
+                if(!((System.Windows.Forms.Button)storage.GetField("clean",inst).GetValue(form)).Enabled)throw new Exception("Ready cleanup cannot be selected.");
+                if(((System.Windows.Forms.TextBox)storage.GetField("details",inst).GetValue(form)).Visible)throw new Exception("Storage diagnostics should start collapsed.");
+                var spaces=(System.Windows.Forms.ListView)storage.GetField("spaces",inst).GetValue(form);
+                var clean=(System.Windows.Forms.Button)storage.GetField("clean",inst).GetValue(form);
+                if(spaces.Width<600||spaces.Height<120||spaces.RectangleToScreen(spaces.ClientRectangle).Bottom>clean.RectangleToScreen(clean.ClientRectangle).Top)throw new Exception("Storage layout is suspended, clipped or overlapping.");
+                using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-storage-preview.png"));}
                 form.Close();
             }
         } finally {directory.SetValue(null,previous);}
@@ -446,7 +463,8 @@ finally {
     if ($parent -ne $runtimeRoot -or [IO.Path]::GetFileName($resolved) -notmatch '^desktop-tests-[0-9a-f]{32}$') {
         throw 'Unexpected desktop test cleanup directory.'
     }
-    if (Test-Path -LiteralPath $resolved) {
+    if ($KeepArtifacts) { Write-Output "Rendered fixtures: $resolved" }
+    elseif (Test-Path -LiteralPath $resolved) {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }

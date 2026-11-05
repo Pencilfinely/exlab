@@ -271,6 +271,7 @@ namespace ExperimentManagerDesktop {
                 if(Worker&&Has(args,"--boot-run")) {
                     try {Environment.ExitCode=WorkerBoot.Run();}catch(Exception ex){ClientError("boot_failed",ex);Environment.ExitCode=1;}return;
                 }
+                if(Worker&&Has(args,"--compact-worker")) {WorkerDisk.RunElevated(Arg(args,"--owner-sid"),Arg(args,"--compact-id")).GetAwaiter().GetResult();return;}
                 if(Worker&&Has(args,"--boot-settings")) {using(var form=new WorkerBootForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
                 if(Worker&&Has(args,"--migration-settings")) {using(var form=new WorkerMigrationForm(Arg(args,"--owner-sid"),Arg(args,"--migration-source"),Arg(args,"--migration-folder"),Arg(args,"--migration-confirmed")=="yes"))Application.Run(form);return;}
                 if(Has(args,"--cleanup-installer")) {
@@ -474,7 +475,7 @@ namespace ExperimentManagerDesktop {
 
     sealed class ClientForm : IconForm {
         readonly DesktopIcons trayIcons=new DesktopIcons();
-        NotifyIcon tray; bool exiting,busy,background; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
+        NotifyIcon tray; bool exiting,busy,background,timerPumping; Dictionary<string,object> settings; string lastLog=""; Process workerHold; string heldDistribution="";
         DesktopHostControl hostControl;bool hostPumping;DateTime nextHost=DateTime.MinValue;
         readonly DesktopHostLoop hostLoop=new DesktopHostLoop();
         readonly DesktopRetrySchedule hostRestoreRetry=new DesktopRetrySchedule(),hostReleaseRetry=new DesktopRetrySchedule();string lastWorkerStartError="";
@@ -555,6 +556,7 @@ namespace ExperimentManagerDesktop {
             if(App.Worker) AddButton(actions,"显卡设置",()=>OpenGpuSettings());
             if(App.Worker) AddButton(actions,"暂停 / 恢复",()=>OpenComputeSettings());
             AddButton(actions,"刷新状态",()=>RefreshState()); AddButton(actions,"打开日志",()=>App.OpenFile(lastLog));
+            if(App.Worker)AddButton(actions,"存储与环境…",()=>{if(busy)return;busy=true;timer.Stop();try{using(var form=new WorkerStorageForm((action,options)=>WorkerCommand(action,options)))form.ShowDialog(this);}finally{busy=false;timer.Start();RefreshState();}});
             AddButton(actions,"检查更新 · "+App.Version,()=>CheckUpdates());
             if(App.Worker)AddButton(actions,"无人值守启动…",()=>OpenBootSettings());
             AddButton(actions,"转入后台",()=>Hide()); layout.Controls.Add(actions);
@@ -589,7 +591,7 @@ namespace ExperimentManagerDesktop {
             menu.Items.Add(App.Worker?"日志":"状态与日志",null,(s,e)=>{ShowStatus();if(workerTabs!=null)workerTabs.SelectedIndex=2;}); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             ApplyBootControls();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
-            timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpHostControl();await PumpUpdates();if(!exiting)RefreshState();};
+            timer.Tick+=async(s,e)=>{if(timerPumping)return;timerPumping=true;try{tray.Icon=trayIcons.TrayIcon;await PumpHostControl();await PumpUpdates();if(!exiting&&Visible)RefreshState();}finally{timerPumping=false;}};
             Shown+=async (s,e)=> {
                 timer.Start();App.ClientTrace("client_shown");
                 if(startingAfterUpdate)App.UpdateReport("client_start","launched");
@@ -656,6 +658,7 @@ namespace ExperimentManagerDesktop {
             home.Controls.Add(WorkerUi.Copy("无需登录 Windows，即可自动运行。",710));
             home.Controls.Add(WorkerUi.Link("设置开机启动",()=>OpenBootSettings()));
             home.Controls.Add(WorkerUi.Link("连接与显卡设置",()=>workerTabs.SelectedIndex=1));
+            home.Controls.Add(WorkerUi.Link("存储与环境",()=>{foreach(Control item in settingsActions.Controls)if(item is Button&&item.Text=="存储与环境…")((Button)item).PerformClick();}));
             options.Controls.Add(updateStatus);
             logsPage.Controls.Add(log);logsPage.Controls.Add(workerDetails);log.BringToFront();
             if(String.IsNullOrEmpty(App.Text(settings,"distribution")))workerTabs.SelectedIndex=1;
@@ -936,8 +939,8 @@ namespace ExperimentManagerDesktop {
                     if(!string.IsNullOrEmpty(selected)) {argv.Add("--config");argv.Add(selected);}
                     else if((action=="start"||action=="install")&&!string.IsNullOrEmpty(credential)&&File.Exists(credential)) {argv.Add("--pairing");argv.Add(App.Run("wsl.exe","-d",distribution,"--exec","wslpath","-a",credential).Trim());}
                 }
-                var result=App.CommandWithTimeout(action=="gpu-enable"?300000:120000,"wsl.exe",argv.ToArray());
-                if(action=="update-status")return result;
+                var result=App.CommandWithTimeout(action=="storage-clean"||action=="storage-scan"?43200000:action=="gpu-enable"?300000:120000,"wsl.exe",argv.ToArray());
+                if(action=="update-status"||action.StartsWith("storage-"))return result;
                 if(action!="stop"&&action!="stop-for-update"&&(App.Flag(result,"running")||App.Text(result,"status")=="starting"||App.Text(result,"status")=="preparing"||App.Text(result,"status")=="shutting_down")) {
                     if(heldDistribution!=distribution) {
                         if(workerHold!=null)workerHold.Dispose();
