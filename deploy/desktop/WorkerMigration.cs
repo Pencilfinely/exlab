@@ -170,29 +170,30 @@ namespace ExperimentManagerDesktop {
             try {
                 CheckCancelled(job);
                 await WorkerBoot.SuspendForUpdate();
-                Save(job,"1/8 暂停接单，等待当前实验和回传结束（可取消）…",progress);
+                Save(job,"1/8 等待当前实验结束…",progress);
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"prepare",path));CheckCancelled(job);
                 manifest=App.Read(Path.Combine(path,"manifest.json"));CheckSpace(folder,Convert.ToInt64(manifest["required_bytes"]));
-                Save(job,"2/8 备份 Docker 镜像和 Worker 镜像仓库…",progress);
+                Save(job,"2/8 备份镜像…",progress);
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"export",path));CheckCancelled(job);
-                Save(job,"3/8 导出原 Ubuntu，保留全部 Linux 配置和实验数据…",progress);
+                Save(job,"3/8 备份 Ubuntu…",progress);
+                await Task.Run(()=>Helper(source,App.Text(job,"user"),"pre-export",path));CheckCancelled(job);
                 await Task.Run(()=>Run(60000,"--terminate",source));
                 await Task.Run(()=>Run(43200000,"--export",source,Path.Combine(path,"distribution.tar")));
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"sanitize",path));CheckCancelled(job);
-                Save(job,"4/8 导入专用 Ubuntu…",progress);
+                Save(job,"4/8 创建运行环境…",progress);
                 await Task.Run(()=>Run(43200000,"--import",target,Path.Combine(path,"distribution"),Path.Combine(path,"distribution.tar"),"--version","2"));CheckCancelled(job);
-                Save(job,"5/8 自动安装独立 Docker 和 NVIDIA 容器支持（需要联网）…",progress);
+                Save(job,"5/8 安装运行组件…",progress);
                 await Task.Run(()=>Run(7200000,"-d",target,"-u","root","--exec","bash",LinuxPath(target,App.Package)+"/Prepare-Unattended-Engine.sh",id,LinuxPath(target,path)));
                 await Task.Run(()=>Run(60000,"--terminate",target));
                 await Task.Run(()=>Run(120000,"-d",target,"-u","root","--exec","systemctl","start","docker.service"));CheckCancelled(job);
-                Save(job,"6/8 恢复镜像仓库并核对原镜像摘要…",progress);
+                Save(job,"6/8 恢复并校验镜像…",progress);
                 await Task.Run(()=>Helper(target,App.Text(job,"user"),"restore",path));CheckCancelled(job);
-                Save(job,"7/8 验证节点配置、独立引擎和原 GPU 的 CUDA 运算…",progress);
+                Save(job,"7/8 验证显卡和数据…",progress);
                 var verified=await Task.Run(()=>Helper(target,App.Text(job,"user"),"verify",path));CheckCancelled(job);
                 var config=new WorkerBootConfig {Distribution=target,LinuxUser=App.Text(job,"user"),ServiceRoot=App.Text(manifest,"service_root"),NodeId=App.Text(manifest,"node_id"),EngineId=App.Text(verified,"engine_id"),OwnerSid=WindowsIdentity.GetCurrent().User.Value,DedicatedDistribution=true};
                 var info=await Task.Run(()=>WorkerBoot.Command(config,"host-info"));
                 if(App.Text(info,"node_id")!=config.NodeId)throw new IOException("目标节点身份不匹配。");
-                Save(job,"8/8 登记未登录开机任务，交接后台…",progress);
+                Save(job,"8/8 开启自启动…",progress);
                 job["registering"]=true;App.Write(ActivePath,job);
                 WorkerBoot.Register(config,password);password=null;
                 new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json")).Connect(info,target);
@@ -203,7 +204,7 @@ namespace ExperimentManagerDesktop {
                 // new work. Crash recovery must never resurrect the old database.
                 job["committed"]=true;job["finished"]=true;Save(job,"迁移及 CUDA 验证完成，开机任务已登记。",progress);
                 WorkerBoot.ResumeAfterUpdate();
-                progress.Report("迁移完成。后台按主控策略启动；请重启并保持 Windows 未登录，从主控验收一次 GPU 任务。\n原 Ubuntu、Docker Desktop 数据和备份均保留。\n备份目录："+path);
+                progress.Report("已完成。请重启并保持未登录，从主控验证一次 GPU 任务。\n备份："+path);
             } catch(Exception original) {failure=original;} finally {password=null;}
             if(failure!=null) {
                 if(App.Flag(job,"committed"))throw new IOException("迁移已完成交接；后台启动需重试，不能恢复旧数据库。"+failure.Message,failure);

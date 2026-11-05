@@ -46,7 +46,10 @@ namespace ExperimentManagerDesktop {
         internal static string DisplayStatus() {
             var state=App.Read(StatusPath);DateTime timestamp;
             bool fresh=DateTime.TryParse(App.Text(state,"time"),out timestamp)&&(DateTime.UtcNow-timestamp.ToUniversalTime()).TotalSeconds<90;
-            return "无人值守后台 · "+(fresh?App.Text(state,"status"):"状态已过期，点击启用可重试")+"\n"+App.Text(state,"detail");
+            string phase=App.Text(state,"status"),label;
+            var labels=new Dictionary<string,string>{{"online","已连接"},{"offline","主控离线"},{"released","已停用"},{"waiting","等待主控"},{"stopping","正在停止"},{"failed","启动失败"},{"suspended","等待交接"}};
+            if(!labels.TryGetValue(phase,out label))label="正在启动";
+            return "后台 · "+(fresh?label:"等待状态更新")+"\n"+App.Text(state,"detail");
         }
         internal static bool CanAutoUpdate(Dictionary<string,object> state) {
             DateTime timestamp;string status=App.Text(state,"status");
