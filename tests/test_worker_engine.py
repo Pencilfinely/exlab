@@ -95,11 +95,25 @@ class EngineTransactionTests(unittest.TestCase):
         self.assertNotIn('runc', daemon['runtimes'])  # reserved by Docker
         self.assertEqual(daemon['default-runtime'], 'exlab-runc')
         self.assertEqual(daemon['containerd'], '/run/exlab-containerd/containerd.sock')
+        self.assertFalse(daemon['features']['containerd-snapshotter'])
         self.assertIn(str(engine.DATA / 'containerd').replace('\\', '\\\\'), engine.CONTAINERD_CONFIG.read_text())
         client = common.read_json(Path(self.user.pw_dir) / '.config/exlab/docker/config.json')
         self.assertNotIn('credsStore', client)
         self.assertEqual(desktop.read_bytes(), before)
         self.assertIn('exlab-docker', engine.UNIT.read_text())
+
+    def test_containerd_image_identity_mode_is_preserved(self):
+        self.assertTrue(migration.containerd_store({'DriverStatus': [['driver-type', 'io.containerd.snapshotter.v1']]}))
+        self.assertFalse(migration.containerd_store({'DriverStatus': [['Backing Filesystem', 'extfs']]}))
+        self.value['containerd_store'] = True
+        engine.begin(self.job, self.job.name)
+        binary = engine.ENGINE / 'usr/bin'
+        binary.mkdir(parents=True)
+        for name in ('docker', 'dockerd', 'containerd', 'runc'):
+            (binary / name).write_text('extracted')
+        with patch.object(engine.subprocess, 'run'):
+            engine.configure(self.job, self.job.name)
+        self.assertTrue(common.read_json(engine.CONFIG)['features']['containerd-snapshotter'])
 
     def test_redirected_privileged_path_is_rejected(self):
         link = self.root / 'alias'

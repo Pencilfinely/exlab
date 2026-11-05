@@ -59,6 +59,10 @@ def objects(args, endpoint):
     return json.loads(docker(args, endpoint))
 
 
+def containerd_store(info):
+    return ['driver-type', 'io.containerd.snapshotter.v1'] in (info.get('DriverStatus') or [])
+
+
 def registry(item, name):
     """Accept only our exact volume/network contract, never arbitrary containers."""
     component, volume, port = REGISTRIES[name]
@@ -230,6 +234,7 @@ def inspect(service_root=None):
     return dict(ready=True, service_root=str(root), config=str(path), node_id=candidate['node_id'],
                 worker_root=candidate['root'], linux_user=linux_user,
                 uid=os.getuid(), gid=os.getgid(), engine_id=info['ID'], endpoint=endpoint,
+                containerd_store=containerd_store(info),
                 registries=registries, images=images, helper=helper, gpus=gpus,
                 required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved,
                 mode='in_place', space={'filesystem_copy_bytes': 0, 'existing_filesystem_bytes': used,
@@ -251,6 +256,8 @@ def same_source(value):
     info = objects(['info', '--format', '{{json .}}'], value['endpoint'])
     if info.get('ID') != value['engine_id']:
         raise ValueError('原 Docker 引擎已变化，已阻止迁移。')
+    if 'containerd_store' in value and containerd_store(info) != value['containerd_store']:
+        raise ValueError('原 Docker 镜像存储已变化，请重新检测。')
 
 
 def cancelled(job):

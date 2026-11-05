@@ -28,6 +28,16 @@ def main():
     (package / 'expman').symlink_to(checkout / 'expman', target_is_directory=True)
     shutil.copyfile(checkout / 'deploy/release/Prepare-Isolated-Engine.sh', package / 'prepare.sh')
     source = 'unix:///var/run/docker.sock'
+    # Both image-store identity conventions must survive streaming unchanged.
+    # The guard above restricts this daemon reconfiguration to disposable CI.
+    store = os.environ.get('EXLAB_TEST_IMAGE_STORE', 'classic')
+    assert store in ('classic', 'containerd')
+    daemon = common.read_json('/etc/docker/daemon.json', {})
+    daemon.setdefault('features', {})['containerd-snapshotter'] = store == 'containerd'
+    common.atomic_json(job / 'source-daemon.json', daemon)
+    run('sudo', 'cp', str(job / 'source-daemon.json'), '/etc/docker/daemon.json')
+    run('sudo', 'systemctl', 'restart', 'docker.service')
+    assert migration.containerd_store(migration.objects(['info', '--format', '{{json .}}'], source)) == (store == 'containerd')
     source_id = migration.objects(['info', '--format', '{{json .}}'], source)['ID']
     # The source endpoint prefix emulates Desktop's independent WSL socket.
     socket = Path('/mnt/wsl/exlab-ci/docker.sock')
@@ -53,7 +63,7 @@ def main():
     registry = migration.registry(migration.objects(['inspect', name], source)[0], name)
     value = {'mode': 'in_place', 'job_id': job.name, 'config': str(config), 'service_root': str(job / 'service'),
              'worker_root': str(job / 'node'), 'linux_user': pwd.getpwuid(os.getuid()).pw_name, 'uid': os.getuid(),
-             'node_id': 'ci-engine', 'endpoint': source, 'engine_id': source_id,
+             'node_id': 'ci-engine', 'endpoint': source, 'engine_id': source_id, 'containerd_store': store == 'containerd',
              'images': {ref: helper['Id']}, 'helper': ref, 'registries': [registry]}
     common.atomic_json(job / 'manifest.json', value)
     run('sudo', 'bash', str(package / 'prepare.sh'), job.name, str(job))
@@ -73,7 +83,7 @@ print('PASS isolated engine provisioning, streamed images/volume hashes, replay 
 """
     probe = job / 'probe.py'
     probe.write_text(script)
-    print(run('sg', 'docker', '-c', 'PYTHONPATH=' + str(checkout) + ' python3 ' + str(probe) + ' ' + str(job)))
+    subprocess.run(['sg', 'docker', '-c', 'PYTHONPATH=' + str(checkout) + ' python3 ' + str(probe) + ' ' + str(job)], check=True)
     run('sudo', 'bash', str(package / 'prepare.sh'), job.name, str(job), 'rollback')
     assert not engine.ENGINE.exists() and not engine.DATA.exists()
     assert migration.objects(['info', '--format', '{{json .}}'], source)['ID'] == source_id

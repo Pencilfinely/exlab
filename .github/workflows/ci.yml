@@ -10,7 +10,13 @@ env:
   PYTHONIOENCODING: utf-8
 jobs:
   isolated-engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [classic, containerd]
     runs-on: ubuntu-latest
+    env:
+      EXLAB_TEST_IMAGE_STORE: ${{ matrix.store }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Provision, stream and roll back isolated Docker on disposable runner

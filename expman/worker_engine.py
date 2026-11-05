@@ -125,7 +125,8 @@ def configure(job, identity):
               'pidfile': '/run/exlab-docker/dockerd.pid', 'group': 'docker',
               'bridge': 'none', 'iptables': False, 'ip6tables': False, 'ip-masq': False,
               'containerd': '/run/exlab-containerd/containerd.sock',
-              'features': {'containerd-snapshotter': False},
+              # Preserve image identity semantics across classic/containerd stores.
+              'features': {'containerd-snapshotter': bool(value.get('containerd_store'))},
               'builder': {'gc': {'enabled': True, 'defaultKeepStorage': '2GB'}},
               'log-driver': 'local', 'log-opts': {'max-size': '10m', 'max-file': '3'},
               'default-runtime': 'exlab-runc',
