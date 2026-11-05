@@ -34,7 +34,7 @@ namespace ExperimentManagerDesktop {
         internal static void CheckSpace(string folder,long required) {
             string full=Path.GetFullPath(folder);var drive=new DriveInfo(Path.GetPathRoot(full));
             if(full.StartsWith(@"\\")||drive.DriveType!=DriveType.Fixed||!drive.IsReady||drive.DriveFormat!="NTFS")throw new IOException("请选择本机 NTFS 固定磁盘。网络盘和移动盘不能保证未登录启动。");
-            if(drive.AvailableFreeSpace<required)throw new IOException("空间不足：此磁盘还需约 "+Math.Ceiling(required/1073741824.0)+" GB 可用空间。请先清理可回收项。");
+            if(drive.AvailableFreeSpace<required)throw new IOException(drive.Name+" 空间不足：需要约 "+Math.Ceiling(required/1073741824.0)+" GB 可用，当前 "+Math.Floor(drive.AvailableFreeSpace/1073741824.0)+" GB。请先清理可回收项。");
         }
         internal static string DistributionPath(string distribution) {
             using(var root=Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Lxss"))if(root!=null)foreach(var name in root.GetSubKeyNames())using(var key=root.OpenSubKey(name))if(String.Equals(Convert.ToString(key.GetValue("DistributionName")),distribution,StringComparison.OrdinalIgnoreCase)) {
@@ -138,7 +138,8 @@ namespace ExperimentManagerDesktop {
                 var job=App.Read(ActivePath);var files=BackupArchives(job);if(files.Count==0)return 0;
                 var config=WorkerBoot.Load();WorkerBoot.Validate(config);
                 var verified=App.Read(Path.Combine(App.Text(job,"path"),"verified.json"));
-                if(!config.Enabled||config.Distribution!=App.Text(job,"target")||config.EngineId!=App.Text(verified,"engine_id")||config.NodeId!=App.Text(verified,"node_id")||!verified.ContainsKey("cuda"))throw new IOException("请先完成迁移验收，备份已保留。");
+                var cuda=verified.ContainsKey("cuda")?verified["cuda"] as System.Collections.IList:null;
+                if(!config.Enabled||config.Distribution!=App.Text(job,"target")||config.EngineId!=App.Text(verified,"engine_id")||config.NodeId!=App.Text(verified,"node_id")||cuda==null||cuda.Count==0)throw new IOException("请先完成迁移验收，备份已保留。");
                 var drive=new DriveInfo(Path.GetPathRoot(App.Text(job,"path")));long before=drive.AvailableFreeSpace;
                 foreach(var pair in files) {
                     WorkerDisk.DeleteVerified(pair.Key,pair.Value);

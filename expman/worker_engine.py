@@ -5,6 +5,7 @@ Never replaces Desktop's executable/socket or copies/deletes experiment data.
 import argparse
 import base64
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,9 @@ DATA = Path('/var/lib/exlab-docker')
 CONFIG = Path('/etc/exlab-docker.json')
 UNIT = Path('/etc/systemd/system') / SERVICE
 WSL = Path('/etc/wsl.conf')
+CONTAINERD_SERVICE = 'exlab-containerd.service'
+CONTAINERD_CONFIG = Path('/etc/exlab-containerd.toml')
+CONTAINERD_UNIT = Path('/etc/systemd/system') / CONTAINERD_SERVICE
 
 
 def capture(path):
@@ -86,7 +90,7 @@ def context(job, identity):
     paths = [WSL, unit, config.parent / 'setup-state.json',
              Path('/etc/apt/sources.list.d/exlab-docker.list'), Path('/etc/apt/sources.list.d/exlab-nvidia.list'),
              Path('/etc/apt/keyrings/exlab-docker.asc'), Path('/usr/share/keyrings/exlab-nvidia.gpg')]
-    for path in (*paths, MARKER, ENGINE, DATA, CONFIG, UNIT, Path(user.pw_dir) / '.config/exlab/docker'):
+    for path in (*paths, MARKER, ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, Path(user.pw_dir) / '.config/exlab/docker'):
         direct(path)
     return job, value, user, paths
 
@@ -99,7 +103,7 @@ def begin(job, identity):
             raise ValueError('已有配置备份不属于当前环境')
         return
     client = Path(user.pw_dir) / '.config/exlab/docker'
-    if any(path.exists() or path.is_symlink() for path in (MARKER, ENGINE, DATA, CONFIG, UNIT, client)):
+    if any(path.exists() or path.is_symlink() for path in (MARKER, ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, client)):
         raise ValueError('此 Ubuntu 已有 ExLab 引擎或未完成的环境切换，请先恢复')
     if not value['endpoint'].startswith('unix:///mnt/wsl/'):
         raise ValueError('无法保留独立于新引擎的 Desktop socket')
@@ -120,6 +124,8 @@ def configure(job, identity):
     daemon = {'hosts': [ENDPOINT], 'data-root': str(DATA), 'exec-root': '/run/exlab-docker/exec',
               'pidfile': '/run/exlab-docker/dockerd.pid', 'group': 'docker',
               'bridge': 'none', 'iptables': False, 'ip6tables': False, 'ip-masq': False,
+              'containerd': '/run/exlab-containerd/containerd.sock',
+              'features': {'containerd-snapshotter': False},
               'builder': {'gc': {'enabled': True, 'defaultKeepStorage': '2GB'}},
               'log-driver': 'local', 'log-opts': {'max-size': '10m', 'max-file': '3'},
               'default-runtime': 'exlab-runc',
@@ -132,7 +138,17 @@ def configure(job, identity):
     subprocess.run(['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--config=' + str(CONFIG)], check=True, timeout=60)
     subprocess.run([str(ENGINE / 'usr/bin/dockerd'), '--validate', '--config-file=' + str(CONFIG)],
                    check=True, capture_output=True, text=True, timeout=30)
-    unit_text = ('[Unit]\nDescription=ExLab compute engine\nAfter=network-online.target\nWants=network-online.target\n'
+    CONTAINERD_CONFIG.write_text('version = 2\nroot = ' + json.dumps(str(DATA / 'containerd')) + '\n'
+        'state = "/run/exlab-containerd"\n'
+        'disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]\n'
+        '[grpc]\naddress = "/run/exlab-containerd/containerd.sock"\n')
+    CONTAINERD_CONFIG.chmod(0o644)
+    CONTAINERD_UNIT.write_text('[Unit]\nDescription=ExLab container runtime\nPartOf=exlab-docker.service\n'
+        '[Service]\nType=notify\nEnvironment="PATH=/opt/exlab/docker/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+        'ExecStart=/opt/exlab/docker/usr/bin/containerd --config=/etc/exlab-containerd.toml\n'
+        'RuntimeDirectory=exlab-containerd\nDelegate=yes\nKillMode=process\nRestart=on-failure\nRestartSec=5\n')
+    CONTAINERD_UNIT.chmod(0o644)
+    unit_text = ('[Unit]\nDescription=ExLab compute engine\nAfter=network-online.target exlab-containerd.service\nWants=network-online.target\nRequires=exlab-containerd.service\n'
                 '[Service]\nType=notify\nEnvironment="PATH=/opt/exlab/docker/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
                 'ExecStart=/opt/exlab/docker/usr/bin/dockerd --config-file=/etc/exlab-docker.json\n'
                 'Restart=on-failure\nRestartSec=5\nRuntimeDirectory=exlab-docker\nRuntimeDirectoryMode=0755\n'
@@ -166,7 +182,7 @@ def rollback(job, identity):
     if common.read_json(job / 'committed.json', {}).get('job_id') == identity:
         raise ValueError('环境已交接，不能恢复旧配置')
     client = Path(user.pw_dir) / '.config/exlab/docker'
-    if not MARKER.exists() and not any(p.exists() for p in (ENGINE, DATA, CONFIG, UNIT, client)):
+    if not MARKER.exists() and not any(p.exists() for p in (ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, client)):
         # Crash between writing the journal and its marker: no changes started.
         private_write(job / 'engine-rollback.json', {'job_id': identity, 'ready': True})
         return
@@ -174,8 +190,11 @@ def rollback(job, identity):
         raise ValueError('配置恢复归属不符')
     if UNIT.exists() and 'ExecStart=/opt/exlab/docker/usr/bin/dockerd --config-file=/etc/exlab-docker.json' not in UNIT.read_text():
         raise ValueError('独立引擎服务配置变化，已保留')
+    if CONTAINERD_UNIT.exists() and 'ExecStart=/opt/exlab/docker/usr/bin/containerd --config=/etc/exlab-containerd.toml' not in CONTAINERD_UNIT.read_text():
+        raise ValueError('独立容器运行时配置变化，已保留')
     systemctl('stop', SERVICE)
-    if systemctl('is-active', SERVICE).stdout.strip() == 'active':
+    systemctl('stop', CONTAINERD_SERVICE)
+    if any(systemctl('is-active', name).stdout.strip() == 'active' for name in (SERVICE, CONTAINERD_SERVICE)):
         raise ValueError('独立引擎尚未停止')
     systemctl('disable', SERVICE)
     if set(backup['files']) != {str(p) for p in paths}:
@@ -196,6 +215,8 @@ def rollback(job, identity):
             shutil.rmtree(path)
     CONFIG.unlink(missing_ok=True)
     UNIT.unlink(missing_ok=True)
+    CONTAINERD_UNIT.unlink(missing_ok=True)
+    CONTAINERD_CONFIG.unlink(missing_ok=True)
     systemctl('daemon-reload')
     MARKER.unlink()
     private_write(job / 'engine-rollback.json', {'job_id': identity, 'ready': True})

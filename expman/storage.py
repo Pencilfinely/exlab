@@ -153,8 +153,10 @@ def _archive_source(root, record, execute):
         raise ValueError('代码版本无效')
     checkout = owned_path(root, 'worktrees/' + identity)
     _validate_tree(checkout)
+    if (checkout / '.gitmodules').exists() or any(re.search(r'\bfilter\s*=', p.read_text(encoding='utf-8', errors='replace')) for p in checkout.rglob('.gitattributes')):
+        raise ValueError('代码含子模块或内容过滤器，工作副本保留')
     actual = execute(['git', '-C', str(checkout), 'rev-parse', 'HEAD']).stdout.strip()
-    dirty = execute(['git', '-C', str(checkout), 'status', '--porcelain', '--untracked-files=all']).stdout.strip()
+    dirty = execute(['git', '-C', str(checkout), 'status', '--porcelain', '--untracked-files=all', '--ignored=matching']).stdout.strip()
     if actual != commit or dirty:
         raise ValueError('代码工作副本有修改，已保留')
     archive_root = owned_path(root, 'code_archive')

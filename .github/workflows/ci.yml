@@ -17,7 +17,7 @@ jobs:
         run: PYTHONPATH=. python3 scripts/test_isolated_engine.py
       - name: Isolated service diagnostics
         if: failure()
-        run: sudo journalctl -u exlab-docker.service --no-pager -n 100
+        run: sudo journalctl -u exlab-docker.service -u exlab-containerd.service --no-pager -n 100
   android:
     runs-on: ubuntu-latest
     steps:

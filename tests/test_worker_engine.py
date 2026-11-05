@@ -24,7 +24,8 @@ class EngineTransactionTests(unittest.TestCase):
         self.paths = [self.root / 'wsl.conf', self.root / 'user.service', self.root / 'node/setup-state.json']
         self.paths[0].write_text('[boot]\nsystemd=false\n')
         for name, relative in {'MARKER': 'marker.json', 'ENGINE': 'engine', 'DATA': 'data', 'CONFIG': 'daemon.json',
-                               'UNIT': 'engine.service', 'WSL': 'wsl.conf'}.items():
+                               'UNIT': 'engine.service', 'WSL': 'wsl.conf',
+                               'CONTAINERD_UNIT': 'containerd.service', 'CONTAINERD_CONFIG': 'containerd.toml'}.items():
             manager = patch.object(engine, name, self.root / relative)
             manager.start();self.addCleanup(manager.stop)
         manager = patch.object(engine, 'context', return_value=(self.job, self.value, self.user, self.paths))
@@ -56,7 +57,7 @@ class EngineTransactionTests(unittest.TestCase):
         self.assertEqual((outside / 'weight.pt').read_text(), 'keep')
         self.assertFalse(engine.DATA.exists())
         self.assertEqual(common.read_json(self.paths[2])['docker_endpoint'], self.value['endpoint'])
-        self.assertTrue(all(call.args[-1] == engine.SERVICE for call in self.systemctl.call_args_list if call.args[0] != 'daemon-reload'))
+        self.assertTrue(all(call.args[-1] in (engine.SERVICE, engine.CONTAINERD_SERVICE) for call in self.systemctl.call_args_list if call.args[0] != 'daemon-reload'))
 
     def test_committed_or_foreign_marker_blocks_rollback_before_any_service_change(self):
         engine.begin(self.job, self.job.name)
@@ -93,6 +94,8 @@ class EngineTransactionTests(unittest.TestCase):
         self.assertEqual(daemon['data-root'], str(engine.DATA))
         self.assertNotIn('runc', daemon['runtimes'])  # reserved by Docker
         self.assertEqual(daemon['default-runtime'], 'exlab-runc')
+        self.assertEqual(daemon['containerd'], '/run/exlab-containerd/containerd.sock')
+        self.assertIn(str(engine.DATA / 'containerd').replace('\\', '\\\\'), engine.CONTAINERD_CONFIG.read_text())
         client = common.read_json(Path(self.user.pw_dir) / '.config/exlab/docker/config.json')
         self.assertNotIn('credsStore', client)
         self.assertEqual(desktop.read_bytes(), before)

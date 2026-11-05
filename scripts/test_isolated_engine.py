@@ -61,7 +61,10 @@ def main():
     # Refresh group membership without changing the CI user's login session.
     script = """import sys;from pathlib import Path
 from expman import worker_transfer as t,worker_migration as m,worker_engine as e
-job=Path(sys.argv[1]);t.transfer(job);t.transfer(job)
+job=Path(sys.argv[1])
+try:t.transfer(job);t.transfer(job)
+except Exception:
+ print(m.docker(['image','ls','--no-trunc'],e.ENDPOINT));print(m.load_job(job)[1]['images']);raise
 _,value=m.load_job(job)
 assert m.objects(['info','--format','{{json .}}'],e.ENDPOINT)['ID'] != value['engine_id']
 assert m.docker(['run','--rm','--network','none',value['helper'],'python','-c','print(6*7)'],e.ENDPOINT).strip()=='42'

@@ -7,7 +7,9 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.5.30. Monitor APK: 0.5.22.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.5.30 release notes](docs/RELEASE-0.5.30.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
+**Desktop version: 0.6.0. Monitor APK: 0.5.22.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.6.0 release notes](docs/RELEASE-0.6.0.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
+
+0.6.0 adds verified storage cleanup, in-place migration without cloning Ubuntu, bounded history scans, and quieter idle polling. See the [storage rules](docs/STORAGE.zh-CN.md).
 
 The algorithm library now supports search, deployment filters, bounded pagination and import timestamps. A five-step import opens node deployment when complete. Project dialogs provide experiment forms, allocation previews and matrix conversion, retaining inputs within the current page when switching presets or closing and reopening.
 
@@ -31,7 +33,7 @@ Existing desktop clients can upgrade to ExLab using their built-in updater. The 
 | Computer | Recommended asset suffix | Application | Prerequisites |
 |---|---|---|---|
 | Windows 11 controller | windows-controller-x64-Setup.exe | **ExLab Center**, ExLabCenter.exe | Microsoft Edge; no WSL, Docker or separate Python installation |
-| Windows 11 NVIDIA worker | windows-worker-x64-Setup.exe | **ExLab Worker**, ExLabWorker.exe | WSL2, Ubuntu 22.04+, Docker Desktop with integration enabled for that Ubuntu, NVIDIA Windows driver |
+| Windows 11 NVIDIA worker | windows-worker-x64-Setup.exe | **ExLab Worker**, ExLabWorker.exe | WSL2, Ubuntu 22.04+, Docker Desktop or a configured isolated engine, NVIDIA Windows driver |
 | Native Ubuntu 22.04+ NVIDIA server | ubuntu-worker-x64.zip | Background worker after installation | Docker Engine, NVIDIA Linux driver and NVIDIA Container Toolkit; normal-user access to Docker |
 
 Windows installers install for the current user without administrator privileges. Firewall or system dependency changes may still require elevation.
@@ -94,7 +96,7 @@ Task completion and file upload completion may occur at different times. Check p
 
 The overview, experiment list and details show **cumulative runtime**. Timing starts with execution, freezes when it stops, and accumulates across resumed attempts; queueing, preparation and stopped periods are excluded. Workers persist timing, so closing the page or losing the controller connection does not reset it. Live values are estimates until confirmed by the worker. Details show submission, first start and latest stop times; CSV exports include timing fields. Update both Center and Worker for complete timing support. Old records remain unavailable, and uncertain history is marked incomplete.
 
-The Windows worker can continue after its window closes, but still depends on the current user's WSL and Docker Desktop.
+The Windows worker can continue after its window closes. The default mode uses WSL and Docker Desktop; in-place migration switches to an isolated engine with optional pre-login startup.
 **Background operation does not mean training continues through sleep, logout or power-off.** Optional login startup is not a Windows service running without user login.
 Native Ubuntu prefers user-level systemd when available and otherwise uses a detached process. Startup before login or persistence after logout depends on the machine's existing user-service/lingering settings; the installer does not silently change those system policies.
 
