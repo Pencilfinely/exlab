@@ -138,7 +138,7 @@ def inspect(root, config, db, execute):
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         warnings.append('容器检查暂不可用：' + str(error)[:250])
     # A weight can be referenced by multiple evidence entries. Count it once.
-    unique = {(i['kind'], i.get('source', i.get('container_id', i['job_id']))): i for i in items}
+    unique = {(i['kind'], i.get('source', i.get('container_id', i.get('image', i['job_id'])))): i for i in items}
     return {'status': 'ready', 'groups': groups, 'items': list(unique.values()),
             'reclaimable_bytes': sum(i['bytes'] for i in unique.values()),
             'free_bytes': shutil.disk_usage(root).free, 'warnings': warnings,
@@ -153,8 +153,8 @@ def _archive_source(root, record, execute):
         raise ValueError('代码版本无效')
     checkout = owned_path(root, 'worktrees/' + identity)
     _validate_tree(checkout)
-    if (checkout / '.gitmodules').exists() or any(re.search(r'\bfilter\s*=', p.read_text(encoding='utf-8', errors='replace')) for p in checkout.rglob('.gitattributes')):
-        raise ValueError('代码含子模块或内容过滤器，工作副本保留')
+    if (checkout / '.gitmodules').exists() or any(re.search(r'\b(?:filter\s*=|export-ignore|export-subst)', p.read_text(encoding='utf-8', errors='replace')) for p in checkout.rglob('.gitattributes')):
+        raise ValueError('代码含子模块、内容过滤或特殊归档规则，工作副本保留')
     actual = execute(['git', '-C', str(checkout), 'rev-parse', 'HEAD']).stdout.strip()
     dirty = execute(['git', '-C', str(checkout), 'status', '--porcelain', '--untracked-files=all', '--ignored=matching']).stdout.strip()
     if actual != commit or dirty:

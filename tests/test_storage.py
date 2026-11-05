@@ -156,6 +156,20 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.clean(plan)['completed_items'], 0)
         self.assertTrue(checkout.exists())
         (checkout / 'untracked.txt').unlink()
+        # Ignored generated outputs are still user data; git worktree remove
+        # otherwise deletes them without requiring --force.
+        (repo / '.git/info/exclude').write_text('ignored-output.pt\n')
+        (checkout / 'ignored-output.pt').write_text('unique checkpoint')
+        self.assertEqual(self.clean(plan)['completed_items'], 0)
+        self.assertTrue((checkout / 'ignored-output.pt').exists())
+        (checkout / 'ignored-output.pt').unlink()
+        for name, content in (('.gitmodules', '[submodule "data"]'),
+                              ('.gitattributes', '*.pt filter=lfs'),
+                              ('.gitattributes', 'model.py export-ignore')):
+            (checkout / name).write_text(content)
+            self.assertEqual(self.clean(plan)['completed_items'], 0)
+            self.assertTrue(checkout.exists())
+            (checkout / name).unlink()
         result = self.clean(plan)
         self.assertEqual(result['completed_items'], 1, result)
         receipt = common.read_json(self.output / 'code-archive.json')
@@ -206,3 +220,22 @@ class StorageTests(unittest.TestCase):
         with patch.object(self.agent, '_sync_request', return_value=response):
             self.agent._sync({})
         self.assertEqual(self.agent.records()[0]['attempt'], 2)
+
+    def test_automatic_cleanup_waits_for_idle_and_existing_preparation(self):
+        maintenance = self.agent.maintenance
+        maintenance.next_auto = 0
+        self.agent._save(self.record, state='running')
+        with patch.object(storage.threading, 'Thread') as thread:
+            maintenance.tick()
+            thread.assert_not_called()
+            self.assertFalse((self.root / 'storage-request.json').exists())
+            self.agent._save(self.record, state='succeeded')
+            self.agent.preparation = object()
+            maintenance.tick()
+            thread.assert_not_called()
+            self.assertTrue(maintenance.cleaning)
+            self.agent.preparation = None
+            maintenance.tick()
+            thread.return_value.start.assert_called_once()
+        maintenance.thread = None
+        maintenance.cleaning = False

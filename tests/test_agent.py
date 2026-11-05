@@ -48,6 +48,24 @@ class AgentTests(unittest.TestCase):
         self.agent = Agent(self.config)
         self.assertEqual(self.agent.records(), [])
 
+    def test_hardware_reuse_is_short_lived_and_normal_snapshot_is_fresh(self):
+        self.agent.config['gpu_policy'] = {'GPU-fixture': {'max_jobs': 1}}
+        replies = lambda argv, **kw: subprocess.CompletedProcess(argv, 0, 'GPU-fixture, Test GPU, 16000, 12000\n', '')
+        with patch('expman.agent.sys.platform', 'linux'), patch.object(self.agent, '_exec', side_effect=replies) as probe:
+            first = self.agent.snapshot()
+            self.agent.snapshot(reuse_hardware=True)
+            self.assertEqual(probe.call_count, 2)
+            self.agent.config['gpu_policy'] = {}
+            self.assertEqual(self.agent.snapshot(reuse_hardware=True)['gpus'], [])
+            self.assertEqual(probe.call_count, 2)
+            self.agent.snapshot()
+            self.assertEqual(probe.call_count, 4)
+            when, value = self.agent._hardware_sample
+            self.agent._hardware_sample = (when - 3, value)
+            self.agent.snapshot(reuse_hardware=True)
+            self.assertEqual(probe.call_count, 6)
+            self.assertEqual(first['gpus'][0]['free_mb'], 12000)
+
     def test_diagnostic_does_not_create_state_or_recover_jobs(self):
         record = self.record("running")
         snapshot = Agent.inspect_config(self.config)
