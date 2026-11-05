@@ -75,6 +75,7 @@ check('the complete application initializes without runtime errors before login'
   const context = baseContext();
   const document = {
     getElementById: context.$, createElement: element,
+    addEventListener() {},
     querySelector: () => element(), querySelectorAll: () => [],
     body: {classList: {toggle() {}}},
   };

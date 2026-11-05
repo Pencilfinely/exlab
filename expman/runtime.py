@@ -21,8 +21,19 @@ def container_details(items):
              'image': item.get('Image', '')} for item in items]
 
 
-def docker_command(argv, endpoint=None, *, timeout=15):
+def docker_environment(endpoint=None):
     environment = dict(os.environ)
+    if endpoint == 'unix:///run/exlab-docker/docker.sock':
+        environment['PATH'] = '/opt/exlab/docker/usr/bin:' + environment.get('PATH', '')
+        environment['DOCKER_CONFIG'] = str(Path.home() / '.config/exlab/docker')
+    if endpoint:
+        environment.pop('DOCKER_CONTEXT', None)
+        environment['DOCKER_HOST'] = endpoint
+    return environment
+
+
+def docker_command(argv, endpoint=None, *, timeout=15):
+    environment = docker_environment(endpoint)
     if endpoint:
         environment.pop('DOCKER_CONTEXT', None)
         environment.pop('DOCKER_HOST', None)
@@ -32,18 +43,24 @@ def docker_command(argv, endpoint=None, *, timeout=15):
 
 
 def docker_status(worker_root=None, *, prefer_saved=False):
+    saved_endpoint = read_json(Path(worker_root) / 'setup-state.json', {}).get('docker_endpoint') if worker_root else None
     result = {'docker_ready': False, 'docker_installed': bool(shutil.which('docker')),
               'docker_endpoint': None, 'detail': 'Docker 未安装或未启用此 Ubuntu 的 WSL 集成'}
+    if saved_endpoint == 'unix:///run/exlab-docker/docker.sock':
+        result['docker_installed'] = Path('/opt/exlab/docker/usr/bin/docker').is_file()
     if not result['docker_installed']:
         return result
     try:
         saved = read_json(Path(worker_root) / 'setup-state.json', {}) if worker_root else {}
-        context = None if prefer_saved and saved.get('docker_endpoint') else os.environ.get('DOCKER_CONTEXT')
-        endpoint = (saved.get('docker_endpoint') if prefer_saved and saved.get('docker_endpoint')
+        pinned = prefer_saved or saved_endpoint == 'unix:///run/exlab-docker/docker.sock'
+        context = None if pinned and saved.get('docker_endpoint') else os.environ.get('DOCKER_CONTEXT')
+        endpoint = (saved.get('docker_endpoint') if pinned and saved.get('docker_endpoint')
                     else None if context else os.environ.get('DOCKER_HOST') or saved.get('docker_endpoint'))
         # Docker Desktop recreates its socket after restarting. A historical
         # socket which vanished must not permanently pin setup to a dead daemon.
         if endpoint and endpoint.startswith('unix:///') and not Path(endpoint[7:]).exists():
+            if endpoint == 'unix:///run/exlab-docker/docker.sock':
+                raise ValueError('独立引擎尚未启动')
             endpoint = None
         if not endpoint:
             reply = docker_command(['context', 'inspect', *([context] if context else []),

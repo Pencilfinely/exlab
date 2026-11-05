@@ -15,6 +15,7 @@ namespace ExperimentManagerDesktop {
         public string ServiceRoot {get;set;}
         public string NodeId {get;set;}
         public string EngineId {get;set;}
+        public string EngineService {get;set;}
         public string OwnerSid {get;set;}
         public bool DedicatedDistribution {get;set;}
     }
@@ -27,11 +28,12 @@ namespace ExperimentManagerDesktop {
             return App.Json.ConvertToType<WorkerBootConfig>(App.Read(FilePath));
         }
         internal static bool Managed {get{return App.Worker&&Load().Enabled;}}
+        internal static string ServiceName(WorkerBootConfig c) {return String.IsNullOrEmpty(c.EngineService)?"docker.service":c.EngineService;}
         internal static void Validate(WorkerBootConfig c) {
             if(c==null||String.IsNullOrWhiteSpace(c.Distribution)||c.Distribution.StartsWith("-")||c.Distribution.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase)||
                 !System.Text.RegularExpressions.Regex.IsMatch(c.LinuxUser??"","\\A[a-z_][a-z0-9_-]*\\z")||c.LinuxUser=="root"||
                 String.IsNullOrEmpty(c.ServiceRoot)||!c.ServiceRoot.StartsWith("/")||String.IsNullOrEmpty(c.NodeId)||String.IsNullOrEmpty(c.EngineId)||
-                c.OwnerSid!=WindowsIdentity.GetCurrent().User.Value)
+                c.OwnerSid!=WindowsIdentity.GetCurrent().User.Value||(ServiceName(c)!="docker.service"&&ServiceName(c)!="exlab-docker.service"))
                 throw new InvalidDataException("无人值守配置不完整或不属于当前 Windows 账户，请重新检测环境。");
         }
         static string[] Args(WorkerBootConfig c,params string[] tail) {
@@ -59,7 +61,7 @@ namespace ExperimentManagerDesktop {
         internal static Dictionary<string,object> Command(WorkerBootConfig c,string action,params string[] options) {
             string package=App.RunWithTimeout(20000,"wsl.exe",Args(c,"wslpath","-a",App.Package)).Trim();
             var tail=new List<string>{"bash",package+"/Client-Worker.sh",action,"--service-root",c.ServiceRoot};tail.AddRange(options);
-            return App.CommandWithTimeout(action=="gpu-enable"?300000:120000,"wsl.exe",Args(c,tail.ToArray()));
+            return App.CommandWithTimeout(action=="storage-clean"||action=="storage-scan"?43200000:action=="gpu-enable"?300000:120000,"wsl.exe",Args(c,tail.ToArray()));
         }
         internal static Dictionary<string,object> OriginalStatus(string distribution) {
             string package=App.RunWithTimeout(20000,"wsl.exe","-d",distribution,"--exec","wslpath","-a",App.Package).Trim();
@@ -181,7 +183,8 @@ namespace ExperimentManagerDesktop {
                                     if(!App.Flag(state,"can_stop_docker")||!App.Flag(state,"can_terminate_wsl"))throw new IOException(App.Text(state,"detail","运行环境仍有其他工作，已保留。"));
                                     if(!c.DedicatedDistribution)throw new IOException("算力已停止；此 Ubuntu 未授权作为专用环境关闭，WSL 保留。");
                                     if(hold!=null){if(!hold.HasExited)hold.Kill();hold.Dispose();hold=null;}
-                                    App.RunWithTimeout(30000,"wsl.exe","-d",c.Distribution,"-u","root","--exec","systemctl","stop","docker.service","docker.socket");
+                                    if(ServiceName(c)=="docker.service")App.RunWithTimeout(30000,"wsl.exe","-d",c.Distribution,"-u","root","--exec","systemctl","stop","docker.service","docker.socket");
+                                    else App.RunWithTimeout(30000,"wsl.exe","-d",c.Distribution,"-u","root","--exec","systemctl","stop",ServiceName(c));
                                     App.RunWithTimeout(30000,"wsl.exe","--terminate",c.Distribution);
                                     var remaining=DesktopRuntime.RunningDistributions(App.RunWithTimeout(15000,"wsl.exe","--list","--running","--quiet"));
                                     if(Array.Exists(remaining,n=>n.Equals(c.Distribution,StringComparison.OrdinalIgnoreCase)))throw new IOException("Ubuntu 仍在运行，尚未确认释放。");
@@ -198,7 +201,7 @@ namespace ExperimentManagerDesktop {
                                 WriteStatus(App.Text(current,"status"),App.Text(current,"detail"));retry.Completed();Thread.Sleep(5000);continue;
                             }
                             WriteStatus("starting","正在检查独立 Docker 与 GPU…");
-                            App.RunWithTimeout(45000,"wsl.exe","-d",c.Distribution,"-u","root","--exec","systemctl","start","docker.service");
+                            App.RunWithTimeout(45000,"wsl.exe","-d",c.Distribution,"-u","root","--exec","systemctl","start",ServiceName(c));
                             var check=Inspect(c);if(!App.Flag(check,"ready")||App.Text(check,"node_id")!=c.NodeId)throw new IOException(App.Text(check,"detail","节点检查未通过。"));
                             var state=Command(c,"start");
                             hold=EnsureHold(c,hold);

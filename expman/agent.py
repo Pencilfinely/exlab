@@ -271,11 +271,15 @@ class Agent:
         self.result_delivery = ResultDelivery(self)
         from .execution_transfer import ExecutionTransfer
         self.execution_transfer = ExecutionTransfer(self)
+        from .storage import Maintenance
+        self.maintenance = Maintenance(self)
 
     def close(self):
         if self.closed:
             return
         self.closed = True
+        if getattr(self, 'maintenance', None):
+            self.maintenance.close()
         # Only a child created by this preparation thread is terminated here.
         with self.prep_mutex:
             process = self.prep_process
@@ -312,10 +316,18 @@ class Agent:
         return json.loads(row[0]) if row else default
 
     def _set_meta(self, key, value):
+        if self._meta(key) == value:
+            return
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (key, json.dumps(value)))
 
-    def records(self):
+    def records(self, states=None):
+        if states is not None:
+            selected = tuple(states)
+            if not selected:
+                return []
+            return [json.loads(row[0]) for row in self.db.execute(
+                "SELECT record FROM tasks WHERE json_extract(record,'$.state') IN (" + ','.join('?' for _ in selected) + ') ORDER BY id', selected)]
         return [json.loads(row[0]) for row in self.db.execute("SELECT record FROM tasks ORDER BY id")]
 
     def _save(self, record, *, _timing_end=None, _timing_uncertain=False, **changes):
@@ -388,8 +400,9 @@ class Agent:
         return result
 
     def _docker_environment(self):
-        environment = dict(os.environ)
+        from .runtime import docker_environment
         endpoint = common.read_json(self.config_path.parent / 'setup-state.json', {}).get('docker_endpoint')
+        environment = docker_environment(endpoint)
         if isinstance(endpoint, str) and endpoint.startswith('unix:///'):
             environment.pop('DOCKER_CONTEXT', None)
             environment['DOCKER_HOST'] = endpoint
@@ -416,7 +429,7 @@ class Agent:
                 failure = error
         raise failure or RuntimeError('No Center address available')
 
-    def snapshot(self):
+    def snapshot(self, *, reuse_hardware=False):
         policy = copy.deepcopy(self.config.get("policy", {}))
         if self.mode == "drain":
             policy["run_enabled"] = False
@@ -476,11 +489,15 @@ class Agent:
         if sys.platform != "linux":
             return self._apply_compute(node_policy.apply(result, desired))
         try:
-            self._exec(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=8)
+            cached = getattr(self, '_hardware_sample', None)
+            if not reuse_hardware or not cached or time.monotonic() - cached[0] > 2:
+                self._hardware_sample = None
+                self._exec(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=8)
+                query = self._exec(["nvidia-smi", "--query-gpu=uuid,name,memory.total,memory.free",
+                                    "--format=csv,noheader,nounits"], timeout=8)
+                cached = self._hardware_sample = (time.monotonic(), query.stdout)
             result["docker_available"] = True
-            query = self._exec(["nvidia-smi", "--query-gpu=uuid,name,memory.total,memory.free",
-                                "--format=csv,noheader,nounits"], timeout=8)
-            for row in csv.reader(io.StringIO(query.stdout)):
+            for row in csv.reader(io.StringIO(cached[1])):
                 if len(row) != 4:
                     continue
                 gpu_uuid, name, total, free = [value.strip() for value in row]
@@ -608,11 +625,15 @@ class Agent:
     def _sync(self, snapshot):
         # Timing advances even when a workload has not emitted fresh metrics.
         # Persist a fresh sequence so the Hub can accept each duration sample.
-        for record in self.records():
+        for record in self.records(("running",)):
             if record["state"] == "running" and "_timing" in record:
                 self._save(record)
         confirmed = dict(self.db.execute("SELECT job_id,seq FROM report_acks"))
-        pending = [record for record in self.records() if not record.get("execution_retired") and record["seq"] > confirmed.get(record["id"], 0)]
+        pending = [json.loads(row[0]) for row in self.db.execute(
+            "SELECT t.record FROM tasks t LEFT JOIN report_acks a ON a.job_id=t.id "
+            "WHERE COALESCE(json_extract(t.record,'$.execution_retired'),0)=0 "
+            "AND json_extract(t.record,'$.seq')>COALESCE(a.seq,0) "
+            "ORDER BY COALESCE(json_extract(t.record,'$.updated'),0),t.id LIMIT 500")]
         # Older unsent reports are drained before newly updated active jobs.
         pending.sort(key=lambda record: (record.get("updated", 0), record["id"]))
         payload = {"node_id": self.config["node_id"], "snapshot": snapshot, "reports": [],
@@ -656,9 +677,16 @@ class Agent:
                     if acknowledged > confirmed.get(job_id, 0):
                         self.db.execute("INSERT INTO report_acks(job_id,seq) VALUES (?,?) "
                             "ON CONFLICT(job_id) DO UPDATE SET seq=MAX(seq,excluded.seq)", (job_id, acknowledged))
-            existing = {record["id"]: record for record in self.records()}
+            requested = {item.get('id') for item in response.get('retired', []) + response.get('jobs', []) if isinstance(item.get('id'), str)}
+            existing = {}
+            for identity in requested:
+                row = self.db.execute('SELECT record FROM tasks WHERE id=?', (identity,)).fetchone()
+                if row:
+                    existing[identity] = json.loads(row[0])
             for retired in response.get("retired", []):
                 record = existing.get(retired.get("id"))
+                if getattr(self, 'maintenance', None) and self.maintenance.cleaning and record and record['state'] == 'succeeded':
+                    continue
                 if record and record.get("generation", 1) <= retired.get("generation", 0):
                     if record["state"] in ACTIVE:
                         if record.get("stop_at") is None:
@@ -669,6 +697,8 @@ class Agent:
                 if not re.fullmatch(r"[0-9a-f]{32}", str(job.get("id", ""))):
                     continue
                 record = existing.get(job["id"])
+                if getattr(self, 'maintenance', None) and self.maintenance.cleaning and record and record['state'] == 'succeeded':
+                    continue  # Defer new generations until their old workspace is archived.
                 generation = job.get("generation", 1)
                 new_generation = record is not None and generation > record.get("generation", 1)
                 if new_generation and record["state"] in ACTIVE:
@@ -932,6 +962,7 @@ class Agent:
             mounts.append((source, "/assets/" + asset, True))
             assets[asset] = "/assets/" + asset
         argv = ["docker", "create", "--name", record["container_name"], "--restart=no", "--pull=never",
+                "--log-driver", "local", "--log-opt", "max-size=10m", "--log-opt", "max-file=3",
                 "--label", "expman.job=" + record["id"], "--label", "expman.node=" + self.config["node_id"],
                 "--gpus", "device=" + choice["gpu_uuid"], "--cpus", str(spec["resources"]["cpu"]),
                 "--memory", str(spec["resources"]["ram_mb"]) + "m", "--network", "none",
@@ -1210,6 +1241,7 @@ class Agent:
         """One durable cycle; losing Hub connectivity never abandons local ownership."""
         self.result_delivery.start()
         self.execution_transfer.start()
+        self.maintenance.tick()
         def exiting():
             return stop_requested is not None and stop_requested()
 
@@ -1221,7 +1253,7 @@ class Agent:
         if exiting():
             return result()
         self._poll_preparation()
-        for record in self.records():
+        for record in self.records(ACTIVE):
             if exiting():
                 return result()
             try:
@@ -1240,29 +1272,29 @@ class Agent:
         if exiting():
             return result()
         self._sync(snapshot)
-        snapshot = self.snapshot()
+        snapshot = self.snapshot(reuse_hardware=True)
         self._availability_tick(snapshot)
         if exiting():
             return result()
         if self.mode == "drain":
             snapshot["policy"]["run_enabled"] = False
-        for record in self.records():
+        for record in self.records(("assigned", "preparing")):
             if exiting():
                 return result()
-            if record["state"] in ("assigned", "preparing") and not snapshot.get("availability", {}).get("stopping"):
+            if record["state"] in ("assigned", "preparing") and not self.maintenance.cleaning and not snapshot.get("availability", {}).get("stopping"):
                 try:
                     self._prepare(record, snapshot)
                 except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
                     self._save(record, state="failed", detail="Preparation failed: " + str(error)[:1000])
-        for record in sorted(self.records(), key=lambda item: -item["spec"]["priority"]):
+        for record in sorted(self.records(("ready",)), key=lambda item: -item["spec"]["priority"]):
             if exiting():
                 return result()
-            if record["state"] != "ready":
+            if record["state"] != "ready" or self.maintenance.cleaning:
                 continue
             # Refresh telemetry immediately before each start, not just at heartbeat.
             fresh = self.snapshot()
             active = [{"spec": task["spec"], "gpu_uuid": task.get("gpu_uuid")}
-                      for task in self.records() if task["state"] in ACTIVE]
+                      for task in self.records(ACTIVE)]
             choice = scheduler.select_device(record["spec"], fresh, active)
             if exiting():
                 return result()
@@ -1278,13 +1310,16 @@ class Agent:
                         self._save(record, detail="Start outcome pending inspection: " + str(error)[:700])
                     else:
                         self._save(record, state="failed", detail="Start failed: " + str(error)[:1000])
-        for record in self.records():
+        for row in self.db.execute("SELECT record FROM tasks WHERE COALESCE(json_extract(record, '$.archive_scanned'),0)=0").fetchall():
+            record = json.loads(row[0])
             try:
+                self._metrics(record)
                 self._snapshot_files(record)
             except (OSError, ValueError) as error:
                 self.last_error = "Archive snapshot deferred: " + str(error)[:500]
         self._uploads()
-        self.project_delivery.tick()
+        if not self.maintenance.cleaning or self.project_delivery.installing:
+            self.project_delivery.tick()
         return result()
 
 

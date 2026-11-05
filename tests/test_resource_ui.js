@@ -61,7 +61,7 @@ function worker(overrides = {}) {
   };
 }
 function nodeContext(current = worker()) {
-  const env = context({state: {nodes: [current], jobs: []}});
+  const env = context({state: {nodes: [current], jobs: []}, currentView: 'compute'});
   env.load('function openNodeResources(', 'function render(){');
   env.load('function render(){', 'function renderJobs(){');
   const form = env.$('node-resource-form'); form.hidden = true;

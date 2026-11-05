@@ -31,6 +31,7 @@ jobs:
       - run: node tests/test_desktop_settings_ui.js
       - run: node tests/test_matrix_ui.js
       - run: node tests/test_resource_ui.js
+      - run: node tests/test_qol_ui.js
       - run: node --check expman/static/compute.js
       - run: node tests/test_compute_ui.js
       - run: node --check expman/static/autonomy.js
@@ -56,6 +57,7 @@ jobs:
           ./scripts/test_icons.ps1
           ./scripts/test_browser_icons.ps1
           ./scripts/test_updates.ps1
+          ./scripts/test_worker_disk.ps1
       - run: python scripts/build_release.py --download-python --legacy-updater
       - name: Verify migration through the unchanged 0.4.5 updater
         shell: pwsh

@@ -422,6 +422,20 @@ static class InstallProbeTests {
         var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
     }
     static void ComputeActivation(string folder) {
+        string archive=Path.Combine(folder,"verified-backup.tar");File.WriteAllText(archive,"preserve");
+        try{WorkerDisk.DeleteVerified(archive,new String('0',64));throw new Exception("Unverified backup was deleted.");}catch(IOException){}
+        Assert(File.ReadAllText(archive)=="preserve","Failed verification damaged an archive.");
+        string archiveHash;using(var sha=System.Security.Cryptography.SHA256.Create())archiveHash=BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(archive))).Replace("-","").ToLowerInvariant();
+        WorkerDisk.DeleteVerified(archive,archiveHash);Assert(!File.Exists(archive),"Verified backup handle was not deleted.");
+        string journal=Path.Combine(folder,Guid.NewGuid().ToString("N"));Directory.CreateDirectory(journal);
+        var journalState=new Dictionary<string,object>{{"id",Path.GetFileName(journal)},{"path",journal},{"source","Ubuntu"},{"target","Ubuntu"},{"mode","in_place"},{"owner",System.Security.Principal.WindowsIdentity.GetCurrent().User.Value},{"committed",true},{"finished",true}};
+        File.WriteAllText(Path.Combine(journal,"distribution.tar"),"preserve in-place files");
+        Assert(WorkerMigration.BackupArchives(journalState).Count==0,"In-place configuration backup was eligible for legacy archive deletion.");
+        journalState["committed"]=false;journalState["finished"]=false;
+        App.Write(Path.Combine(journal,"committed.json"),new{job_id=Path.GetFileName(journal)});
+        Assert(!WorkerMigration.CanRollback(journalState),"Linux commit receipt was ignored after a Windows journal crash.");
+        Assert(WorkerBoot.ServiceName(new WorkerBootConfig())=="docker.service","Legacy engine service was changed.");
+        Assert(WorkerBoot.ServiceName(new WorkerBootConfig {EngineService="exlab-docker.service"})=="exlab-docker.service","Isolated engine service was lost.");
         Assert(WorkerMigration.CanRollback(new Dictionary<string,object>{{"committed",false},{"finished",false}}),"Incomplete migration cannot recover its original node.");
         Assert(!WorkerMigration.CanRollback(new Dictionary<string,object>{{"committed",true},{"finished",false}}),"Committed migration could restore a stale node database.");
         Assert(!WorkerMigration.CanRollback(new Dictionary<string,object>{{"committed",false},{"finished",true}}),"Already recovered migration could overwrite subsequent user changes.");
@@ -986,7 +1000,7 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs','WorkerMigration.cs','WorkerMigrationForm.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs','WorkerMigration.cs','WorkerMigrationForm.cs','WorkerStorageForm.cs','WorkerDisk.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

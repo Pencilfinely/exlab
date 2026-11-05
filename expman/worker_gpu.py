@@ -44,8 +44,9 @@ def _configuration(root):
 
 
 def _environment(path):
-    environment = os.environ.copy()
     endpoint = common.read_json(path.parent / 'setup-state.json', {}).get('docker_endpoint')
+    from .runtime import docker_environment
+    environment = docker_environment(endpoint)
     if endpoint:
         if not isinstance(endpoint, str) or not endpoint.startswith('unix:///') or any(c.isspace() for c in endpoint):
             raise ValueError('显卡检查必须使用本机 Docker。请检查算力端的 Docker 设置。')

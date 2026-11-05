@@ -84,6 +84,19 @@ public static class DesktopBootFormTest {
                 using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-migration-preview.png"));}
                 form.Close();
             }
+            var storage=assembly.GetType("ExperimentManagerDesktop.WorkerStorageForm");
+            var sample=new System.Collections.Generic.Dictionary<string,object>{{"status","ready"},{"automatic",true},{"reclaimable_bytes",5368709120L},{"free_bytes",10737418240L},
+                {"groups",new object[]{new System.Collections.Generic.Dictionary<string,object>{{"label","Results and weights"},{"bytes",21474836480L}},new System.Collections.Generic.Dictionary<string,object>{{"label","Code working copies"},{"bytes",5368709120L}}}},
+                {"items",new object[]{new System.Collections.Generic.Dictionary<string,object>{{"kind","workspace"}}}}};
+            Func<string,string[],System.Threading.Tasks.Task<System.Collections.Generic.Dictionary<string,object>>> command=(action,options)=>System.Threading.Tasks.Task.FromResult(sample);
+            using(var form=(System.Windows.Forms.Form)Activator.CreateInstance(storage,inst,null,new object[]{command},null)) {
+                form.ShowInTaskbar=false;form.Opacity=0;form.Show();System.Windows.Forms.Application.DoEvents();
+                storage.GetMethod("Display",inst).Invoke(form,new object[]{sample});
+                if(!((System.Windows.Forms.Button)storage.GetField("clean",inst).GetValue(form)).Enabled)throw new Exception("Ready cleanup cannot be selected.");
+                if(((System.Windows.Forms.TextBox)storage.GetField("details",inst).GetValue(form)).Visible)throw new Exception("Storage diagnostics should start collapsed.");
+                using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-storage-preview.png"));}
+                form.Close();
+            }
         } finally {directory.SetValue(null,previous);}
     }
 }

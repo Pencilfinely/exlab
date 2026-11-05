@@ -160,7 +160,7 @@ class WorkerDatabaseTests(unittest.TestCase):
         blocker = sqlite3.connect(self.root / 'worker/node.sqlite3')
         blocker.execute("INSERT INTO metadata VALUES ('external-writer','true')")
         cycles = []
-        def scan():
+        def scan(*, indexed=False):
             cycles.append(1)
             if len(cycles) == 1:
                 raise sqlite3.OperationalError('database is locked')
