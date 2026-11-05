@@ -22,6 +22,7 @@ namespace ExperimentManagerDesktop {
             this.command=command;Text="Worker · 存储与环境";Size=new Size(800,590);MinimumSize=new Size(720,500);
             StartPosition=FormStartPosition.CenterParent;Font=new Font("Microsoft YaHei UI",10);BackColor=Color.White;
             var layout=new TableLayoutPanel {Dock=DockStyle.Fill,Padding=new Padding(24),ColumnCount=1,RowCount=6};
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));for(int i=0;i<3;i++)layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.Controls.Add(WorkerUi.Copy("存储与环境",700,true));
@@ -43,6 +44,7 @@ namespace ExperimentManagerDesktop {
             Shown+=async(s,e)=>{timer.Start();if(WorkerBoot.Managed&&App.Text(App.Read(System.IO.Path.Combine(App.SettingsRoot,"boot-request.json")),"mode")=="release")status.Text="算力已停用。可回收 Windows 磁盘空间；扫描文件会唤醒 Ubuntu。";else await Send("storage-status");};
             FormClosed+=(s,e)=>timer.Dispose();
             FormClosing+=(s,e)=>{if(busy)e.Cancel=true;};
+            ResumeLayout(true);
         }
         internal static string Bytes(long value) {return value>=1073741824?String.Format("{0:0.0} GB",value/1073741824.0):String.Format("{0:0.0} MB",value/1048576.0);}
         static long Number(Dictionary<string,object> value,string key){object raw;return value.TryGetValue(key,out raw)?Convert.ToInt64(raw):0;}

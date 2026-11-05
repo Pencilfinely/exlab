@@ -122,13 +122,16 @@ def configure(job, identity):
               'bridge': 'none', 'iptables': False, 'ip6tables': False, 'ip-masq': False,
               'builder': {'gc': {'enabled': True, 'defaultKeepStorage': '2GB'}},
               'log-driver': 'local', 'log-opts': {'max-size': '10m', 'max-file': '3'},
-              'runtimes': {'runc': {'path': str(ENGINE / 'usr/bin/runc')}}}
+              'default-runtime': 'exlab-runc',
+              'runtimes': {'exlab-runc': {'path': str(ENGINE / 'usr/bin/runc')}}}
     init = next((p for p in (ENGINE / 'usr/libexec/docker/docker-init', ENGINE / 'usr/bin/docker-init') if p.is_file()), None)
     if init:
         daemon['init-path'] = str(init)
     private_write(CONFIG, daemon)
     CONFIG.chmod(0o644)
     subprocess.run(['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--config=' + str(CONFIG)], check=True, timeout=60)
+    subprocess.run([str(ENGINE / 'usr/bin/dockerd'), '--validate', '--config-file=' + str(CONFIG)],
+                   check=True, capture_output=True, text=True, timeout=30)
     unit_text = ('[Unit]\nDescription=ExLab compute engine\nAfter=network-online.target\nWants=network-online.target\n'
                 '[Service]\nType=notify\nEnvironment="PATH=/opt/exlab/docker/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
                 'ExecStart=/opt/exlab/docker/usr/bin/dockerd --config-file=/etc/exlab-docker.json\n'

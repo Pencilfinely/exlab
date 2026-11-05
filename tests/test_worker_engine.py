@@ -91,6 +91,8 @@ class EngineTransactionTests(unittest.TestCase):
         daemon = common.read_json(engine.CONFIG)
         self.assertEqual(daemon['hosts'], [engine.ENDPOINT])
         self.assertEqual(daemon['data-root'], str(engine.DATA))
+        self.assertNotIn('runc', daemon['runtimes'])  # reserved by Docker
+        self.assertEqual(daemon['default-runtime'], 'exlab-runc')
         client = common.read_json(Path(self.user.pw_dir) / '.config/exlab/docker/config.json')
         self.assertNotIn('credsStore', client)
         self.assertEqual(desktop.read_bytes(), before)

@@ -16,8 +16,7 @@ $sandbox = [IO.Path]::GetFullPath((Join-Path $repo ('.test-runs\vhd-' + [Guid]::
 if (-not $sandbox.StartsWith($repo + '\.test-runs\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture path escaped workspace.' }
 New-Item -ItemType Directory -Path $sandbox | Out-Null
 $exe = Join-Path $sandbox 'ExLabWorker.exe'
-$env:EXLAB_TEST_EXE = $exe
-& python -c 'import os;from scripts.build_desktop import compile_desktop;compile_desktop(os.environ["EXLAB_TEST_EXE"],"worker")'
+& python -m scripts.build_desktop --role worker --output $exe
 if ($LASTEXITCODE -ne 0) { throw 'Worker fixture compilation failed.' }
 $disk = Join-Path $sandbox 'fixture.vhdx'
 if (Test-Path -LiteralPath $disk) { throw 'Fixture disk must not exist.' }
@@ -28,6 +27,7 @@ $commands = Join-Path $sandbox 'create.txt'
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $disk -PathType Leaf)) { throw 'Scratch VHD creation failed.' }
 $assembly = [Reflection.Assembly]::LoadFrom($exe)
 $method = $assembly.GetType('ExperimentManagerDesktop.WorkerDisk').GetMethod('CompactFile', [Reflection.BindingFlags]'Static,NonPublic')
-$method.Invoke($null, @($disk))
+Add-Type -TypeDefinition 'public static class ExLabVhdFixture { public static void Compact(System.Reflection.MethodInfo method,string path) { method.Invoke(null,new object[]{path}); } }'
+[ExLabVhdFixture]::Compact($method, [string]$disk)
 if (-not (Test-Path -LiteralPath $disk -PathType Leaf)) { throw 'Compaction removed its disk.' }
 Write-Output 'PASS native VHDX open/compact/close on a newly created, never-attached scratch disk.'
