@@ -70,7 +70,7 @@ public static class DesktopBootFormTest {
                 form.Close();
             }
             var migration=assembly.GetType("ExperimentManagerDesktop.WorkerMigrationForm");
-            using(var form=(System.Windows.Forms.Form)Activator.CreateInstance(migration,inst,null,new object[]{null,"Ubuntu-test",@"E:\Chosen backup",false},null)) {
+            using(var form=(System.Windows.Forms.Form)Activator.CreateInstance(migration,inst,null,new object[]{null,"Ubuntu-test",@"E:\Chosen backup",false,@"E:\Worker data"},null)) {
                 form.ShowInTaskbar=false;form.Opacity=0;form.Show();System.Windows.Forms.Application.DoEvents();
                 var input=(System.Windows.Forms.TextBox)migration.GetField("password",inst).GetValue(form);input.Text="test-secret-never-save";
                 if(!input.UseSystemPasswordChar)throw new Exception("Migration password is visible.");
@@ -78,7 +78,7 @@ public static class DesktopBootFormTest {
                 if(((System.Windows.Forms.Control)migration.GetField("recover",inst).GetValue(form)).Visible||((System.Windows.Forms.Control)migration.GetField("advanced",inst).GetValue(form)).Visible)throw new Exception("Normal migration exposes recovery or advanced fields.");
                 var args=(string[])migration.GetMethod("ElevationArguments",inst).Invoke(form,null);
                 string joined=String.Join("|",args);
-                if(joined.Contains(input.Text)||!joined.Contains(@"E:\Chosen backup")||!joined.Contains("Ubuntu-test"))throw new Exception("Elevation loses choices or passes the Windows password.");
+                if(joined.Contains(input.Text)||!joined.Contains(@"E:\Chosen backup")||!joined.Contains(@"E:\Worker data")||!joined.Contains("Ubuntu-test"))throw new Exception("Elevation loses choices or passes the Windows password.");
                 migration.GetMethod("ShowProgress",inst).Invoke(form,new object[]{"Please pause notebook: Linux/WSL mount"});
                 if(!((System.Windows.Forms.TextBox)migration.GetField("details",inst).GetValue(form)).Text.Contains("notebook"))throw new Exception("Migration lost the specific blocker.");
                 input.Clear();

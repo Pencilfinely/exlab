@@ -943,7 +943,7 @@ static class InstallProbeTests {
     }
     static int Main(string[] args) {
         try {
-            WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
+            assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");
@@ -1000,7 +1000,8 @@ static class InstallProbeTests {
     $references = @('System.Windows.Forms.dll','System.Drawing.dll','System.Web.Extensions.dll','System.IO.Compression.dll','System.IO.Compression.FileSystem.dll','Microsoft.CSharp.dll','System.Management.dll')
     $compileArgs = @('/nologo','/target:exe','/langversion:5','/main:InstallProbeTests',('/out:' + $probeExe))
     $compileArgs += $references | ForEach-Object { '/r:' + $_ }
-    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs','WorkerMigration.cs','WorkerMigrationForm.cs','WorkerStorageForm.cs','WorkerDisk.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += @('ExperimentApp.cs','DesktopUpdates.cs','DesktopUpdateForm.cs','DesktopUpdateQueue.cs','DesktopIcons.cs','BrowserAppWindow.cs','WorkerGpuForm.cs','DesktopRuntime.cs','DesktopHostControl.cs','DesktopDockerRecovery.cs','ComputePauseForm.cs','DesktopSettings.cs','WorkerBoot.cs','WorkerBootForm.cs','WorkerMigration.cs','WorkerMigrationForm.cs','WorkerStorageForm.cs','WorkerDisk.cs','WorkerDataMove.cs') | ForEach-Object { Join-Path $repoRoot ('deploy/desktop/' + $_) }
+    $compileArgs += Join-Path $repoRoot 'tests/native_worker_move.cs'
     $compileArgs += $probeSource
     & $compiler @compileArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installer probe tests compilation failed.' }

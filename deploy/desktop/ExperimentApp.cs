@@ -273,7 +273,7 @@ namespace ExperimentManagerDesktop {
                 }
                 if(Worker&&Has(args,"--compact-worker")) {WorkerDisk.RunElevated(Arg(args,"--owner-sid"),Arg(args,"--compact-id")).GetAwaiter().GetResult();return;}
                 if(Worker&&Has(args,"--boot-settings")) {using(var form=new WorkerBootForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
-                if(Worker&&Has(args,"--migration-settings")) {using(var form=new WorkerMigrationForm(Arg(args,"--owner-sid"),Arg(args,"--migration-source"),Arg(args,"--migration-folder"),Arg(args,"--migration-confirmed")=="yes"))Application.Run(form);return;}
+                if(Worker&&Has(args,"--migration-settings")) {using(var form=new WorkerMigrationForm(Arg(args,"--owner-sid"),Arg(args,"--migration-source"),Arg(args,"--migration-folder"),Arg(args,"--migration-confirmed")=="yes",Arg(args,"--migration-data-folder")))Application.Run(form);return;}
                 if(Has(args,"--cleanup-installer")) {
                     var until=DateTime.UtcNow.AddMinutes(5);
                     while(DateTime.UtcNow<until) {
