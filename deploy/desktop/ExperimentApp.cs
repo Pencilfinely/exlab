@@ -272,7 +272,7 @@ namespace ExperimentManagerDesktop {
                     try {Environment.ExitCode=WorkerBoot.Run();}catch(Exception ex){ClientError("boot_failed",ex);Environment.ExitCode=1;}return;
                 }
                 if(Worker&&Has(args,"--boot-settings")) {using(var form=new WorkerBootForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
-                if(Worker&&Has(args,"--migration-settings")) {using(var form=new WorkerMigrationForm(Arg(args,"--owner-sid")))Application.Run(form);return;}
+                if(Worker&&Has(args,"--migration-settings")) {using(var form=new WorkerMigrationForm(Arg(args,"--owner-sid"),Arg(args,"--migration-source"),Arg(args,"--migration-folder"),Arg(args,"--migration-confirmed")=="yes"))Application.Run(form);return;}
                 if(Has(args,"--cleanup-installer")) {
                     var until=DateTime.UtcNow.AddMinutes(5);
                     while(DateTime.UtcNow<until) {
@@ -497,6 +497,8 @@ namespace ExperimentManagerDesktop {
         internal string UpdateDetail="";
         Label summary=new Label { AutoSize=true, MaximumSize=new Size(810,0), Text="正在检查状态…" };
         TextBox log=new TextBox { Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,Dock=DockStyle.Fill,WordWrap=false,Font=new Font("Consolas",9) };
+        readonly TextBox workerDetails=new TextBox {Multiline=true,ReadOnly=true,Dock=DockStyle.Top,Height=150,ScrollBars=ScrollBars.Vertical,BorderStyle=BorderStyle.None};
+        TabControl workerTabs;
         TextBox data=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
         TextBox pairing=new TextBox { Dock=DockStyle.Fill,ReadOnly=true };
         ComboBox distro=new ComboBox { Dock=DockStyle.Fill,DropDownStyle=ComboBoxStyle.DropDownList };
@@ -577,13 +579,14 @@ namespace ExperimentManagerDesktop {
             preferences.Controls.Add(autoUpdate);if(App.Worker)preferences.Controls.Add(releaseResources);
             layout.Controls.Add(preferences);
             layout.Controls.Add(updateStatus);layout.Controls.Add(log); layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
+            if(App.Worker)BuildWorkerLayout(layout,controls,actions,preferences);
             Controls.Add(layout);
             tray=new NotifyIcon { Icon=trayIcons.TrayIcon,Text=App.Title,Visible=true };
             var menu=new ContextMenuStrip(); menu.Items.Add(App.Worker?"打开算力客户端":"打开实验台",null,(s,e)=>OpenFromTray());
             menu.Items.Add("停用并释放 Docker / WSL",null,(s,e)=>Stop());
             menu.Items.Add("检查更新…",null,(s,e)=>CheckUpdates());
-            menu.Items.Add("设置 · 开机自启与更新",null,(s,e)=>ShowStatus());
-            menu.Items.Add("状态与日志",null,(s,e)=>ShowStatus()); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
+            menu.Items.Add(App.Worker?"设置":"设置 · 开机自启与更新",null,(s,e)=>{ShowStatus();if(workerTabs!=null)workerTabs.SelectedIndex=1;});
+            menu.Items.Add(App.Worker?"日志":"状态与日志",null,(s,e)=>{ShowStatus();if(workerTabs!=null)workerTabs.SelectedIndex=2;}); menu.Items.Add("退出",null,(s,e)=>ExitFromTray()); tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenFromTray();
             ApplyBootControls();
             FormClosing+=(s,e)=>{if(!exiting){e.Cancel=true;Hide();}else{timer.Stop();tray.Visible=false;}};
             timer.Tick+=async(s,e)=>{tray.Icon=trayIcons.TrayIcon;await PumpHostControl();await PumpUpdates();if(!exiting)RefreshState();};
@@ -617,12 +620,57 @@ namespace ExperimentManagerDesktop {
             if(disposing) trayIcons.Dispose();
         }
         static void AddButton(Control parent,string text,Action action) {var button=new Button {Text=text,AutoSize=true,Margin=new Padding(0,8,12,8)};button.Click+=(s,e)=>action();parent.Controls.Add(button);}
+        void BuildWorkerLayout(TableLayoutPanel layout,Control connection,Control actions,FlowLayoutPanel preferences) {
+            MinimumSize=new Size(820,570);
+            layout.Controls.Clear();layout.RowStyles.Clear();layout.RowCount=2;
+            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));layout.RowStyles.Add(new RowStyle(SizeType.Percent,100));
+            layout.Controls.Add(WorkerUi.Copy("ExLab Worker",740,true));
+            workerTabs=new TabControl {Dock=DockStyle.Fill,Padding=new Point(18,10)};layout.Controls.Add(workerTabs);
+            var overview=new TabPage("概览") {BackColor=Color.White,Padding=new Padding(22)};
+            var settingsPage=new TabPage("设置") {BackColor=Color.White,Padding=new Padding(22),AutoScroll=true};
+            var logsPage=new TabPage("日志") {BackColor=Color.White,Padding=new Padding(16)};
+            workerTabs.TabPages.AddRange(new[]{overview,settingsPage,logsPage});
+            var home=WorkerUi.Stack(740);home.Dock=DockStyle.Fill;home.AutoScroll=true;overview.Controls.Add(home);
+            summary.MaximumSize=new Size(710,0);summary.ForeColor=WorkerUi.Ink;summary.Margin=new Padding(0,8,0,24);home.Controls.Add(summary);
+            var primary=new FlowLayoutPanel {AutoSize=true,MaximumSize=new Size(710,0)};home.Controls.Add(primary);
+            var options=WorkerUi.Stack(710);options.Dock=DockStyle.Top;settingsPage.Controls.Add(options);
+            options.Controls.Add(WorkerUi.Copy("连接",710,true));connection.MinimumSize=new Size(690,0);options.Controls.Add(connection);
+            options.Controls.Add(WorkerUi.Copy("启动与更新",710,true));
+            startup.Text="登录 Windows 后启动客户端";autoEnableCompute.Text="客户端启动时启用算力";autoUpdate.Text="自动更新";releaseResources.Text="退出时释放空闲资源";
+            preferences.FlowDirection=FlowDirection.TopDown;preferences.WrapContents=false;preferences.Width=690;options.Controls.Add(preferences);
+            var settingsActions=new FlowLayoutPanel {AutoSize=true,MaximumSize=new Size(690,0)};options.Controls.Add(settingsActions);
+            var logActions=new FlowLayoutPanel {AutoSize=true,Dock=DockStyle.Bottom};logsPage.Controls.Add(logActions);
+            var buttons=new List<Control>();foreach(Control button in actions.Controls)buttons.Add(button);
+            foreach(Control control in buttons) {
+                var button=control as Button;if(button==null)continue;
+                if(button.Text=="启用算力"||button.Text=="停用并释放 Docker / WSL"||button.Text=="暂停 / 恢复") {
+                    WorkerUi.Button(button,button.Text=="启用算力");primary.Controls.Add(button);
+                    if(button.Text.StartsWith("停用"))button.Text="停用并释放";
+                    if(button.Text=="暂停 / 恢复")button.Text="暂停接单…";
+                } else if(button.Text=="刷新状态"||button.Text=="打开日志") {WorkerUi.Button(button);logActions.Controls.Add(button);}
+                else if(button.Text!="转入后台") {WorkerUi.Button(button);settingsActions.Controls.Add(button);if(button.Text=="无人值守启动…")button.Text="开机启动…";}
+            }
+            home.Controls.Add(WorkerUi.Copy("停用会保存并停止实验；暂停接单可让当前实验继续。",710));
+            home.Controls.Add(WorkerUi.Link("状态详情与日志",()=>workerTabs.SelectedIndex=2));
+            home.Controls.Add(WorkerUi.Copy("开机启动",710,true));
+            home.Controls.Add(WorkerUi.Copy("无需登录 Windows，即可自动运行。",710));
+            home.Controls.Add(WorkerUi.Link("设置开机启动",()=>OpenBootSettings()));
+            home.Controls.Add(WorkerUi.Link("连接与显卡设置",()=>workerTabs.SelectedIndex=1));
+            options.Controls.Add(updateStatus);
+            logsPage.Controls.Add(log);logsPage.Controls.Add(workerDetails);log.BringToFront();
+            if(String.IsNullOrEmpty(App.Text(settings,"distribution")))workerTabs.SelectedIndex=1;
+            workerTabs.SelectedIndexChanged+=(s,e)=>{if(timer.Enabled&&!busy)RefreshState();};
+        }
+        void SetWorkerSummary(string full,string concise=null) {
+            if(!App.Worker){summary.Text=full;return;}
+            workerDetails.Text=full.Replace("\r\n","\n").Replace("\n",Environment.NewLine);summary.Text=concise??full;
+        }
         async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;if(startingAfterUpdate)App.UpdateReport("backend_start","failed",ex.Message);try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}catch(UnauthorizedAccessException){}}finally{busy=false;} }
         void ApplyBootControls(){bool editable=!WorkerBoot.Managed;distro.Enabled=editable;existing.Enabled=editable;pairing.Enabled=editable;autoEnableCompute.Enabled=editable;releaseResources.Enabled=editable;}
         void OpenBootSettings() {
             if(busy||hostLoop.Applying||hostPumping||pumpingUpdates){summary.Text="当前后台操作尚未结束，请稍后打开无人值守设置。";return;}
             busy=true;timer.Stop();
-            try {using(var form=new WorkerBootForm())form.ShowDialog(this);}
+            try {if(WorkerBoot.Managed&&!WorkerMigration.Pending){using(var form=new WorkerBootForm())form.ShowDialog(this);}else {using(var form=new WorkerMigrationForm())form.ShowDialog(this);}}
             finally {settings=App.ReadSettings();deactivated=App.Flag(settings,"deactivated");ApplyBootControls();hostControl=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));busy=false;timer.Start();RefreshState();}
         }
         internal void ShowStatus(){Show();WindowState=FormWindowState.Normal;Activate();RefreshState();}
@@ -900,7 +948,16 @@ namespace ExperimentManagerDesktop {
                 return result;
             });
         }
-        async void RefreshState(){if(WorkerBoot.Managed){summary.Text=WorkerBoot.DisplayStatus();return;}if(busy||hostLoop.Applying)return;if(deactivated){DisplayInactive();return;}await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker){var logs=await WorkerCommand("logs");object lines;if(logs.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}});}
+        async Task ReadWorkerLogs(){var result=await WorkerCommand("logs");object lines;if(result.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}
+        async void RefreshState(){
+            if(WorkerBoot.Managed){
+                SetWorkerSummary(WorkerBoot.DisplayStatus());lastLog=Path.Combine(App.SettingsRoot,"client-lifecycle.jsonl");
+                if(workerTabs!=null&&workerTabs.SelectedIndex==2&&!busy&&WorkerBoot.CanAutoUpdate(App.Read(WorkerBoot.StatusPath)))await Execute(ReadWorkerLogs);
+                return;
+            }
+            if(busy||hostLoop.Applying)return;if(deactivated){DisplayInactive();return;}
+            await Execute(async()=>{var result=App.Worker?await WorkerCommand("status"):await Controller("controller-status");Display(result);if(App.Worker&&workerTabs!=null&&workerTabs.SelectedIndex==2)await ReadWorkerLogs();});
+        }
         async void StartWorker(){if(WorkerBoot.Managed){WorkerBoot.Request("available");WorkerBoot.EnsureHost();RefreshState();return;}if(hostLoop.Applying||busy){summary.Text="当前操作尚未完成。若主控仍要求释放资源，请先在主控将此节点恢复为允许接单。\n"+(hostControl.Report==null?"":App.Text(hostControl.Report,"detail"));return;}await StartWorkerAsync(false);}
         async Task<bool> StartWorkerAsync(bool automatic){
             if(WorkerMigration.Pending){summary.Text="迁移尚未结束，请打开无人值守启动向导恢复或完成交接。";return false;}
@@ -1044,26 +1101,30 @@ namespace ExperimentManagerDesktop {
                 hostControl.Disconnect();
             string state=App.Text(value,"status");
             string stateLabel=state=="shutting_down"?"正在保存并停止实验":state=="exit_failed"?"退出未完成":state=="online"?"已连接":state=="offline"?"主控离线":state=="unresponsive"?"主控连接异常":state=="port_conflict"?"主控端口冲突":state=="preparing"?"准备中":state=="starting"?"启动中":state=="stopped"?"已停止":state=="running"?"运行中":state=="failed"?"启动失败":state;
-            summary.Text=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
+            string displayText=App.Text(value,"node_id",App.Worker?"算力客户端":"实验台")+" · "+stateLabel+"\n"+App.Text(value,"detail");
             object agentRaw;var agent=value.TryGetValue("controller_agent",out agentRaw)?agentRaw as Dictionary<string,object>:null;
-            if(agent!=null)summary.Text+="\nAI 托管："+(App.Flag(agent,"enabled")&&App.Flag(agent,"provider_enabled")?"已开启 · 主控按需规划与检查":"未开启")+(string.IsNullOrEmpty(App.Text(agent,"active_run"))?"":" · 正在处理");
+            if(agent!=null)displayText+="\nAI 托管："+(App.Flag(agent,"enabled")&&App.Flag(agent,"provider_enabled")?"已开启 · 主控按需规划与检查":"未开启")+(string.IsNullOrEmpty(App.Text(agent,"active_run"))?"":" · 正在处理");
             object availabilityRaw;var availability=value.TryGetValue("availability",out availabilityRaw)?availabilityRaw as Dictionary<string,object>:null;
-            if(availability!=null)summary.Text+="\n本机执行状态："+DesktopRuntime.ComputeState(value);
+            if(availability!=null)displayText+="\n本机执行状态："+DesktopRuntime.ComputeState(value);
             string backendVersion=App.Text(value,"version");
             if(App.Worker) {
-                summary.Text+="\n客户端版本："+App.Version;
+                displayText+="\n客户端版本："+App.Version;
                 string installedVersion=App.Text(value,"installed_version");
-                if(App.Flag(value,"running"))summary.Text+=" · 运行中后台版本："+(string.IsNullOrEmpty(backendVersion)?"无法确认":backendVersion);
-                else if(!string.IsNullOrEmpty(installedVersion))summary.Text+=" · 已安装后台版本："+installedVersion+"（当前未运行）";
+                if(App.Flag(value,"running"))displayText+=" · 运行中后台版本："+(string.IsNullOrEmpty(backendVersion)?"无法确认":backendVersion);
+                else if(!string.IsNullOrEmpty(installedVersion))displayText+=" · 已安装后台版本："+installedVersion+"（当前未运行）";
                 string lastVersion=App.Text(value,"last_run_version");
-                if(!App.Flag(value,"running")&&!string.IsNullOrEmpty(lastVersion))summary.Text+="\n上次运行版本："+lastVersion;
+                if(!App.Flag(value,"running")&&!string.IsNullOrEmpty(lastVersion))displayText+="\n上次运行版本："+lastVersion;
                 if(startingAfterUpdate&&state=="stopped"&&UpdateService.BackendMatchesRelease(installedVersion,App.Version)) {
                     App.UpdateReport("backend_install","completed",installedVersion+"；后台保持停止");startingAfterUpdate=false;
                 }
-            } else if(!string.IsNullOrEmpty(backendVersion))summary.Text+="\n客户端版本："+App.Version+" · 后台版本："+backendVersion;
+            } else if(!string.IsNullOrEmpty(backendVersion))displayText+="\n客户端版本："+App.Version+" · 后台版本："+backendVersion;
             if(startingAfterUpdate&&App.Flag(value,"running")&&(App.Worker||App.Flag(value,"responsive"))&&UpdateService.BackendMatchesRelease(backendVersion,App.Version)) {
                 App.UpdateReport("backend_start","completed",backendVersion);startingAfterUpdate=false;
             }
+            string concise=App.Text(value,"node_id","Worker")+" · "+stateLabel;
+            if(availability!=null)concise+="\n"+DesktopRuntime.ComputeState(value).Split('；')[0];
+            if(state!="online"&&state!="running"&&state!="stopped")concise+="\n"+App.Text(value,"detail");
+            SetWorkerSummary(displayText,concise);
             lastLog=App.Text(value,"log_path");
             if(App.Worker) {
                 object raw;if(value.TryGetValue("candidates",out raw)&&raw is IList) foreach(object item in (IList)raw) {

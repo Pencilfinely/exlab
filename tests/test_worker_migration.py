@@ -61,6 +61,65 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             migration.registry(item, 'expman-worker-registry')
 
+    def container(self, name='other-app', mounts=None, labels=None, running=True):
+        return {'Id': 'id-' + name, 'Name': '/' + name, 'State': {'Running': running},
+                'Config': {'Labels': labels}, 'Mounts': mounts or []}
+
+    def test_unrelated_desktop_containers_remain_running_and_do_not_block(self):
+        items = [self.registry(), self.container('redis'),
+                 self.container('database', [{'Type': 'volume', 'Name': 'postgres-data'}]),
+                 self.container('windows-app', [{'Type': 'bind', 'Source': '/run/desktop/mnt/host/c/data'}]),
+                 self.container('worker-job', labels={'expman.node': 'original', 'expman.job': 'job-1'})]
+        before = json.dumps(items)
+        with patch.object(migration, 'docker') as docker:
+            owned, preserved = migration.container_plan(items, 'original')
+            docker.assert_not_called()
+        self.assertEqual([r['name'] for r in owned], ['expman-worker-registry'])
+        self.assertEqual([r['name'] for r in preserved], ['redis', 'database', 'windows-app'])
+        self.assertEqual(json.dumps(items), before)
+
+    def test_blockers_name_containers_and_actual_shared_resource(self):
+        items = [self.container('notebook', [{'Type': 'bind', 'Source': '/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu/hash'}]),
+                 self.container('registry-writer', [{'Type': 'volume', 'Name': 'expman-worker-registry-data'}])]
+        with self.assertRaises(ValueError) as raised:
+            migration.container_plan(items, 'original')
+        self.assertIn('notebook', str(raised.exception))
+        self.assertIn('registry-writer', str(raised.exception))
+        self.assertIn('Linux/WSL', str(raised.exception))
+        self.assertIn('镜像仓库卷', str(raised.exception))
+
+    def test_stopped_containers_and_windows_drives_are_allowed_but_unknown_binds_are_not(self):
+        for source in ('C:/data', '/host_mnt/d/data'):
+            self.assertEqual(len(migration.container_plan([self.container(mounts=[{'Type': 'bind', 'Source': source}])], 'original')[1]), 1)
+        for source in ('/home/user/data', '/mnt/c/data', '/var/run/docker.sock'):
+            item = self.container(mounts=[{'Type': 'bind', 'Source': source}])
+            with self.assertRaises(ValueError):
+                migration.container_plan([item], 'original')
+            item['State']['Running'] = False
+            self.assertEqual(migration.container_plan([item], 'original'), ([], []))
+
+    def test_restart_loops_and_missing_mount_inventory_are_not_ignored(self):
+        item = self.container(running=False)
+        item['State']['Restarting'] = True
+        del item['Mounts']
+        with self.assertRaisesRegex(ValueError, 'other-app'):
+            migration.container_plan([item], 'original')
+
+    def test_bind_from_another_identified_distribution_can_keep_running(self):
+        item = self.container('another-distro', [{'Type': 'bind', 'Source': '/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/Ubuntu-24.04/hash'}])
+        self.assertEqual(len(migration.container_plan([item], 'original', 'Ubuntu-22.04')[1]), 1)
+        for distribution in (None, 'Ubuntu-24.04'):
+            with self.assertRaises(ValueError):
+                migration.container_plan([item], 'original', distribution)
+
+    def test_resources_are_rechecked_immediately_before_wsl_export(self):
+        with patch.object(migration, 'same_source'), \
+                patch.object(migration, 'inspect_containers', side_effect=ValueError('new-container uses WSL')), \
+                patch.object(migration, 'idle') as idle:
+            with self.assertRaisesRegex(ValueError, 'new-container'):
+                migration.pre_export(self.job)
+            idle.assert_not_called()
+
     def test_unpinned_images_are_never_silently_replaced(self):
         ref = 'localhost:5001/runtime@sha256:' + 'b' * 64
         self.assertEqual(migration.image_refs({'profiles': [{'image': ref}]}), {ref})

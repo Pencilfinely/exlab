@@ -73,7 +73,7 @@ def registry(item, name):
              and 'REGISTRY_HTTP_DEBUG_ADDR=' in env)
     bridge = network in ('bridge', 'default') and bindings == {
         '5000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': str(port)}]}
-    if (item.get('Name') != '/' + name or item.get('Config', {}).get('Labels', {}).get('expman.component') != component
+    if (item.get('Name') != '/' + name or (item.get('Config', {}).get('Labels') or {}).get('expman.component') != component
             or len(mounts) != 1 or mounts[0].get('Type') != 'volume' or mounts[0].get('Name') != volume
             or mounts[0].get('Destination') != '/var/lib/registry' or not (local or bridge)):
         raise ValueError('镜像仓库包含自定义挂载或网络，不能自动迁移：' + name)
@@ -107,6 +107,57 @@ def docker_client_config(value):
         value['credHelpers'] = {key: helper for key, helper in value['credHelpers'].items()
                                 if helper not in ('desktop', 'desktop.exe')}
     return value
+
+
+def container_plan(containers, node_id, distribution=None):
+    """Desktop keeps running: only resources affected by our migration block it.
+
+    An unrelated named volume or Windows bind stays on Desktop. Linux/WSL
+    binds cannot be assumed independent of the distribution we will terminate.
+    Unknown inspection data fails closed, with the actual container identified.
+    """
+    registries, preserved, blockers = [], [], []
+    volumes = {value[1] for value in REGISTRIES.values()}
+    for item in containers:
+        name = item['Name'].removeprefix('/')
+        if name in REGISTRIES:
+            registries.append(registry(item, name))
+            continue
+        state = item.get('State', {})
+        if not (state.get('Running') or state.get('Restarting') or state.get('Paused')):
+            continue
+        labels = item.get('Config', {}).get('Labels') or {}
+        if labels.get('expman.node') == node_id and labels.get('expman.job'):
+            continue  # Cooperative drain + idle() checks these before export.
+        reasons = []
+        mounts = item.get('Mounts')
+        if not isinstance(mounts, list):
+            reasons.append('无法核查挂载目录')
+        for mount in mounts or []:
+            if mount.get('Type') == 'volume':
+                if mount.get('Name') in volumes:
+                    reasons.append('正在使用 Worker 镜像仓库卷')
+            elif mount.get('Type') == 'bind':
+                source = mount.get('Source', '').replace('\\', '/')
+                windows = re.match(r'^(?:/run/desktop/mnt/host/[a-z]/|/host_mnt/[a-z]/|[A-Za-z]:/)', source)
+                wsl = re.match(r'^/run/desktop/mnt/host/wsl/docker-desktop-bind-mounts/([^/]+)/', source)
+                other_distro = bool(distribution and wsl and wsl[1].casefold() != distribution.casefold())
+                if not windows and not other_distro:
+                    reasons.append('正在使用 Linux/WSL 挂载：' + source[:180])
+            elif mount.get('Type') != 'tmpfs':
+                reasons.append('挂载类型无法确认')
+        if reasons:
+            blockers.append(name + '：' + '；'.join(dict.fromkeys(reasons)))
+        else:
+            preserved.append({'id': item['Id'], 'name': name})
+    if blockers:
+        raise ValueError('请先暂停以下容器，再重试迁移：\n' + '\n'.join(blockers))
+    return registries, preserved
+
+
+def inspect_containers(endpoint, node_id):
+    ids = docker(['ps', '-aq'], endpoint).split()
+    return container_plan(objects(['inspect', *ids], endpoint) if ids else [], node_id, os.environ.get('WSL_DISTRO_NAME'))
 
 
 def inspect(service_root=None):
@@ -158,15 +209,7 @@ def inspect(service_root=None):
     info = objects(['info', '--format', '{{json .}}'], endpoint)
     if 'docker desktop' not in str(info.get('OperatingSystem', '')).lower() and info.get('Name') != 'docker-desktop':
         raise ValueError('当前已是独立 Docker；请使用“检测独立环境”直接登记开机任务。')
-    ids = docker(['ps', '-aq'], endpoint).split()
-    containers = objects(['inspect', *ids], endpoint) if ids else []
-    registries = []
-    for item in containers:
-        name = item['Name'].removeprefix('/')
-        if name in REGISTRIES:
-            registries.append(registry(item, name))
-        elif item['State']['Running'] and item.get('Config', {}).get('Labels', {}).get('expman.node') != candidate['node_id']:
-            raise ValueError('Docker 正在运行其他工作；迁移不会停止或接管它们，请完成后重试。')
+    registries, preserved = inspect_containers(endpoint, candidate['node_id'])
     refs = image_refs(config)
     image_ids = docker(['image', 'ls', '-q', '--no-trunc'], endpoint).split()
     all_images = objects(['image', 'inspect', *sorted(set(image_ids))], endpoint) if image_ids else []
@@ -186,7 +229,7 @@ def inspect(service_root=None):
                 worker_root=candidate['root'], linux_user=linux_user,
                 uid=os.getuid(), gid=os.getgid(), engine_id=info['ID'], endpoint=endpoint,
                 registries=registries, images=images, helper=helper, gpus=gpus,
-                required_bytes=required, asset_drives=sorted(drives))
+                required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved)
 
 
 def load_job(job):
@@ -340,6 +383,15 @@ def export_data(job):
                 value['images'][value['helper']], '-c', VOLUME_BACKUP], value['endpoint'], job / filename, writing=True)
         checksums[filename] = digest(job / filename)
     private_write(job / 'checksums.json', checksums)
+    return {'ready': True}
+
+
+def pre_export(job):
+    job, value = load_job(job)
+    same_source(value)
+    inspect_containers(value['endpoint'], value['node_id'])
+    if not idle(Path(value['service_root'])) or not service.install_status(value['service_root']).get('ready_for_install'):
+        raise ValueError('原节点仍有任务运行，尚未关闭 Ubuntu。')
     return {'ready': True}
 
 
@@ -529,7 +581,7 @@ def rollback(job):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('inspect', 'prepare', 'export', 'sanitize', 'restore', 'verify', 'activate', 'rollback', 'quiescent'))
+    parser.add_argument('action', choices=('inspect', 'prepare', 'export', 'pre-export', 'sanitize', 'restore', 'verify', 'activate', 'rollback', 'quiescent'))
     parser.add_argument('--job')
     parser.add_argument('--service-root')
     args = parser.parse_args(argv)
@@ -539,13 +591,13 @@ def main(argv=None):
         else:
             job, _ = load_job(args.job)
             with InstanceLock(job / 'operation.lock', timeout=60 if args.action in ('rollback', 'quiescent') else 0):
-                result = {'export': export_data, 'prepare': prepare, 'sanitize': sanitize, 'restore': restore,
+                result = {'export': export_data, 'pre-export': pre_export, 'prepare': prepare, 'sanitize': sanitize, 'restore': restore,
                           'verify': verify, 'activate': activate, 'rollback': rollback,
                           'quiescent': lambda _: {'ready': True}}[args.action](args.job)
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError) as error:
-        detail = service._redact(service._root(args.service_root), str(error))[:700]
+        detail = service._redact(service._root(args.service_root), str(error))[:4000]
         print(json.dumps({'ready': False, 'detail': detail}, ensure_ascii=False))
         return 2
 

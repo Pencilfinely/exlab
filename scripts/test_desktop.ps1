@@ -68,6 +68,22 @@ public static class DesktopBootFormTest {
                 using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-boot-preview.png"));}
                 form.Close();
             }
+            var migration=assembly.GetType("ExperimentManagerDesktop.WorkerMigrationForm");
+            using(var form=(System.Windows.Forms.Form)Activator.CreateInstance(migration,inst,null,new object[]{null,"Ubuntu-test",@"E:\Chosen backup",false},null)) {
+                form.ShowInTaskbar=false;form.Opacity=0;form.Show();System.Windows.Forms.Application.DoEvents();
+                var input=(System.Windows.Forms.TextBox)migration.GetField("password",inst).GetValue(form);input.Text="test-secret-never-save";
+                if(!input.UseSystemPasswordChar)throw new Exception("Migration password is visible.");
+                if(((System.Windows.Forms.CheckBox)migration.GetField("dedicated",inst).GetValue(form)).Checked)throw new Exception("Migration implicitly authorized WSL shutdown.");
+                if(((System.Windows.Forms.Control)migration.GetField("recover",inst).GetValue(form)).Visible||((System.Windows.Forms.Control)migration.GetField("advanced",inst).GetValue(form)).Visible)throw new Exception("Normal migration exposes recovery or advanced fields.");
+                var args=(string[])migration.GetMethod("ElevationArguments",inst).Invoke(form,null);
+                string joined=String.Join("|",args);
+                if(joined.Contains(input.Text)||!joined.Contains(@"E:\Chosen backup")||!joined.Contains("Ubuntu-test"))throw new Exception("Elevation loses choices or passes the Windows password.");
+                migration.GetMethod("ShowProgress",inst).Invoke(form,new object[]{"Please pause notebook: Linux/WSL mount"});
+                if(!((System.Windows.Forms.TextBox)migration.GetField("details",inst).GetValue(form)).Text.Contains("notebook"))throw new Exception("Migration lost the specific blocker.");
+                input.Clear();
+                using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-migration-preview.png"));}
+                form.Close();
+            }
         } finally {directory.SetValue(null,previous);}
     }
 }
@@ -200,7 +216,16 @@ public static class DesktopClientControlsTest {
             // Never show the form: Shown starts live controller/WSL actions.
             using(var form=(System.Windows.Forms.Form)System.Activator.CreateInstance(type,instanceFlags,null,new object[]{new string[0]},null)) {
                 string stop="\u505c\u7528\u5e76\u91ca\u653e Docker / WSL",old="\u91ca\u653e WSL \u5185\u5b58";
-                if(Buttons(form,stop)!=1||Buttons(form,old)!=0)throw new Exception("Client must have one combined stop/release button.");
+                if(Buttons(form,worker?"\u505c\u7528\u5e76\u91ca\u653e":stop)!=1||Buttons(form,old)!=0)throw new Exception("Client must have one combined stop/release button.");
+                if(worker) {
+                    var tabs=(System.Windows.Forms.TabControl)type.GetField("workerTabs",instanceFlags).GetValue(form);
+                    if(tabs.TabPages.Count!=3||Buttons(tabs.TabPages[0],"\u542f\u7528\u7b97\u529b")!=1||Buttons(tabs.TabPages[0],"\u663e\u5361\u8bbe\u7f6e")!=0)throw new Exception("Worker overview exposes advanced settings or lost activation.");
+                    type.GetMethod("Display",instanceFlags).Invoke(form,new object[]{new System.Collections.Generic.Dictionary<string,object>{{"status","online"},{"node_id","fixture-node"},{"detail","verbose diagnostic fixture"},{"installed_version","0.5.29"}}});
+                    var headline=(System.Windows.Forms.Label)type.GetField("summary",instanceFlags).GetValue(form);
+                    var details=(System.Windows.Forms.TextBox)type.GetField("workerDetails",instanceFlags).GetValue(form);
+                    if(headline.Text.Contains("verbose")||!details.Text.Contains("verbose")||!details.Text.Contains("0.5.29"))throw new Exception("Compact status lost diagnostic details.");
+                    if(details.Lines.Length<3)throw new Exception("Diagnostic details must keep their line breaks.");
+                }
                 var tray=(System.Windows.Forms.NotifyIcon)type.GetField("tray",instanceFlags).GetValue(form);
                 int stops=0,oldEntries=0;
                 foreach(System.Windows.Forms.ToolStripItem item in tray.ContextMenuStrip.Items) {
@@ -211,7 +236,7 @@ public static class DesktopClientControlsTest {
                 if(startup.Parent==null)throw new Exception("Login startup control has no settings surface.");
                 bool settingsEntry=false;
                 foreach(System.Windows.Forms.ToolStripItem item in tray.ContextMenuStrip.Items)
-                    if(item.Text=="\u8bbe\u7f6e \u00b7 \u5f00\u673a\u81ea\u542f\u4e0e\u66f4\u65b0")settingsEntry=true;
+                    if(item.Text==(worker?"\u8bbe\u7f6e":"\u8bbe\u7f6e \u00b7 \u5f00\u673a\u81ea\u542f\u4e0e\u66f4\u65b0"))settingsEntry=true;
                 if(!settingsEntry)throw new Exception("Tray has no discoverable startup/settings entry.");
                 if(!worker) {
                     type.GetMethod("Display",instanceFlags).Invoke(form,new object[]{new System.Collections.Generic.Dictionary<string,object>{{"status","unresponsive"},{"detail","HTTP 401: wrong workspace"}}});

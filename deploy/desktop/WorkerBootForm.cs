@@ -10,17 +10,15 @@ namespace ExperimentManagerDesktop {
         readonly TextBox distribution=new TextBox {Width=340},linuxUser=new TextBox {Width=340},serviceRoot=new TextBox {Width=580};
         readonly TextBox password=new TextBox {Width=340,UseSystemPasswordChar=true};
         readonly Label status=new Label {AutoSize=true,MaximumSize=new Size(640,0)};
-        readonly Button enable=new Button {Text="启用未登录开机启动",AutoSize=true,Enabled=false};
+        readonly Button enable=new Button {Text="开启",AutoSize=true,Enabled=false};
         readonly CheckBox dedicated=new CheckBox {Text="此 Ubuntu 专供 Worker 使用，释放资源时允许关闭它",AutoSize=true};
         WorkerBootConfig checkedConfig;bool working;
         internal WorkerBootForm(string ownerSid=null) {
             if(ownerSid!=null&&ownerSid!=WindowsIdentity.GetCurrent().User.Value)throw new InvalidOperationException("请使用拥有 WSL 的同一 Windows 账户提升权限，不能切换管理员账户。");
-            Text="Worker · 无人值守启动";Size=new Size(740,650);MinimumSize=Size;Font=new Font("Microsoft YaHei UI",10);StartPosition=FormStartPosition.CenterParent;
+            Text="Worker · 开机启动设置";Size=new Size(740,650);MinimumSize=Size;Font=new Font("Microsoft YaHei UI",10);StartPosition=FormStartPosition.CenterParent;
             var layout=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(20)};Controls.Add(layout);
-            layout.Controls.Add(new Label {Text="开机运行算力后台，无需登录 Windows",AutoSize=true,Font=new Font(Font.FontFamily,15,FontStyle.Bold)});
-            layout.Controls.Add(new Label {Text="已有 Docker Desktop 节点可使用一键迁移，自动准备环境并保留原节点数据。\n下方手动检测适用于已经准备好独立 Docker 的环境。",AutoSize=true});
-            var migrate=new Button {Text="一键迁移并启用（推荐）…",AutoSize=true};layout.Controls.Add(migrate);
-            migrate.Click+=(s,e)=>{using(var form=new WorkerMigrationForm())form.ShowDialog(this);distribution.Text=App.Text(App.ReadSettings(),"distribution");};
+            layout.Controls.Add(new Label {Text="开机启动设置",AutoSize=true,Font=new Font(Font.FontFamily,15,FontStyle.Bold)});
+            layout.Controls.Add(new Label {Text="已有独立环境：检测通过后开启。",AutoSize=true});
             Add(layout,"WSL 发行版",distribution);Add(layout,"Linux 普通用户名",linuxUser);Add(layout,"Worker 服务目录（可留空）",serviceRoot);
             Add(layout,"Windows 账户 "+WindowsIdentity.GetCurrent().Name+" 的密码（不是 PIN）",password);
             layout.Controls.Add(dedicated);
@@ -64,12 +62,12 @@ namespace ExperimentManagerDesktop {
                 } finally {WorkerBoot.ResumeAfterUpdate();}
                 status.Text="开机任务已登记，后台正在启动。需重启并保持未登录，从另一设备验收 GPU 任务。";
             });
-            var disable=new Button {Text="关闭开机启动",AutoSize=true};actions.Controls.Add(disable);disable.Click+=async(s,e)=>await Execute(async()=>{
+            var disable=new Button {Text="关闭自启动",AutoSize=true};disable.Visible=saved.Enabled;actions.Controls.Add(disable);disable.Click+=async(s,e)=>await Execute(async()=>{
                 if(!await EnsureElevation())return;
                 WorkerBoot.DisableAutostart();status.Text="已关闭下次开机启动；当前运行和节点数据保留。";
             });
-            var help=new Button {Text="环境准备与迁移说明",AutoSize=true};actions.Controls.Add(help);help.Click+=(s,e)=>App.OpenFile(System.IO.Path.Combine(App.Package,"docs","UNATTENDED-WORKER.zh-CN.md"));
-            layout.Controls.Add(status);status.Text=saved.Enabled?"已配置无人值守模式；可重新检测、更新账户密码或关闭开机启动。":"尚未登记任务。环境检测通过后才能开启。";FormClosed+=(s,e)=>password.Clear();
+            var help=new Button {Text="帮助",AutoSize=true};actions.Controls.Add(help);help.Click+=(s,e)=>App.OpenFile(System.IO.Path.Combine(App.Package,"docs","UNATTENDED-WORKER.zh-CN.md"));
+            layout.Controls.Add(status);status.Text=saved.Enabled?"已配置无人值守模式；可重新检测、更新账户密码或关闭自启动。":"尚未登记任务。环境检测通过后才能开启。";FormClosed+=(s,e)=>password.Clear();
             FormClosing+=(s,e)=>{if(working){e.Cancel=true;status.Text="正在完成当前操作，请稍候。";}};
         }
         async Task<bool> EnsureElevation() {
