@@ -42,6 +42,28 @@ namespace ExperimentManagerDesktop {
             }
             throw new IOException("找不到此 Ubuntu 的磁盘位置。");
         }
+        internal static string DistributionId(string distribution) {
+            using(var root=Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Lxss"))if(root!=null)foreach(var name in root.GetSubKeyNames())using(var key=root.OpenSubKey(name))
+                if(String.Equals(Convert.ToString(key.GetValue("DistributionName")),distribution,StringComparison.OrdinalIgnoreCase))return name;
+            throw new IOException("找不到此 Ubuntu 的登记信息。");
+        }
+        internal static async Task<string> PreviewSpace(string distribution,string dataFolder,string backupFolder) {
+            return await Task.Run(()=>{var manifest=Helper(distribution,null,"inspect");var plan=WorkerDataMove.Plan(distribution,dataFolder,backupFolder,Convert.ToInt64(manifest["required_bytes"]));
+                string detail=plan.Description;try{CheckMoveWindow(plan,manifest);}catch(Exception error){detail+="\n"+error.Message;}return detail;});
+        }
+        static string Desktop(params string[] args){return App.RunWithTimeout(150000,DesktopRuntime.DockerCli,args);}
+        static void CheckMoveWindow(WorkerDataPlan plan,Dictionary<string,object> manifest) {
+            if(!plan.Moving)return;
+            WorkerDataMove.RequireWindow(plan.Distribution,Management("--list","--running","--quiet"),true);
+            object raw;var names=new List<string>();
+            if(manifest.TryGetValue("preserved_containers",out raw)&&raw is IList)foreach(Dictionary<string,object> item in (IList)raw)names.Add(App.Text(item,"name"));
+            if(names.Count>0)throw new IOException("改盘会短暂重启 Docker，请先结束这些容器的工作："+String.Join("、",names)+"。保留当前数据位置则无需重启 Docker。");
+            try {Desktop("desktop","stop","--help");Desktop("desktop","start","--help");}
+            catch(Exception){throw new IOException("改盘需要支持 desktop start/stop 的 Docker Desktop，请先更新 Docker Desktop。");}
+        }
+        static void ResumeDesktop(Dictionary<string,object> job) {
+            WorkerDataMove.ResumeDesktop(App.Text(App.Read(Path.Combine(App.Text(job,"path"),"manifest.json")),"engine_id"),job,()=>App.Write(ActivePath,job),Desktop);
+        }
         static void PrivateDirectory(string path) {
             Directory.CreateDirectory(path);
             var acl=new DirectorySecurity();acl.SetAccessRuleProtection(true,false);
@@ -49,8 +71,15 @@ namespace ExperimentManagerDesktop {
                 acl.AddAccessRule(new FileSystemAccessRule(sid,FileSystemRights.FullControl,InheritanceFlags.ContainerInherit|InheritanceFlags.ObjectInherit,PropagationFlags.None,AccessControlType.Allow));
             new DirectoryInfo(path).SetAccessControl(acl);
         }
-        static string Run(int timeout,params string[] args) {
-            var info=new ProcessStartInfo("wsl.exe",App.Arguments(args)){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8};
+        internal static string Management(params string[] args) {return RunEncoded(86400000,Encoding.Unicode,args);}
+        internal static bool SuccessfulWslReply(int code,string[] args,string text) {
+            // WSL 2.7 prints valid --help text but returns -1. Only this exact
+            // read-only query has that exception; move failures remain failures.
+            return code==0||(code==-1&&args.Length==1&&args[0]=="--help"&&text.Contains("--manage")&&text.Contains("--move"));
+        }
+        static string Run(int timeout,params string[] args) {return RunEncoded(timeout,Encoding.UTF8,args);}
+        static string RunEncoded(int timeout,Encoding encoding,params string[] args) {
+            var info=new ProcessStartInfo("wsl.exe",App.Arguments(args)){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=encoding,StandardErrorEncoding=encoding};
             using(var process=new Process {StartInfo=info}) {
                 // Bound apt/export diagnostics; never put command output containing
                 // node configuration or registry credentials into the UI/log.
@@ -64,9 +93,10 @@ namespace ExperimentManagerDesktop {
                 // roll back while a detached operation can still mutate data.
                 if(!process.WaitForExit(timeout))process.WaitForExit();
                 process.WaitForExit();string value=output.ToString().Trim();
-                if(process.ExitCode!=0) {
+                if(!SuccessfulWslReply(process.ExitCode,args,value)) {
                     if(value.StartsWith("{")) {try {throw new IOException(App.Text(App.Json.Deserialize<Dictionary<string,object>>(value),"detail","迁移操作失败。"));}catch(ArgumentException){}}
-                    throw new IOException("WSL 迁移步骤失败（退出码 "+process.ExitCode+"）。原数据保留；请检查网络、WSL 和磁盘空间后重试。");
+                    throw new IOException("WSL 迁移步骤失败（退出码 "+process.ExitCode+"）。原数据保留；请检查网络、WSL 和磁盘空间后重试。"+
+                        (encoding==Encoding.Unicode&&!String.IsNullOrEmpty(value)?"\n"+value.Substring(Math.Max(0,value.Length-1024)):""));
                 }
                 return value;
             }
@@ -172,6 +202,10 @@ namespace ExperimentManagerDesktop {
                 catch(ArgumentException){}
             }
             await WorkerBoot.SuspendForUpdate();
+            if(App.Flag(job,"move_started")) {
+                job["data_moved"]=WorkerDataMove.VerifyLocation(job,WorkerDisk.RegisteredDisk,DistributionId);App.Write(ActivePath,job);
+            }
+            await Task.Run(()=>ResumeDesktop(job));
             Save(job,"正在恢复原节点，保留备份…",progress);
             await Task.Run(()=>Helper(App.Text(job,"source"),App.Text(job,"user"),"quiescent",App.Text(job,"path")));
             if(App.Text(job,"mode")=="in_place"&&File.Exists(Path.Combine(App.Text(job,"path"),"engine-before.json"))) {
@@ -184,7 +218,7 @@ namespace ExperimentManagerDesktop {
             await Task.Run(()=>RemoveIncompleteClone(job));
             RestoreWindows(App.Text(job,"path"));
             var restored=await Task.Run(()=>Helper(App.Text(job,"source"),App.Text(job,"user"),"rollback",App.Text(job,"path")));
-            job["finished"]=true;Save(job,"已恢复原节点的配置和接单策略；备份保留。",progress);
+            job["finished"]=true;Save(job,"已恢复原节点的配置和接单策略；备份保留。"+(App.Flag(job,"data_moved")?"\n数据保留在："+Path.GetDirectoryName(App.Text(job,"move_to")):""),progress);
             WorkerBoot.ResumeAfterUpdate();
             if(App.Flag(restored,"was_running")) {
                 var host=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));
@@ -200,8 +234,8 @@ namespace ExperimentManagerDesktop {
                 }
             }
         }
-        internal static async Task Migrate(string source,string folder,string password,IProgress<string> progress) {using(OwnOperation()){await MigrateCore(source,folder,password,progress);}}
-        static async Task MigrateCore(string source,string folder,string password,IProgress<string> progress) {
+        internal static async Task Migrate(string source,string folder,string password,IProgress<string> progress,string dataFolder=null) {using(OwnOperation()){await MigrateCore(source,folder,password,progress,dataFolder);}}
+        static async Task MigrateCore(string source,string folder,string password,IProgress<string> progress,string dataFolder) {
             cancelRequested=false;
             if(Pending)throw new IOException("上次迁移尚未结束，请先恢复原节点或启动迁移后的后台。");
             if(WorkerBoot.Managed)throw new IOException("此节点已配置无人值守模式，无需重复迁移。");
@@ -214,7 +248,9 @@ namespace ExperimentManagerDesktop {
             progress.Report("正在检测原节点、镜像、数据位置与磁盘空间…");
             var manifest=await Task.Run(()=>Helper(source,null,"inspect"));
             if(cancelRequested)throw new OperationCanceledException("已取消检测，原环境保持原状。");
-            CheckSpace(folder,64*1024*1024);CheckSpace(DistributionPath(source),Convert.ToInt64(manifest["required_bytes"]));
+            CheckSpace(folder,64*1024*1024);
+            var dataPlan=await Task.Run(()=>WorkerDataMove.Plan(source,dataFolder,folder,Convert.ToInt64(manifest["required_bytes"])));dataPlan.RequireSpace();
+            await Task.Run(()=>CheckMoveWindow(dataPlan,manifest));
             foreach(object drive in (IEnumerable)manifest["asset_drives"]) {
                 var disk=new DriveInfo(Convert.ToString(drive)+@":\");
                 if(!disk.IsReady||disk.DriveType!=DriveType.Fixed)throw new IOException("数据集使用的磁盘不支持未登录运行："+disk.Name);
@@ -229,9 +265,18 @@ namespace ExperimentManagerDesktop {
                 await WorkerBoot.SuspendForUpdate();
                 Save(job,"1/8 等待当前实验结束…",progress);
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"prepare",path));CheckCancelled(job);
-                manifest=App.Read(Path.Combine(path,"manifest.json"));CheckSpace(folder,64*1024*1024);CheckSpace(DistributionPath(source),Convert.ToInt64(manifest["required_bytes"]));
+                manifest=App.Read(Path.Combine(path,"manifest.json"));CheckSpace(folder,64*1024*1024);
+                dataPlan=await Task.Run(()=>WorkerDataMove.Plan(source,dataFolder,folder,Convert.ToInt64(manifest["required_bytes"])));dataPlan.RequireSpace();
                 Save(job,"2/8 保存配置…",progress);
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"pre-export",path));CheckCancelled(job);
+                if(dataPlan.Moving) {
+                    Save(job,"2/8 暂停空闲 Docker，释放磁盘…",progress);
+                    await Task.Run(()=>WorkerDataMove.PauseDesktop(source,App.Text(manifest,"engine_id"),job,()=>App.Write(ActivePath,job),Management,Desktop));CheckCancelled(job);
+                    Save(job,"2/8 移动 Ubuntu 数据到 "+dataPlan.TargetFolder+"…",progress);
+                    await Task.Run(()=>WorkerDataMove.Move(dataPlan,job,()=>App.Write(ActivePath,job),Management,WorkerDisk.RegisteredDisk,DistributionId));CheckCancelled(job);
+                    await Task.Run(()=>ResumeDesktop(job));
+                    CheckSpace(DistributionPath(source),Convert.ToInt64(manifest["required_bytes"]));
+                }
                 Save(job,"3/8 准备独立引擎…",progress);
                 await Task.Run(()=>Run(7200000,"-d",target,"-u","root","--exec","bash",LinuxPath(target,App.Package)+"/Prepare-Isolated-Engine.sh",id,LinuxPath(target,path)));
                 CheckCancelled(job);
@@ -262,7 +307,7 @@ namespace ExperimentManagerDesktop {
                 catch(Exception ex){cleanup="旧引擎清理待重试："+ex.Message;}
                 job["cleanup_detail"]=cleanup;Save(job,"迁移完成。"+cleanup,progress);
                 WorkerBoot.ResumeAfterUpdate();
-                progress.Report("已完成。实验数据原位保留。"+cleanup+"\n请重启并保持未登录，从主控验证一次 GPU 任务。\n配置备份："+path);
+                progress.Report("已完成。"+cleanup+"\n数据位置："+DistributionPath(source)+"\n请重启并保持未登录，从主控验证一次 GPU 任务。\n配置备份："+path);
             } catch(Exception original) {failure=original;} finally {password=null;}
             if(failure!=null) {
                 if(App.Flag(job,"committed"))throw new IOException("迁移已完成交接；后台启动需重试，不能恢复旧数据库。"+failure.Message,failure);

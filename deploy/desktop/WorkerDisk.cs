@@ -17,6 +17,47 @@ namespace ExperimentManagerDesktop {
         [StructLayout(LayoutKind.Sequential)] struct StorageType {public uint DeviceId;public Guid VendorId;}
         [DllImport("virtdisk.dll",CharSet=CharSet.Unicode)] static extern uint OpenVirtualDisk(ref StorageType type,string path,uint access,uint flags,IntPtr parameters,out SafeFileHandle handle);
         [DllImport("virtdisk.dll")] static extern uint CompactVirtualDisk(SafeFileHandle handle,uint flags,IntPtr parameters,IntPtr overlapped);
+        static byte[] DiskRange(FileStream stream,long offset,int length) {
+            if(offset<0||offset>stream.Length-length)throw new IOException("虚拟磁盘元数据越界，已停止改盘。");
+            stream.Position=offset;var bytes=new byte[length];int count=0;
+            while(count<length){int read=stream.Read(bytes,count,length-count);if(read==0)throw new EndOfStreamException();count+=read;}
+            return bytes;
+        }
+        static Guid DiskGuid(byte[] bytes,int offset) {var value=new byte[16];Array.Copy(bytes,offset,value,0,16);return new Guid(value);}
+        internal static string Identifier(string path) {
+            // WSL retains an attached VHD handle even after --terminate. Shared,
+            // read-only access avoids forcing unrelated distributions offline.
+            // MS-VHDX 2.2.3 / 2.6: read only the persistent Virtual Disk ID;
+            // unlike a header hash it survives boot and normal disk growth.
+            using(var stream=new FileStream(DirectPath(path),FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) {
+                var ascii=System.Text.Encoding.ASCII;
+                if(ascii.GetString(DiskRange(stream,0,8))!="vhdxfile")throw new IOException("不是有效的 VHDX 磁盘。");
+                byte[] table=DiskRange(stream,192*1024,65536);
+                uint count=BitConverter.ToUInt32(table,8);
+                if(ascii.GetString(table,0,4)!="regi"||count>2047)throw new IOException("虚拟磁盘区域表无效。");
+                long metadata=0;uint regionLength=0;
+                for(int i=0;i<count;i++) {
+                    int entry=16+i*32;
+                    if(DiskGuid(table,entry)!=new Guid("8B7CA206-4790-4B9A-B8FE-575F050F886E"))continue;
+                    if(metadata!=0)throw new IOException("虚拟磁盘元数据区域重复。");
+                    metadata=BitConverter.ToInt64(table,entry+16);regionLength=BitConverter.ToUInt32(table,entry+24);
+                    if(metadata<1048576||metadata%1048576!=0||regionLength<1048576||regionLength%1048576!=0||metadata>stream.Length-regionLength)throw new IOException("虚拟磁盘元数据区域无效。");
+                }
+                if(metadata==0)throw new IOException("找不到虚拟磁盘元数据。");
+                table=DiskRange(stream,metadata,65536);count=BitConverter.ToUInt16(table,10);
+                if(ascii.GetString(table,0,8)!="metadata"||count>2047)throw new IOException("虚拟磁盘元数据表无效。");
+                Guid id=Guid.Empty;
+                for(int i=0;i<count;i++) {
+                    int entry=32+i*32;
+                    if(DiskGuid(table,entry)!=new Guid("BECA12AB-B2E6-4523-93EF-C309E000C746"))continue;
+                    uint offset=BitConverter.ToUInt32(table,entry+16),length=BitConverter.ToUInt32(table,entry+20);
+                    if(id!=Guid.Empty||offset<65536||length!=16||offset>regionLength-16)throw new IOException("虚拟磁盘身份记录无效。");
+                    id=new Guid(DiskRange(stream,metadata+offset,16));
+                }
+                if(id==Guid.Empty)throw new IOException("找不到虚拟磁盘身份。");
+                return id.ToString("D");
+            }
+        }
         [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string name,uint access,uint share,IntPtr security,uint disposition,uint flags,IntPtr template);
         [StructLayout(LayoutKind.Sequential)] struct Disposition {[MarshalAs(UnmanagedType.U1)]public bool Delete;}
         [DllImport("kernel32.dll",SetLastError=true)] static extern bool SetFileInformationByHandle(SafeFileHandle handle,int type,ref Disposition info,uint size);

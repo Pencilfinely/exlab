@@ -26,8 +26,12 @@ $commands = Join-Path $sandbox 'create.txt'
 & diskpart /s $commands
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $disk -PathType Leaf)) { throw 'Scratch VHD creation failed.' }
 $assembly = [Reflection.Assembly]::LoadFrom($exe)
+$identityMethod = $assembly.GetType('ExperimentManagerDesktop.WorkerDisk').GetMethod('Identifier', [Reflection.BindingFlags]'Static,NonPublic')
 $method = $assembly.GetType('ExperimentManagerDesktop.WorkerDisk').GetMethod('CompactFile', [Reflection.BindingFlags]'Static,NonPublic')
-Add-Type -TypeDefinition 'public static class ExLabVhdFixture { public static void Compact(System.Reflection.MethodInfo method,string path) { method.Invoke(null,new object[]{path}); } }'
+Add-Type -TypeDefinition 'public static class ExLabVhdFixture { public static void Compact(System.Reflection.MethodInfo method,string path) { method.Invoke(null,new object[]{path}); } public static string Identity(System.Reflection.MethodInfo method,string path) { return (string)method.Invoke(null,new object[]{path}); } }'
+$identityBefore = [ExLabVhdFixture]::Identity($identityMethod,[string]$disk)
 [ExLabVhdFixture]::Compact($method, [string]$disk)
 if (-not (Test-Path -LiteralPath $disk -PathType Leaf)) { throw 'Compaction removed its disk.' }
+$copy=Join-Path $sandbox 'copied.vhdx';Copy-Item -LiteralPath $disk -Destination $copy
+if($identityBefore -ne [ExLabVhdFixture]::Identity($identityMethod,[string]$copy)){throw 'Disk identity changed after compaction/copy.'}
 Write-Output 'PASS native VHDX open/compact/close on a newly created, never-attached scratch disk.'

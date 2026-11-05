@@ -15,29 +15,36 @@ namespace ExperimentManagerDesktop {
         internal static LinkLabel Link(string text,Action action) {var link=new LinkLabel {Text=text,AutoSize=true,LinkColor=Blue,Margin=new Padding(0,8,16,8)};link.LinkClicked+=(s,e)=>action();return link;}
     }
     internal sealed class WorkerMigrationForm:Form {
-        readonly TextBox source=new TextBox {Width=590},folder=new TextBox {Width=590};
+        readonly TextBox source=new TextBox {Width=590},folder=new TextBox {Width=590},dataFolder=new TextBox {Width=590};
         readonly TextBox password=new TextBox {Width=400,UseSystemPasswordChar=true};
         readonly Label status=WorkerUi.Copy("",620);
-        readonly CheckBox dedicated=new CheckBox {Text="允许迁移期间关闭原 Ubuntu（请先保存其中的工作）",AutoSize=true};
+        readonly CheckBox dedicated=new CheckBox {Text="允许关闭 Ubuntu；改盘时重启空闲 Docker / WSL",AutoSize=true};
         readonly Button start=new Button {Text="迁移并开启"},recover=new Button {Text="恢复原节点"},cancel=new Button {Text="取消迁移",Visible=false};
         readonly TextBox details=new TextBox {Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Width=620,Height=130,Visible=false,BorderStyle=BorderStyle.FixedSingle};
         readonly ProgressBar progress=new ProgressBar {Width=620,Height=6,Maximum=8,Visible=false};
         readonly FlowLayoutPanel inputs=WorkerUi.Stack(620),advanced=WorkerUi.Stack(620);
         bool working; readonly bool admin;
-        internal WorkerMigrationForm(string ownerSid=null,string selectedSource=null,string selectedFolder=null,bool confirmed=false) {
+        internal WorkerMigrationForm(string ownerSid=null,string selectedSource=null,string selectedFolder=null,bool confirmed=false,string selectedDataFolder=null) {
             if(ownerSid!=null&&ownerSid!=WindowsIdentity.GetCurrent().User.Value)throw new IOException("请使用原 Windows 账户授权。");
-            Text="Worker · 开机启动";Size=new Size(720,640);MinimumSize=new Size(700,540);StartPosition=FormStartPosition.CenterParent;Font=new Font("Microsoft YaHei UI",10);BackColor=Color.White;ForeColor=WorkerUi.Ink;
+            Text="Worker · 开机启动";Size=new Size(720,740);MinimumSize=new Size(700,540);StartPosition=FormStartPosition.CenterParent;Font=new Font("Microsoft YaHei UI",10);BackColor=Color.White;ForeColor=WorkerUi.Ink;
             var panel=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(28)};Controls.Add(panel);
             panel.Controls.Add(WorkerUi.Copy("开机运行，无需登录",620,true));
-            panel.Controls.Add(WorkerUi.Copy("数据原位保留，切换独立引擎。验证通过后回收旧引擎中的副本。",620));
+            panel.Controls.Add(WorkerUi.Copy("可将 Ubuntu、镜像和实验移到其他盘，再开启独立引擎。",620));
             source.Text=selectedSource??App.Text(App.ReadSettings(),"distribution");
             if(String.IsNullOrWhiteSpace(source.Text)) {
                 var choices=Array.FindAll(App.RegisteredDistributions(),n=>!n.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase));
                 if(choices.Length==1)source.Text=choices[0];
             }
-            folder.Text=selectedFolder??WorkerMigration.SuggestedFolder();
+            folder.Text=selectedFolder??Path.Combine(WorkerMigration.SuggestedFolder(),"MigrationBackups");
+            dataFolder.Text=selectedDataFolder??WorkerDataMove.Suggested(source.Text);
             panel.Controls.Add(inputs);
             var selection=WorkerUi.Copy("环境："+(source.Text.Length>0?source.Text:"待选择"),620);inputs.Controls.Add(selection);
+            Add(inputs,"Worker 数据位置",dataFolder);
+            var diskActions=new FlowLayoutPanel {AutoSize=true,MaximumSize=new Size(620,0)};
+            var chooseData=new Button {Text="选择数据目录"};var checkSpace=new Button {Text="检测空间"};
+            foreach(var button in new[]{chooseData,checkSpace}){WorkerUi.Button(button);diskActions.Controls.Add(button);}inputs.Controls.Add(diskActions);
+            chooseData.Click+=(s,e)=>{using(var dialog=new FolderBrowserDialog {Description="选择空目录或创建新目录，用于 Ubuntu、镜像和实验数据",SelectedPath=dataFolder.Text})if(dialog.ShowDialog(this)==DialogResult.OK)dataFolder.Text=dialog.SelectedPath;};
+            checkSpace.Click+=async(s,e)=>await Execute(async()=>{ShowProgress("正在检测数据位置和空间…");ShowProgress(await WorkerMigration.PreviewSpace(source.Text.Trim(),dataFolder.Text.Trim(),folder.Text.Trim()));},false);
             inputs.Controls.Add(WorkerUi.Link("环境与配置备份位置",()=>advanced.Visible=!advanced.Visible));
             Add(advanced,"原 Ubuntu",source);Add(advanced,"配置备份目录",folder);
             var browse=new Button {Text="选择目录"};WorkerUi.Button(browse);advanced.Controls.Add(browse);
@@ -61,7 +68,7 @@ namespace ExperimentManagerDesktop {
                 if(WorkerBoot.Managed&&!WorkerMigration.Pending){WorkerBoot.ResumeAfterUpdate();ShowProgress("已请求启动后台。");return;}
                 if(!await Elevate())return;
                 if(!dedicated.Checked)throw new IOException("请确认允许暂时关闭原 Ubuntu。");
-                await WorkerMigration.Migrate(source.Text.Trim(),folder.Text.Trim(),password.Text,new Progress<string>(ShowProgress));
+                await WorkerMigration.Migrate(source.Text.Trim(),folder.Text.Trim(),password.Text,new Progress<string>(ShowProgress),dataFolder.Text.Trim());
             },true);
             recover.Click+=async(s,e)=>await Execute(async()=>{if(await Elevate())await WorkerMigration.Recover(new Progress<string>(ShowProgress));},false);
             cancel.Click+=(s,e)=>{WorkerMigration.Cancel();cancel.Enabled=false;ShowProgress("正在取消，当前步骤结束后恢复原节点。");};
@@ -81,7 +88,7 @@ namespace ExperimentManagerDesktop {
             else {status.Text=text.Length>600?text.Substring(0,600)+"…（查看详情）":text;}
         }
         static void Add(Control parent,string label,Control field){parent.Controls.Add(WorkerUi.Copy(label,620));parent.Controls.Add(field);}
-        internal string[] ElevationArguments(){return new[]{"--migration-settings","--owner-sid",WindowsIdentity.GetCurrent().User.Value,"--migration-source",source.Text,"--migration-folder",folder.Text,"--migration-confirmed",dedicated.Checked?"yes":"no"};}
+        internal string[] ElevationArguments(){return new[]{"--migration-settings","--owner-sid",WindowsIdentity.GetCurrent().User.Value,"--migration-source",source.Text,"--migration-folder",folder.Text,"--migration-data-folder",dataFolder.Text,"--migration-confirmed",dedicated.Checked?"yes":"no"};}
         async Task<bool> Elevate() {
             if(admin)return true;
             password.Clear();
