@@ -34,6 +34,21 @@ class EngineTransactionTests(unittest.TestCase):
         self.systemctl = manager.start();self.addCleanup(manager.stop)
         manager = patch.object(engine.os, 'chown', create=True)
         manager.start();self.addCleanup(manager.stop)
+        manager = patch.object(migration, 'source_socket', side_effect=lambda endpoint: endpoint)
+        self.socket = manager.start();self.addCleanup(manager.stop)
+
+    def test_standard_desktop_socket_reaches_configuration_transaction(self):
+        self.value['endpoint'] = 'unix:///var/run/docker.sock'
+        engine.begin(self.job, self.job.name)
+        self.socket.assert_called_once_with(self.value['endpoint'])
+        self.assertTrue((self.job / 'engine-before.json').exists())
+
+    def test_invalid_source_socket_stops_before_writing_configuration(self):
+        self.socket.side_effect = ValueError('socket unavailable')
+        with self.assertRaises(ValueError):
+            engine.begin(self.job, self.job.name)
+        self.assertFalse(engine.MARKER.exists())
+        self.assertFalse((self.job / 'engine-before.json').exists())
 
     def test_existing_client_configuration_is_never_claimed_or_deleted(self):
         client = Path(self.user.pw_dir) / '.config/exlab/docker'

@@ -39,11 +39,12 @@ def main():
     run('sudo', 'systemctl', 'restart', 'docker.service')
     assert migration.containerd_store(migration.objects(['info', '--format', '{{json .}}'], source)) == (store == 'containerd')
     source_id = migration.objects(['info', '--format', '{{json .}}'], source)['ID']
-    # The source endpoint prefix emulates Desktop's independent WSL socket.
-    socket = Path('/mnt/wsl/exlab-ci/docker.sock')
-    run('sudo', 'mkdir', '-p', str(socket.parent))
-    run('sudo', 'ln', '-s', '/var/run/docker.sock', str(socket))
-    source = 'unix://' + str(socket)
+    # Keep the standard /var/run proxy path used by real Desktop integration.
+    # A synthetic /mnt/wsl prefix previously concealed the 0.6.0 regression.
+    assert migration.source_socket(source) == source
+    socket_alias = job / 'source.sock'
+    socket_alias.symlink_to('/var/run/docker.sock')
+    assert migration.source_socket('unix://' + str(socket_alias)) == 'unix://' + str(socket_alias)
     config = job / 'node.json'
     common.atomic_json(config, {'node_id': 'ci-engine', 'token': 'fixture-only', 'hub_url': 'http://127.0.0.1:1',
                                'root': str(job / 'node'), 'profiles': {}})

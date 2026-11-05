@@ -96,6 +96,7 @@ def context(job, identity):
 
 
 def begin(job, identity):
+    from .worker_migration import source_socket
     job, value, user, paths = context(job, identity)
     backup_path = job / 'engine-before.json'
     if backup_path.exists():
@@ -105,8 +106,7 @@ def begin(job, identity):
     client = Path(user.pw_dir) / '.config/exlab/docker'
     if any(path.exists() or path.is_symlink() for path in (MARKER, ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, client)):
         raise ValueError('此 Ubuntu 已有 ExLab 引擎或未完成的环境切换，请先恢复')
-    if not value['endpoint'].startswith('unix:///mnt/wsl/'):
-        raise ValueError('无法保留独立于新引擎的 Desktop socket')
+    source_socket(value['endpoint'])
     private_write(backup_path, {'job_id': identity, 'files': {str(p): capture(p) for p in paths}})
     private_write(MARKER, {'job_id': identity, 'source_engine': value['engine_id'], 'service_root': value['service_root'],
                            'linux_user': value['linux_user'], 'mode': 'in_place'})

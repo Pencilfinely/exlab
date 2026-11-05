@@ -52,6 +52,7 @@ def application_files(root=ROOT):
     files['docs/RELEASE-0.3.0-rc.2.md'] = (root / 'docs/RELEASE-0.3.0-rc.2.md').read_bytes()
     files['docs/EXPERIMENT-MATRICES.zh-CN.md'] = (root / 'docs/EXPERIMENT-MATRICES.zh-CN.md').read_bytes()
     files['docs/STORAGE.zh-CN.md'] = (root / 'docs/STORAGE.zh-CN.md').read_bytes()
+    files['docs/RELEASE-0.6.0.md'] = (root / 'docs/RELEASE-0.6.0.md').read_bytes()
     files['docs/UNATTENDED-WORKER.zh-CN.md'] = (root / 'docs/UNATTENDED-WORKER.zh-CN.md').read_bytes()
     files['mobile/README.md'] = (root / 'mobile/README.md').read_bytes()
     files['docs/RELEASE-0.5.0.md'] = (root / 'docs/RELEASE-0.5.0.md').read_bytes()

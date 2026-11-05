@@ -7,7 +7,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**桌面端当前版本：0.6.0 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.6.0.md)
+**桌面端当前版本：0.6.1 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.6.1.md)
 
 Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及默认关闭的自动更新。0.5.10 起，Windows Center、Windows Worker 和 Ubuntu Worker 的手动及自动更新均只交接管理进程；Docker 实验继续运行，原任务队列和待回传数据在重启后接续。在原服务目录运行 `bash Update-Worker.sh`，加 `--auto enable` 开启自动更新。[Ubuntu 更新命令](docs/OPERATIONS.zh-CN.md#ubuntu一条命令更新与可选自动更新)。
 

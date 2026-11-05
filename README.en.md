@@ -7,7 +7,7 @@ Mobile monitoring: `/mobile/` provides a shared phone UI with revocable read-onl
 Manage GPU experiments, computers and algorithm projects in one application window.
 Choose an algorithm's original root folder, review discovered parameters, publish it and send experiments to your workers. Keep the original source unchanged.
 
-**Desktop version: 0.6.0. Monitor APK: 0.5.22.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.6.0 release notes](docs/RELEASE-0.6.0.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
+**Desktop version: 0.6.1. Monitor APK: 0.5.22.** ExLab Center and ExLab Worker are separate applications. Install both on a computer that should manage experiments and contribute its GPU. See the [0.6.1 release notes](docs/RELEASE-0.6.1.md). Monitor restores pairing on launch, supports long-term revocable device access and includes an Android in-app updater. The APK retains its original signing identity for in-place updates.
 
 0.6.0 adds verified storage cleanup, in-place migration without cloning Ubuntu, bounded history scans, and quieter idle polling. See the [storage rules](docs/STORAGE.zh-CN.md).
 

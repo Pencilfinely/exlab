@@ -63,6 +63,36 @@ def containerd_store(info):
     return ['driver-type', 'io.containerd.snapshotter.v1'] in (info.get('DriverStatus') or [])
 
 
+def source_socket(endpoint):
+    """Desktop may proxy a real socket at /run; its path is not its identity."""
+    environment(endpoint)
+    try:
+        socket = Path(endpoint[7:]).resolve(strict=True)
+        if not socket.is_socket():
+            raise ValueError('Docker 连接不是 Unix socket：' + endpoint)
+    except OSError as error:
+        raise ValueError('Docker 连接暂不可用：' + endpoint + '；请等待 Docker Desktop 就绪后重试。') from error
+    resolved = PurePosixPath(socket.as_posix())
+    reserved = ('/run/exlab-docker', '/run/exlab-containerd', '/opt/exlab/docker', '/var/lib/exlab-docker')
+    if any(resolved.is_relative_to(prefix) for prefix in reserved):
+        raise ValueError('原 Docker 连接与独立引擎目录重叠，请检查原节点连接。')
+    # Keep the user's working alias: Desktop can recreate its proxy after a WSL
+    # restart. The source engine ID is checked again before any transfer/cleanup.
+    return endpoint
+
+
+def desktop_source(endpoint, expected_engine):
+    endpoint = source_socket(endpoint)
+    info = objects(['info', '--format', '{{json .}}'], endpoint)
+    if not expected_engine or info.get('ID') != expected_engine:
+        raise ValueError('Docker 引擎身份已变化，请重新检测；原环境保留。')
+    if info.get('OSType') != 'linux':
+        raise ValueError('迁移需要 Docker 的 Linux containers 模式。')
+    if 'docker desktop' not in str(info.get('OperatingSystem', '')).lower() and info.get('Name') != 'docker-desktop':
+        raise ValueError('当前已是独立 Docker；请使用“检测独立环境”直接登记开机任务。')
+    return endpoint, info
+
+
 def registry(item, name):
     """Accept only our exact volume/network contract, never arbitrary containers."""
     component, volume, port = REGISTRIES[name]
@@ -207,12 +237,7 @@ def inspect(service_root=None):
     checked = runtime.docker_status(path.parent, prefer_saved=True)
     if not checked.get('docker_ready'):
         raise ValueError(checked.get('detail', '请先启动原 Docker Desktop。'))
-    endpoint = 'unix://' + str(Path(checked['docker_endpoint'][7:]).resolve(strict=True))
-    if not endpoint.startswith('unix:///mnt/wsl/'):
-        raise ValueError('无法识别 Docker Desktop 独立连接，请检查 WSL 集成。')
-    info = objects(['info', '--format', '{{json .}}'], endpoint)
-    if 'docker desktop' not in str(info.get('OperatingSystem', '')).lower() and info.get('Name') != 'docker-desktop':
-        raise ValueError('当前已是独立 Docker；请使用“检测独立环境”直接登记开机任务。')
+    endpoint, info = desktop_source(checked['docker_endpoint'], checked.get('docker_id'))
     registries, preserved = inspect_containers(endpoint, candidate['node_id'])
     refs = image_refs(config)
     image_ids = docker(['image', 'ls', '-q', '--no-trunc'], endpoint).split()
