@@ -271,7 +271,7 @@ namespace ExperimentManagerDesktop {
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"pre-export",path));CheckCancelled(job);
                 if(dataPlan.Moving) {
                     Save(job,"2/8 暂停空闲 Docker，释放磁盘…",progress);
-                    await Task.Run(()=>WorkerDataMove.PauseDesktop(source,App.Text(manifest,"engine_id"),job,()=>App.Write(ActivePath,job),Management,Desktop));
+                    await Task.Run(()=>WorkerDataMove.PauseDesktop(source,App.Text(manifest,"engine_id"),job,()=>App.Write(ActivePath,job),Management,Desktop));CheckCancelled(job);
                     Save(job,"2/8 移动 Ubuntu 数据到 "+dataPlan.TargetFolder+"…",progress);
                     await Task.Run(()=>WorkerDataMove.Move(dataPlan,job,()=>App.Write(ActivePath,job),Management,WorkerDisk.RegisteredDisk,DistributionId));CheckCancelled(job);
                     await Task.Run(()=>ResumeDesktop(job));
