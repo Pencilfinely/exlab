@@ -28,6 +28,10 @@ REGISTRIES = {'expman-worker-registry': ('worker-registry', 'expman-worker-regis
 LOCAL_IMAGE = re.compile(r'(?:localhost|127\.0\.0\.1):500[12]/[^\s@]+@sha256:[a-f0-9]{64}\Z')
 
 
+class MigrationBusy(ValueError):
+    """A transient occupancy condition, not a failed migration."""
+
+
 def run(args, *, env=None, timeout=60):
     value = subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
     if value.returncode:
@@ -141,7 +145,7 @@ def docker_client_config(value):
     return value
 
 
-def container_plan(containers, node_id, distribution=None):
+def container_plan(containers, node_id, distribution=None, waiting=None):
     """Desktop keeps running: only resources affected by our migration block it.
 
     An unrelated named volume or Windows bind stays on Desktop. Linux/WSL
@@ -183,16 +187,18 @@ def container_plan(containers, node_id, distribution=None):
         else:
             preserved.append({'id': item['Id'], 'name': name})
     if blockers:
-        raise ValueError('请先暂停以下容器，再重试迁移：\n' + '\n'.join(blockers))
+        if waiting is None:
+            raise MigrationBusy('等待相关容器结束：\n' + '\n'.join(blockers))
+        waiting.extend(blockers)
     return registries, preserved
 
 
-def inspect_containers(endpoint, node_id):
+def inspect_containers(endpoint, node_id, waiting=None):
     ids = docker(['ps', '-aq'], endpoint).split()
-    return container_plan(objects(['inspect', *ids], endpoint) if ids else [], node_id, os.environ.get('WSL_DISTRO_NAME'))
+    return container_plan(objects(['inspect', *ids], endpoint) if ids else [], node_id, os.environ.get('WSL_DISTRO_NAME'), waiting)
 
 
-def inspect(service_root=None):
+def inspect(service_root=None, *, defer_busy=False):
     import pwd
     if os.getuid() == 0:
         raise ValueError('请使用原节点的普通 Linux 用户。')
@@ -238,7 +244,8 @@ def inspect(service_root=None):
     if not checked.get('docker_ready'):
         raise ValueError(checked.get('detail', '请先启动原 Docker Desktop。'))
     endpoint, info = desktop_source(checked['docker_endpoint'], checked.get('docker_id'))
-    registries, preserved = inspect_containers(endpoint, candidate['node_id'])
+    waiting = [] if defer_busy else None
+    registries, preserved = inspect_containers(endpoint, candidate['node_id'], waiting)
     refs = image_refs(config)
     image_ids = docker(['image', 'ls', '-q', '--no-trunc'], endpoint).split()
     all_images = objects(['image', 'inspect', *sorted(set(image_ids))], endpoint) if image_ids else []
@@ -261,7 +268,7 @@ def inspect(service_root=None):
                 uid=os.getuid(), gid=os.getgid(), engine_id=info['ID'], endpoint=endpoint,
                 containerd_store=containerd_store(info),
                 registries=registries, images=images, helper=helper, gpus=gpus,
-                required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved,
+                required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved, waiting=waiting or [],
                 mode='in_place', space={'filesystem_copy_bytes': 0, 'existing_filesystem_bytes': used,
                     'image_bytes': cache, 'registry_bytes': registry_bytes, 'required_bytes': required})
 
@@ -299,6 +306,27 @@ def idle(root):
     return not service._update_containers(candidate, execution_only=True)
 
 
+def wait_until_idle(job, value):
+    """Drain this node; observe other work without stopping or taking it over."""
+    last_detail = None
+    while True:
+        cancelled(job)
+        same_source(value)
+        waiting = []
+        _, preserved = inspect_containers(value['endpoint'], value['node_id'], waiting)
+        if value.get('move_disk'):
+            waiting.extend(item['name'] for item in preserved)
+        if not idle(Path(value['service_root'])):
+            waiting.insert(0, '当前实验或结果回传')
+        detail = '等待结束：' + '；'.join(waiting) if waiting else ''
+        if detail != last_detail:
+            private_write(job / 'waiting.json', {'detail': detail})
+            last_detail = detail
+        if not waiting:
+            return
+        time.sleep(5)
+
+
 def prepare(job):
     job, value = load_job(job)
     same_source(value)
@@ -317,15 +345,7 @@ def prepare(job):
                     'unit_enabled': unit_enabled}
         private_write(job / 'rollback.json', rollback)
         service.compute_availability(root, mode='drain')
-        deadline = time.monotonic() + 24 * 3600
-        while True:
-            cancelled(job)
-            state = service.status(root)
-            if idle(root):
-                break
-            if not state.get('running') or time.monotonic() >= deadline:
-                raise RuntimeError('原节点仍有未完成的实验或回传，暂时不能迁移。原策略将恢复。')
-            time.sleep(3)
+        wait_until_idle(job, value)
         stopped = service.stop_for_update(root, preserve_experiments=True)
         if not stopped.get('ready_for_update'):
             raise RuntimeError('原节点尚未完成安全交接。')
@@ -335,10 +355,17 @@ def prepare(job):
             if time.monotonic() >= deadline:
                 raise RuntimeError('原节点后台未退出。')
             time.sleep(1)
-        fresh = inspect(root)
+        while True:
+            cancelled(job)
+            try:
+                fresh = inspect(root)
+                break
+            except MigrationBusy:
+                wait_until_idle(job, value)
         if fresh['node_id'] != value['node_id'] or fresh['config'] != value['config'] or fresh['engine_id'] != value['engine_id']:
             raise ValueError('等待期间节点身份已改变。')
         fresh['job_id'] = value['job_id']
+        fresh['move_disk'] = value.get('move_disk', False)
         value = fresh
         private_write(job / 'manifest.json', value)
         with InstanceLock(root / 'control.lock'), InstanceLock(root / 'supervisor.lock'), InstanceLock(Path(value['worker_root']) / 'agent.lock'):
@@ -427,7 +454,7 @@ def pre_export(job):
     same_source(value)
     inspect_containers(value['endpoint'], value['node_id'])
     if not idle(Path(value['service_root'])) or not service.install_status(value['service_root']).get('ready_for_install'):
-        raise ValueError('原节点仍有任务运行，尚未关闭 Ubuntu。')
+        raise MigrationBusy('等待原节点完成当前任务，尚未关闭 Ubuntu。')
     return {'ready': True}
 
 
@@ -634,7 +661,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == 'inspect':
-            result = inspect(args.service_root)
+            result = inspect(args.service_root, defer_busy=True)
         else:
             from .worker_transfer import transfer, cleanup_source
             job, _ = load_job(args.job)
@@ -647,7 +674,7 @@ def main(argv=None):
         return 0
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError) as error:
         detail = service._redact(service._root(args.service_root), str(error))[:4000]
-        print(json.dumps({'ready': False, 'detail': detail}, ensure_ascii=False))
+        print(json.dumps({'ready': False, 'detail': detail, 'waiting': isinstance(error, MigrationBusy)}, ensure_ascii=False))
         return 2
 
 

@@ -23,13 +23,16 @@ namespace ExperimentManagerDesktop {
         readonly TextBox details=new TextBox {Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Width=620,Height=130,Visible=false,BorderStyle=BorderStyle.FixedSingle};
         readonly ProgressBar progress=new ProgressBar {Width=620,Height=6,Maximum=8,Visible=false};
         readonly FlowLayoutPanel inputs=WorkerUi.Stack(620),advanced=WorkerUi.Stack(620);
-        bool working; readonly bool admin;
+        bool working,observing; readonly bool admin;
+        readonly Timer monitor=new Timer {Interval=1000};
+        readonly DesktopIcons icons=new DesktopIcons();
+        NotifyIcon tray;
         internal WorkerMigrationForm(string ownerSid=null,string selectedSource=null,string selectedFolder=null,bool confirmed=false,string selectedDataFolder=null) {
             if(ownerSid!=null&&ownerSid!=WindowsIdentity.GetCurrent().User.Value)throw new IOException("请使用原 Windows 账户授权。");
             Text="Worker · 开机启动";Size=new Size(720,740);MinimumSize=new Size(700,540);StartPosition=FormStartPosition.CenterParent;Font=new Font("Microsoft YaHei UI",10);BackColor=Color.White;ForeColor=WorkerUi.Ink;
             var panel=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(28)};Controls.Add(panel);
             panel.Controls.Add(WorkerUi.Copy("开机运行，无需登录",620,true));
-            panel.Controls.Add(WorkerUi.Copy("可将 Ubuntu、镜像和实验移到其他盘，再开启独立引擎。",620));
+            panel.Controls.Add(WorkerUi.Copy("提交后等待当前实验结束，再自动迁移；可关闭窗口。",620));
             source.Text=selectedSource??App.Text(App.ReadSettings(),"distribution");
             if(String.IsNullOrWhiteSpace(source.Text)) {
                 var choices=Array.FindAll(App.RegisteredDistributions(),n=>!n.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase));
@@ -62,6 +65,20 @@ namespace ExperimentManagerDesktop {
             secondary.Controls.Add(WorkerUi.Link("已有独立环境",()=>{if(!working)using(var form=new WorkerBootForm())form.ShowDialog(this);}));
             secondary.Controls.Add(WorkerUi.Link("帮助",()=>App.OpenFile(Path.Combine(App.Package,"docs","UNATTENDED-WORKER.zh-CN.md"))));
             admin=new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+            tray=new NotifyIcon {Icon=icons.TrayIcon,Text="Worker · 迁移队列"};
+            var menu=new ContextMenuStrip();menu.Items.Add("查看迁移进度",null,(s,e)=>OpenQueue());
+            menu.Items.Add("取消迁移",null,(s,e)=>{if(WorkerMigration.Pending&&WorkerMigration.CanRollback(App.Read(WorkerMigration.ActivePath)))WorkerMigration.Cancel();});
+            tray.ContextMenuStrip=menu;tray.DoubleClick+=(s,e)=>OpenQueue();
+            monitor.Tick+=(s,e)=>{
+                try {
+                    bool active=WorkerMigration.Running;
+                    if(active&&WorkerMigration.Pending)ShowProgress(WorkerMigration.Status);
+                    if(!working) {
+                        if(observing&&!active)ShowProgress(App.Text(App.Read(WorkerMigration.ActivePath),"stage","迁移后台已退出，请检查状态。"));
+                        observing=active;RefreshMode();
+                    }
+                }catch(IOException){}catch(UnauthorizedAccessException){}
+            };monitor.Start();
             password.Enabled=admin;RefreshMode();
             start.Click+=async(s,e)=>await Execute(async()=>{
                 if(WorkerMigration.Pending&&!WorkerMigration.CanRollback(App.Read(WorkerMigration.ActivePath))){if(await Elevate())await WorkerMigration.Finish(new Progress<string>(ShowProgress));return;}
@@ -72,16 +89,25 @@ namespace ExperimentManagerDesktop {
             },true);
             recover.Click+=async(s,e)=>await Execute(async()=>{if(await Elevate())await WorkerMigration.Recover(new Progress<string>(ShowProgress));},false);
             cancel.Click+=(s,e)=>{WorkerMigration.Cancel();cancel.Enabled=false;ShowProgress("正在取消，当前步骤结束后恢复原节点。");};
-            FormClosing+=(s,e)=>{if(working){e.Cancel=true;ShowProgress("请先取消迁移，等待当前步骤结束。");}};FormClosed+=(s,e)=>password.Clear();
+            FormClosing+=(s,e)=>{if(KeepInBackground(working,e.CloseReason)){e.Cancel=true;Hide();tray.Visible=true;}};
+            FormClosed+=(s,e)=>{password.Clear();monitor.Dispose();tray.Dispose();icons.Dispose();};
         }
+        internal static bool KeepInBackground(bool busy,CloseReason reason){return busy&&reason==CloseReason.UserClosing;}
+        void OpenQueue(){Show();WindowState=FormWindowState.Normal;Activate();}
         void RefreshMode() {
             bool pending=WorkerMigration.Pending,managed=WorkerBoot.Managed;
+            if(!working&&WorkerMigration.Running) {
+                observing=true;inputs.Visible=start.Visible=recover.Visible=false;
+                cancel.Visible=pending&&WorkerMigration.CanRollback(App.Read(WorkerMigration.ActivePath));cancel.Enabled=true;
+                ShowProgress(WorkerMigration.Status);return;
+            }
             bool canRecover=pending&&WorkerMigration.CanRollback(App.Read(WorkerMigration.ActivePath));
             recover.Visible=canRecover;start.Visible=!canRecover;inputs.Visible=!pending&&!managed;
-            start.Text=pending?"完成交接并启动":managed?"启动后台":admin?"迁移并开启":"授权并继续";
+            start.Text=pending?"完成交接并启动":managed?"启动后台":admin?"排队迁移并开启":"授权并继续";
             if(status.Text.Length==0)ShowProgress(pending?(canRecover?"上次迁移未完成，请先恢复原节点。":"环境已验证，点击完成交接。") :managed?"已配置开机运行。":admin?"保持电源和网络连接，迁移会等待当前实验结束。":"需要同一 Windows 账户的管理员授权。");
         }
         void ShowProgress(string text) {
+            if(details.Text==text.Replace("\r\n","\n").Replace("\n",Environment.NewLine))return;
             details.Text=text.Replace("\r\n","\n").Replace("\n",Environment.NewLine);
             var match=System.Text.RegularExpressions.Regex.Match(text??"","^([1-8])/8\\s*(.*)");
             if(match.Success){progress.Visible=true;progress.Value=Int32.Parse(match.Groups[1].Value);status.Text=match.Groups[2].Value;}
@@ -89,15 +115,15 @@ namespace ExperimentManagerDesktop {
         }
         static void Add(Control parent,string label,Control field){parent.Controls.Add(WorkerUi.Copy(label,620));parent.Controls.Add(field);}
         internal string[] ElevationArguments(){return new[]{"--migration-settings","--owner-sid",WindowsIdentity.GetCurrent().User.Value,"--migration-source",source.Text,"--migration-folder",folder.Text,"--migration-data-folder",dataFolder.Text,"--migration-confirmed",dedicated.Checked?"yes":"no"};}
-        async Task<bool> Elevate() {
-            if(admin)return true;
+        Task<bool> Elevate() {
+            if(admin)return Task.FromResult(true);
             password.Clear();
-            using(var p=Process.Start(new ProcessStartInfo(Path.Combine(App.Package,App.Executable),App.Arguments(ElevationArguments())){UseShellExecute=true,Verb="runas"}))await Task.Run(()=>p.WaitForExit());
-            working=false;Close();return false;
+            using(var p=Process.Start(new ProcessStartInfo(Path.Combine(App.Package,App.Executable),App.Arguments(ElevationArguments())){UseShellExecute=true,Verb="runas"})){}
+            working=false;Close();return Task.FromResult(false);
         }
         async Task Execute(Func<Task> action,bool canCancel) {
             if(working)return;working=true;inputs.Enabled=start.Enabled=recover.Enabled=false;cancel.Visible=canCancel;cancel.Enabled=true;
-            try {await action();}catch(Exception ex){ShowProgress(ex.Message);}finally {password.Clear();working=false;if(!IsDisposed){inputs.Enabled=start.Enabled=recover.Enabled=true;password.Enabled=admin;cancel.Visible=false;RefreshMode();}}
+            try {await action();}catch(Exception ex){ShowProgress(ex.Message);}finally {password.Clear();working=false;if(!IsDisposed){inputs.Enabled=start.Enabled=recover.Enabled=true;password.Enabled=admin;cancel.Visible=false;RefreshMode();if(!Visible){tray.BalloonTipTitle="Worker 迁移";tray.BalloonTipText="迁移操作已结束，点击托盘图标查看结果。";tray.ShowBalloonTip(5000);}}}
         }
     }
 }

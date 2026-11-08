@@ -11,9 +11,36 @@ using Microsoft.Win32;
 
 namespace ExperimentManagerDesktop {
     internal static class WorkerMigration {
+        sealed class BusyException:IOException {internal BusyException(string detail):base(detail){}}
         static volatile bool cancelRequested;
         internal static string ActivePath {get{return Path.Combine(App.SettingsRoot,"migration-active.json");}}
         internal static bool Pending {get{var j=App.Read(ActivePath);return j.Count>0&&!App.Flag(j,"finished");}}
+        internal static bool Running {
+            get {
+                string path=Path.Combine(App.SettingsRoot,"migration-owner.lock");if(!File.Exists(path))return false;
+                try {using(var probe=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.None))return false;}
+                catch(IOException error){int code=error.HResult&65535;if(code==32||code==33)return true;throw;}
+            }
+        }
+        internal static string Status {
+            get {
+                var job=App.Read(ActivePath);string stage=Pending?App.Text(job,"stage"):"正在检测迁移条件…";
+                if(stage.StartsWith("1/8")) {
+                    string waiting=App.Text(App.Read(Path.Combine(App.Text(job,"path"),"waiting.json")),"detail");
+                    if(waiting.Length>0)return "已排队 · "+waiting+"\n结束后自动迁移，可关闭此窗口。";
+                }
+                return stage;
+            }
+        }
+        internal static async Task WaitForReady(Func<Task<string>> inspect,Action<string> report,Action checkCancelled,Func<Task> delay=null) {
+            string previous=null;
+            while(true) {
+                checkCancelled();string waiting=await inspect();checkCancelled();
+                if(String.IsNullOrEmpty(waiting))return;
+                if(waiting!=previous){report("已排队 · "+waiting);previous=waiting;}
+                if(delay==null)await Task.Delay(5000);else await delay();
+            }
+        }
         internal static bool CanRollback(Dictionary<string,object> job){return !App.Flag(job,"committed")&&!App.Flag(job,"finished")&&!File.Exists(Path.Combine(App.Text(job,"path"),"committed.json"));}
         internal static void CheckOwner(Dictionary<string,object> job) {
             if(App.Text(job,"owner")!=WindowsIdentity.GetCurrent().User.Value)throw new IOException("请使用创建迁移的同一 Windows 账户。");
@@ -54,10 +81,6 @@ namespace ExperimentManagerDesktop {
         static string Desktop(params string[] args){return App.RunWithTimeout(150000,DesktopRuntime.DockerCli,args);}
         static void CheckMoveWindow(WorkerDataPlan plan,Dictionary<string,object> manifest) {
             if(!plan.Moving)return;
-            WorkerDataMove.RequireWindow(plan.Distribution,Management("--list","--running","--quiet"),true);
-            object raw;var names=new List<string>();
-            if(manifest.TryGetValue("preserved_containers",out raw)&&raw is IList)foreach(Dictionary<string,object> item in (IList)raw)names.Add(App.Text(item,"name"));
-            if(names.Count>0)throw new IOException("改盘会短暂重启 Docker，请先结束这些容器的工作："+String.Join("、",names)+"。保留当前数据位置则无需重启 Docker。");
             try {Desktop("desktop","stop","--help");Desktop("desktop","start","--help");}
             catch(Exception){throw new IOException("改盘需要支持 desktop start/stop 的 Docker Desktop，请先更新 Docker Desktop。");}
         }
@@ -94,7 +117,10 @@ namespace ExperimentManagerDesktop {
                 if(!process.WaitForExit(timeout))process.WaitForExit();
                 process.WaitForExit();string value=output.ToString().Trim();
                 if(!SuccessfulWslReply(process.ExitCode,args,value)) {
-                    if(value.StartsWith("{")) {try {throw new IOException(App.Text(App.Json.Deserialize<Dictionary<string,object>>(value),"detail","迁移操作失败。"));}catch(ArgumentException){}}
+                    if(value.StartsWith("{")) {try {
+                        var reply=App.Json.Deserialize<Dictionary<string,object>>(value);string detail=App.Text(reply,"detail","迁移操作失败。");
+                        if(App.Flag(reply,"waiting"))throw new BusyException(detail);throw new IOException(detail);
+                    }catch(ArgumentException){}}
                     throw new IOException("WSL 迁移步骤失败（退出码 "+process.ExitCode+"）。原数据保留；请检查网络、WSL 和磁盘空间后重试。"+
                         (encoding==Encoding.Unicode&&!String.IsNullOrEmpty(value)?"\n"+value.Substring(Math.Max(0,value.Length-1024)):""));
                 }
@@ -256,20 +282,28 @@ namespace ExperimentManagerDesktop {
                 if(!disk.IsReady||disk.DriveType!=DriveType.Fixed)throw new IOException("数据集使用的磁盘不支持未登录运行："+disk.Name);
             }
             string id=Guid.NewGuid().ToString("N"),path=Path.Combine(Path.GetFullPath(folder),id),target=source;
-            PrivateDirectory(path);manifest["job_id"]=id;App.Write(Path.Combine(path,"manifest.json"),manifest);BackupWindows(path);
+            PrivateDirectory(path);manifest["job_id"]=id;manifest["move_disk"]=dataPlan.Moving;App.Write(Path.Combine(path,"manifest.json"),manifest);BackupWindows(path);
             var job=new Dictionary<string,object>{{"id",id},{"path",path},{"source",source},{"target",target},{"mode","in_place"},{"user",App.Text(manifest,"linux_user")},{"owner",WindowsIdentity.GetCurrent().User.Value},{"committed",false},{"finished",false}};
             Save(job,"迁移已开始，备份目录："+path,progress);
             Exception failure=null;
             try {
                 CheckCancelled(job);
                 await WorkerBoot.SuspendForUpdate();
-                Save(job,"1/8 等待当前实验结束…",progress);
+                Save(job,"1/8 已排队，当前实验结束后自动迁移。可关闭此窗口。",progress);
                 await Task.Run(()=>Helper(source,App.Text(job,"user"),"prepare",path));CheckCancelled(job);
                 manifest=App.Read(Path.Combine(path,"manifest.json"));CheckSpace(folder,64*1024*1024);
                 dataPlan=await Task.Run(()=>WorkerDataMove.Plan(source,dataFolder,folder,Convert.ToInt64(manifest["required_bytes"])));dataPlan.RequireSpace();
                 Save(job,"2/8 保存配置…",progress);
-                await Task.Run(()=>Helper(source,App.Text(job,"user"),"pre-export",path));CheckCancelled(job);
+                await WaitForReady(async()=>{
+                    try {await Task.Run(()=>Helper(source,App.Text(job,"user"),"pre-export",path));return "";}
+                    catch(BusyException busy){return busy.Message;}
+                },detail=>Save(job,detail,progress),()=>CheckCancelled(job));CheckCancelled(job);
                 if(dataPlan.Moving) {
+                    await WaitForReady(async()=>{
+                        string running=await Task.Run(()=>Management("--list","--running","--quiet"));
+                        try {WorkerDataMove.RequireWindow(source,running,true);return "";}
+                        catch(IOException busy){return busy.Message;}
+                    },detail=>Save(job,detail,progress),()=>CheckCancelled(job));
                     Save(job,"2/8 暂停空闲 Docker，释放磁盘…",progress);
                     await Task.Run(()=>WorkerDataMove.PauseDesktop(source,App.Text(manifest,"engine_id"),job,()=>App.Write(ActivePath,job),Management,Desktop));CheckCancelled(job);
                     Save(job,"2/8 移动 Ubuntu 数据到 "+dataPlan.TargetFolder+"…",progress);

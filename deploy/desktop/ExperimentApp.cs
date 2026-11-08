@@ -671,9 +671,15 @@ namespace ExperimentManagerDesktop {
         async Task Execute(Func<Task> action) { if(busy)return;busy=true;try {await action();}catch(Exception ex){summary.Text=ex.Message;if(startingAfterUpdate)App.UpdateReport("backend_start","failed",ex.Message);try{App.Write(Path.Combine(App.SettingsRoot,"last-error.json"),new{time=DateTime.UtcNow.ToString("o"),detail=ex.Message});}catch(IOException){}catch(UnauthorizedAccessException){}}finally{busy=false;} }
         void ApplyBootControls(){bool editable=!WorkerBoot.Managed;distro.Enabled=editable;existing.Enabled=editable;pairing.Enabled=editable;autoEnableCompute.Enabled=editable;releaseResources.Enabled=editable;}
         void OpenBootSettings() {
+            if(WorkerMigration.Running) {
+                using(var process=Process.Start(new ProcessStartInfo(Path.Combine(App.Package,App.Executable),"--migration-settings"){UseShellExecute=false,CreateNoWindow=true})){}
+                return;
+            }
             if(busy||hostLoop.Applying||hostPumping||pumpingUpdates){summary.Text="当前后台操作尚未结束，请稍后打开无人值守设置。";return;}
             busy=true;timer.Stop();
-            try {if(WorkerBoot.Managed&&!WorkerMigration.Pending){using(var form=new WorkerBootForm())form.ShowDialog(this);}else {using(var form=new WorkerMigrationForm())form.ShowDialog(this);}}
+            try {if(WorkerBoot.Managed&&!WorkerMigration.Pending){using(var form=new WorkerBootForm())form.ShowDialog(this);}else {
+                using(var process=Process.Start(new ProcessStartInfo(Path.Combine(App.Package,App.Executable),"--migration-settings"){UseShellExecute=false,CreateNoWindow=true})){}
+            }}
             finally {settings=App.ReadSettings();deactivated=App.Flag(settings,"deactivated");ApplyBootControls();hostControl=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));busy=false;timer.Start();RefreshState();}
         }
         internal void ShowStatus(){Show();WindowState=FormWindowState.Normal;Activate();RefreshState();}
@@ -738,7 +744,7 @@ namespace ExperimentManagerDesktop {
             UpdateQueue.Enqueue(UpdateQueue.State.Release??AvailableUpdate,install,false);NotifyUpdates();
         }
         async Task PumpUpdates() {
-            if(App.Worker&&WorkerMigration.Pending)return;
+            if(App.Worker&&(WorkerMigration.Pending||WorkerMigration.Running))return;
             if(App.Worker&&(WorkerBoot.Managed?!WorkerBoot.CanAutoUpdate(App.Read(WorkerBoot.StatusPath)):deactivated)&&(!UpdateQueue.Active||UpdateQueue.State.Automatic))return;
             if(pumpingUpdates||exiting)return;pumpingUpdates=true;
             try {
@@ -814,7 +820,7 @@ namespace ExperimentManagerDesktop {
             }
         }
         async Task PumpHostControl() {
-            if(App.Worker&&WorkerMigration.Pending)return;
+            if(App.Worker&&(WorkerMigration.Pending||WorkerMigration.Running))return;
             if(WorkerBoot.Managed)return;
             if(!App.Worker||hostPumping||exiting||DateTime.UtcNow<nextHost)return;
             hostPumping=true;nextHost=DateTime.UtcNow.AddSeconds(5);
@@ -927,6 +933,7 @@ namespace ExperimentManagerDesktop {
         }
         string SelectedDistribution {get{if(distro.SelectedItem==null)throw new Exception("选择原节点使用的 Ubuntu。");return Convert.ToString(distro.SelectedItem);}}
         async Task<Dictionary<string,object>> WorkerCommand(string action,params string[] options) {
+            if(WorkerMigration.Running||WorkerMigration.Pending)throw new IOException("迁移队列正在管理此节点，请在开机启动窗口查看进度或取消。");
             if(WorkerBoot.Managed)return await Task.Run(()=>WorkerBoot.Command(WorkerBoot.Load(),action,options));
             string distribution=SelectedDistribution,credential=pairing.Text;
             string selected=existing.SelectedIndex>0?configs[existing.SelectedIndex]:"";
@@ -953,6 +960,11 @@ namespace ExperimentManagerDesktop {
         }
         async Task ReadWorkerLogs(){var result=await WorkerCommand("logs");object lines;if(result.TryGetValue("lines",out lines)&&lines is IList){var shown=new List<string>();foreach(var line in (IList)lines)shown.Add(Convert.ToString(line));log.Lines=shown.ToArray();}}
         async void RefreshState(){
+            if(App.Worker) {
+                ApplyBootControls();
+                if(WorkerMigration.Running){SetWorkerSummary(WorkerMigration.Status);return;}
+                if(WorkerMigration.Pending){SetWorkerSummary("迁移后台已退出，请在开机启动向导恢复或完成交接。");return;}
+            }
             if(WorkerBoot.Managed){
                 SetWorkerSummary(WorkerBoot.DisplayStatus());lastLog=Path.Combine(App.SettingsRoot,"client-lifecycle.jsonl");
                 if(workerTabs!=null&&workerTabs.SelectedIndex==2&&!busy&&WorkerBoot.CanAutoUpdate(App.Read(WorkerBoot.StatusPath)))await Execute(ReadWorkerLogs);
@@ -963,7 +975,8 @@ namespace ExperimentManagerDesktop {
         }
         async void StartWorker(){if(WorkerBoot.Managed){WorkerBoot.Request("available");WorkerBoot.EnsureHost();RefreshState();return;}if(hostLoop.Applying||busy){summary.Text="当前操作尚未完成。若主控仍要求释放资源，请先在主控将此节点恢复为允许接单。\n"+(hostControl.Report==null?"":App.Text(hostControl.Report,"detail"));return;}await StartWorkerAsync(false);}
         async Task<bool> StartWorkerAsync(bool automatic){
-            if(WorkerMigration.Pending){summary.Text="迁移尚未结束，请打开无人值守启动向导恢复或完成交接。";return false;}
+            if(WorkerMigration.Running){summary.Text=WorkerMigration.Status;return false;}
+            if(WorkerMigration.Pending){summary.Text="迁移后台已退出，请打开开机启动向导恢复或完成交接。";return false;}
             if(WorkerBoot.Managed){WorkerBoot.EnsureHost();RefreshState();return false;}
             bool started=false;lastWorkerStartError="未能启动原节点，请检查客户端状态。";
             await Execute(async()=>{
