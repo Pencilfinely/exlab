@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using System.Windows.Forms;
 using ExperimentManagerDesktop;
 
 static class WorkerMoveTests {
@@ -8,6 +10,23 @@ static class WorkerMoveTests {
     static void Check(bool ok,string message){count++;if(!ok)throw new Exception(message);}
     static void Block(Action run){count++;try{run();}catch(IOException){return;}throw new Exception("Unsafe disk operation was accepted.");}
     internal static int Run(string folder) {
+        int probes=0,reports=0,delays=0;bool cancelled=false;
+        WorkerMigration.WaitForReady(()=>Task.FromResult(++probes<4?"other-work":""),s=>reports++,()=>{},()=>{delays++;return Task.FromResult(0);}).GetAwaiter().GetResult();
+        Check(probes==4&&reports==1&&delays==3,"Queued migration did not wait, retry, or bound repeated status writes.");
+        try {
+            WorkerMigration.WaitForReady(()=>Task.FromResult("busy"),s=>{},()=>{if(cancelled)throw new OperationCanceledException();},()=>{cancelled=true;return Task.FromResult(0);}).GetAwaiter().GetResult();
+            throw new Exception("Cancellation was ignored.");
+        }catch(OperationCanceledException){count++;}
+        Check(WorkerMigrationForm.KeepInBackground(true,CloseReason.UserClosing),"Closing the queue would interrupt migration.");
+        Check(!WorkerMigrationForm.KeepInBackground(false,CloseReason.UserClosing),"Finished migration cannot close.");
+        Check(!WorkerMigrationForm.KeepInBackground(true,CloseReason.WindowsShutDown),"Migration blocks Windows shutdown.");
+        string oldSettings=App.SettingsDirectory;App.SettingsDirectory=Path.Combine(folder,"queue-lock");Directory.CreateDirectory(App.SettingsRoot);
+        try {
+            string owner=Path.Combine(App.SettingsRoot,"migration-owner.lock");
+            Check(!WorkerMigration.Running,"Missing lock was treated as running.");
+            using(new FileStream(owner,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None))Check(WorkerMigration.Running,"Live migration owner was not detected.");
+            Check(!WorkerMigration.Running,"Stale lock file blocked migration.");
+        }finally{App.SettingsDirectory=oldSettings;}
         long gb=1073741824L,margin=64L*1024*1024;
         Check(WorkerDataMove.SpaceRequired(@"C:\Ubuntu\ext4.vhdx",@"E:\Worker",100*gb,40*gb)==140*gb+margin,"Cross-drive accounting lost the existing VHD.");
         Check(WorkerDataMove.SpaceRequired(@"E:\Ubuntu\ext4.vhdx",@"E:\Worker",100*gb,40*gb)==40*gb+margin,"Same-volume rename incorrectly needs a second disk copy.");

@@ -9,6 +9,7 @@ import pwd
 import shutil
 import subprocess
 import uuid
+from unittest.mock import patch
 
 from expman import common, worker_engine as engine, worker_migration as migration, worker_service as service
 from expman import worker_transfer as transfer
@@ -67,6 +68,22 @@ def main():
              'node_id': 'ci-engine', 'endpoint': source, 'engine_id': source_id, 'containerd_store': store == 'containerd',
              'images': {ref: helper['Id']}, 'helper': ref, 'registries': [registry]}
     common.atomic_json(job / 'manifest.json', value)
+    # Real running container with a Linux bind: preflight accepts a queue, and
+    # the queue waits for its natural exit without terminating it. Node drain
+    # itself is exercised separately with active-record/cancellation fixtures.
+    busy_name = 'migration-queue-' + job.name
+    busy = migration.docker(['run', '-d', '--name', busy_name, '--network', 'none',
+        '--mount', 'type=bind,src=' + str(job) + ',dst=/queue-result', helper['Id'], 'python', '-c',
+        "import time;from pathlib import Path;time.sleep(6);Path('/queue-result/finished').write_text('completed')"], source)
+    waiting = []
+    migration.inspect_containers(source, value['node_id'], waiting)
+    assert any(busy_name in detail for detail in waiting)
+    with patch.object(migration, 'idle', return_value=True):
+        migration.wait_until_idle(job, value)
+    state = migration.objects(['inspect', busy], source)[0]['State']
+    assert not state['Running'] and state['ExitCode'] == 0
+    assert (job / 'finished').read_text() == 'completed'
+    print('PASS queued migration waited for a real container to finish without stopping it')
     run('sudo', 'bash', str(package / 'prepare.sh'), job.name, str(job))
     run('sudo', 'systemctl', 'start', engine.SERVICE)
     # Refresh group membership without changing the CI user's login session.

@@ -81,9 +81,15 @@ public static class DesktopBootFormTest {
                 if(joined.Contains(input.Text)||!joined.Contains(@"E:\Chosen backup")||!joined.Contains(@"E:\Worker data")||!joined.Contains("Ubuntu-test"))throw new Exception("Elevation loses choices or passes the Windows password.");
                 migration.GetMethod("ShowProgress",inst).Invoke(form,new object[]{"Please pause notebook: Linux/WSL mount"});
                 if(!((System.Windows.Forms.TextBox)migration.GetField("details",inst).GetValue(form)).Text.Contains("notebook"))throw new Exception("Migration lost the specific blocker.");
-                input.Clear();
                 using(var bitmap=new System.Drawing.Bitmap(form.Width,form.Height)){form.DrawToBitmap(bitmap,new System.Drawing.Rectangle(0,0,form.Width,form.Height));bitmap.Save(System.IO.Path.Combine(root,"worker-migration-preview.png"));}
+                migration.GetField("working",inst).SetValue(form,true);
+                form.Close();System.Windows.Forms.Application.DoEvents();
+                if(form.IsDisposed||form.Visible||!((System.Windows.Forms.NotifyIcon)migration.GetField("tray",inst).GetValue(form)).Visible||input.Text!="test-secret-never-save")throw new Exception("Closing migration interrupted the background operation or lost its in-memory credential.");
+                migration.GetMethod("OpenQueue",inst).Invoke(form,null);
+                if(!form.Visible)throw new Exception("Background migration cannot reopen.");
+                migration.GetField("working",inst).SetValue(form,false);
                 form.Close();
+                if(input.Text.Length!=0)throw new Exception("Migration window retained its credential after exit.");
             }
             var storage=assembly.GetType("ExperimentManagerDesktop.WorkerStorageForm");
             var sample=new System.Collections.Generic.Dictionary<string,object>{{"status","ready"},{"automatic",true},{"reclaimable_bytes",5368709120L},{"free_bytes",10737418240L},
