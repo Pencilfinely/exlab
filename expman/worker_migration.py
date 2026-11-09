@@ -24,8 +24,9 @@ from .worker_setup import private_write
 MARKER = Path('/etc/exlab-migration.json')
 FENCE = 'migration-owner.json'
 REGISTRIES = {'expman-worker-registry': ('worker-registry', 'expman-worker-registry-data', 5001),
-              'expman-harness-registry': ('harness-registry', 'expman-harness-registry-data', 5002)}
-LOCAL_IMAGE = re.compile(r'(?:localhost|127\.0\.0\.1):500[12]/[^\s@]+@sha256:[a-f0-9]{64}\Z')
+              'expman-harness-registry': ('harness-registry', 'expman-harness-registry-data', 5002),
+              'expman-registry': ('node-registry', 'expman-registry-data', 5000)}
+LOCAL_IMAGE = re.compile(r'(?:localhost|127\.0\.0\.1):500[012]/[^\s@]+@sha256:[a-f0-9]{64}\Z')
 
 
 class MigrationBusy(ValueError):
@@ -109,10 +110,18 @@ def registry(item, name):
              and 'REGISTRY_HTTP_DEBUG_ADDR=' in env)
     bridge = network in ('bridge', 'default') and bindings == {
         '5000/tcp': [{'HostIp': '127.0.0.1', 'HostPort': str(port)}]}
-    if (item.get('Name') != '/' + name or (item.get('Config', {}).get('Labels') or {}).get('expman.component') != component
+    config = item.get('Config', {})
+    label = (config.get('Labels') or {}).get('expman.component')
+    # scripts/node_installer.py originally created this registry without labels.
+    # Require its exact image, environment, volume and loopback bridge contract;
+    # the name alone never makes a foreign service ours. Restored registries use
+    # the explicit label and immutable image ID, like the other two registries.
+    legacy = (name == 'expman-registry' and label is None and config.get('Image') == 'registry:3'
+              and 'OTEL_TRACES_EXPORTER=none' in env and bridge)
+    if (item.get('Name') != '/' + name or not (label == component or legacy)
             or len(mounts) != 1 or mounts[0].get('Type') != 'volume' or mounts[0].get('Name') != volume
             or mounts[0].get('Destination') != '/var/lib/registry' or not (local or bridge)):
-        raise ValueError('镜像仓库包含自定义挂载或网络，不能自动迁移：' + name)
+        raise ValueError('无法确认镜像仓库归属或挂载、网络已修改，不能自动迁移：' + name)
     return dict(name=name, volume=volume, port=port, component=component, id=item['Id'],
                 image=item['Image'], running=bool(item['State']['Running']))
 
@@ -381,17 +390,22 @@ def prepare(job):
         if unit_enabled:
             run(['systemctl', '--user', 'disable', '--now', unit.name])
         same_source(value)
-        for item in value['registries']:
-            current = objects(['inspect', item['id']], value['endpoint'])[0]
-            if registry(current, item['name'])['id'] != item['id']:
-                raise ValueError('原镜像仓库身份已变化。')
-            if current['State']['Running']:
-                docker(['stop', item['id']], value['endpoint'])
+        stop_registries(value)
         # A clean, stopped SQLite snapshot is copied by WSL, including WAL files.
         files = [config, Path(value['worker_root']) / 'node.sqlite3', Path(value['worker_root']) / 'node.sqlite3-wal']
         private_write(job / 'source-ready.json', {'node_id': value['node_id'], 'config_sha256': digest(config),
                                                 'files': {str(p): digest(p) for p in files if p.is_file()}})
     return {'ready': True}
+
+
+def stop_registries(value):
+    """After node drain, stop only the verified registries for volume transfer."""
+    for item in value['registries']:
+        current = registry(objects(['inspect', item['id']], value['endpoint'])[0], item['name'])
+        if any(current[key] != item[key] for key in ('id', 'image', 'volume', 'port', 'component')):
+            raise ValueError('原镜像仓库身份已变化。')
+        if current['running']:
+            docker(['stop', item['id']], value['endpoint'])
 
 
 VOLUME_BACKUP = '''import os, sys, tarfile
