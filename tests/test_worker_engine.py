@@ -36,6 +36,17 @@ class EngineTransactionTests(unittest.TestCase):
         manager.start();self.addCleanup(manager.stop)
         manager = patch.object(migration, 'source_socket', side_effect=lambda endpoint: endpoint)
         self.socket = manager.start();self.addCleanup(manager.stop)
+        manager = patch.object(engine, 'DEFAULT_BRIDGE', self.root / 'docker0')
+        manager.start();self.addCleanup(manager.stop)
+
+    def test_existing_native_bridge_is_preserved_before_any_configuration_change(self):
+        engine.DEFAULT_BRIDGE.mkdir()
+        with self.assertRaisesRegex(ValueError, 'docker0'):
+            engine.begin(self.job, self.job.name)
+        self.assertTrue(engine.DEFAULT_BRIDGE.exists())
+        self.assertFalse((self.job / 'engine-before.json').exists())
+        self.assertFalse(engine.MARKER.exists())
+        self.systemctl.assert_not_called()
 
     def test_standard_desktop_socket_reaches_configuration_transaction(self):
         self.value['endpoint'] = 'unix:///var/run/docker.sock'
@@ -116,6 +127,7 @@ class EngineTransactionTests(unittest.TestCase):
         self.assertNotIn('credsStore', client)
         self.assertEqual(desktop.read_bytes(), before)
         self.assertIn('exlab-docker', engine.UNIT.read_text())
+        self.assertIn('ExecStartPre=/usr/bin/test ! -e /sys/class/net/docker0', engine.UNIT.read_text())
 
     def test_containerd_image_identity_mode_is_preserved(self):
         self.assertTrue(migration.containerd_store({'DriverStatus': [['driver-type', 'io.containerd.snapshotter.v1']]}))

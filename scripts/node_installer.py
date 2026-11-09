@@ -255,6 +255,7 @@ class Installer:
         code, existing = self.command(['docker', 'container', 'inspect', 'expman-registry'], check=False)
         if code:
             self.command(['docker', 'run', '-d', '--name', 'expman-registry', '--restart', 'unless-stopped',
+                          '--label', 'expman.component=node-registry',
                           '-p', '127.0.0.1:5000:5000', '-e', 'OTEL_TRACES_EXPORTER=none',
                           '-v', 'expman-registry-data:/var/lib/registry', 'registry:3'])
         else:

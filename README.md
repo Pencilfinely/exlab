@@ -5,7 +5,7 @@
 在一个工作空间中管理 GPU 实验、算力设备和算法项目。
 导入原算法、检查参数，再分发到电脑或服务器运行；保留原始源码，集中查看进度、日志与结果。
 
-**桌面端当前版本：0.6.3 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.6.3.md)
+**桌面端当前版本：0.6.4 · Monitor APK：0.5.22** · [下载最新版](https://github.com/Pencilfinely/exlab/releases/latest) · [更新说明](docs/RELEASE-0.6.4.md)
 
 Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及默认关闭的自动更新。0.5.10 起，Windows Center、Windows Worker 和 Ubuntu Worker 的手动及自动更新均只交接管理进程；Docker 实验继续运行，原任务队列和待回传数据在重启后接续。在原服务目录运行 `bash Update-Worker.sh`，加 `--auto enable` 开启自动更新。[Ubuntu 更新命令](docs/OPERATIONS.zh-CN.md#ubuntu一条命令更新与可选自动更新)。
 
@@ -20,6 +20,8 @@ Ubuntu Worker 支持一条命令检查、下载并安装 GitHub 更新，以及�
 0.6.2 可在迁移前选择 Worker 数据盘，先检测空间，再移动 Ubuntu 虚拟磁盘并准备独立引擎；无需在 C 盘生成整套中转副本。
 
 0.6.3 支持后台排队迁移：提交后暂停新接单，当前实验与相关容器结束后自动继续；关闭窗口不会取消，可从托盘或开机启动入口查看进度。
+
+0.6.4 修复旧安装器的常驻镜像仓库 `expman-registry` 导致迁移一直等待。已在旧版本排队的用户，请先取消迁移，恢复完成后更新并重新提交。
 
 **AI 自动托管**使用高频规则巡检和低频 AI 研判，支持受限规则编写；报告按需打开。节点操作以 Worker 执行回执确认完成；外部 GPT、Codex 等 agent 可通过独立授权的 MCP / HTTP 查询、操作或委托。[配置与接入说明](docs/AI-AGENT.zh-CN.md)。
 

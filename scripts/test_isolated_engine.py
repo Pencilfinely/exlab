@@ -8,6 +8,7 @@ from pathlib import Path
 import pwd
 import shutil
 import subprocess
+import time
 import uuid
 from unittest.mock import patch
 
@@ -34,10 +35,32 @@ def main():
     store = os.environ.get('EXLAB_TEST_IMAGE_STORE', 'classic')
     assert store in ('classic', 'containerd')
     daemon = common.read_json('/etc/docker/daemon.json', {})
+    # Desktop's source daemon has a separate network namespace. On this ordinary
+    # Linux runner give the source a dedicated bridge: --bridge=none on the
+    # target deletes docker0, so sharing the host default bridge is not a valid
+    # Desktop fixture (and production now refuses that unsafe native layout).
+    assert not run('docker', 'ps', '-aq'), 'Disposable source must have no existing containers'
+    run('sudo', 'systemctl', 'stop', 'docker.service', 'docker.socket')
+    if Path('/sys/class/net/docker0').exists():
+        run('sudo', 'ip', 'link', 'delete', 'docker0')
+    source_bridge = 'exlab-ci-src'
+    run('sudo', 'ip', 'link', 'add', source_bridge, 'type', 'bridge')
+    run('sudo', 'ip', 'addr', 'add', '172.31.254.1/24', 'dev', source_bridge)
+    run('sudo', 'ip', 'link', 'set', source_bridge, 'up')
+    daemon['bridge'] = source_bridge
     daemon.setdefault('features', {})['containerd-snapshotter'] = store == 'containerd'
     common.atomic_json(job / 'source-daemon.json', daemon)
     run('sudo', 'cp', str(job / 'source-daemon.json'), '/etc/docker/daemon.json')
     run('sudo', 'systemctl', 'restart', 'docker.service')
+    source_network = migration.objects(['network', 'inspect', 'bridge'], source)[0]
+    assert source_network['Options']['com.docker.network.bridge.name'] == source_bridge
+    assert not source_network['Containers']
+    # Restoring the runner's previous network database can recreate its now
+    # unused docker0 once. Remove only this empty disposable-runner interface,
+    # after proving the source daemon uses our dedicated bridge instead.
+    if Path('/sys/class/net/docker0').exists():
+        assert not list(Path('/sys/class/net/docker0/brif').iterdir())
+        run('sudo', 'ip', 'link', 'delete', 'docker0')
     assert migration.containerd_store(migration.objects(['info', '--format', '{{json .}}'], source)) == (store == 'containerd')
     source_id = migration.objects(['info', '--format', '{{json .}}'], source)['ID']
     # Keep the standard /var/run proxy path used by real Desktop integration.
@@ -63,10 +86,33 @@ def main():
                       '-v', volume + ':/var/lib/registry', '-e', 'REGISTRY_HTTP_ADDR=127.0.0.1:5001',
                       '-e', 'REGISTRY_HTTP_DEBUG_ADDR=', 'registry:2'], source)
     registry = migration.registry(migration.objects(['inspect', name], source)[0], name)
+    # Exact unlabelled registry created by the original node installer. It is
+    # permanent infrastructure, not work that can ever naturally finish.
+    legacy_name = 'expman-registry'
+    migration.docker(['pull', 'registry:3'], source, timeout=600)
+    migration.docker(['run', '-d', '--name', legacy_name, '--restart', 'unless-stopped',
+                      '-p', '127.0.0.1:5000:5000', '-e', 'OTEL_TRACES_EXPORTER=none',
+                      '-v', 'expman-registry-data:/var/lib/registry', 'registry:3'], source)
+    legacy = migration.registry(migration.objects(['inspect', legacy_name], source)[0], legacy_name)
+    local_tag = 'localhost:5000/migration-fixture:original'
+    migration.docker(['tag', ref, local_tag], source)
+    for attempt in range(15):
+        try:
+            migration.docker(['push', local_tag], source, timeout=120)
+            break
+        except RuntimeError:
+            if attempt == 14:
+                raise
+            time.sleep(1)
+    migration.docker(['pull', local_tag], source)
+    local_image = migration.objects(['image', 'inspect', local_tag], source)[0]
+    local_ref = next(ref for ref in local_image['RepoDigests'] if ref.startswith('localhost:5000/'))
+    assert migration.LOCAL_IMAGE.fullmatch(local_ref)
     value = {'mode': 'in_place', 'job_id': job.name, 'config': str(config), 'service_root': str(job / 'service'),
              'worker_root': str(job / 'node'), 'linux_user': pwd.getpwuid(os.getuid()).pw_name, 'uid': os.getuid(),
              'node_id': 'ci-engine', 'endpoint': source, 'engine_id': source_id, 'containerd_store': store == 'containerd',
-             'images': {ref: helper['Id']}, 'helper': ref, 'registries': [registry]}
+             'images': {ref: helper['Id'], local_ref: local_image['Id']}, 'helper': ref,
+             'registries': [registry, legacy], 'move_disk': True}
     common.atomic_json(job / 'manifest.json', value)
     # Real running container with a Linux bind: preflight accepts a queue, and
     # the queue waits for its natural exit without terminating it. Node drain
@@ -78,14 +124,25 @@ def main():
     waiting = []
     migration.inspect_containers(source, value['node_id'], waiting)
     assert any(busy_name in detail for detail in waiting)
-    with patch.object(migration, 'idle', return_value=True):
+    # Bound the regression: the broken implementation would wait forever for
+    # expman-registry, even after the actual workload had exited successfully.
+    queue_deadline = time.monotonic() + 45
+    def idle(_root):
+        assert time.monotonic() < queue_deadline, 'Permanent registry blocked migration queue'
+        assert migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
+        return True
+    with patch.object(migration, 'idle', side_effect=idle):
         migration.wait_until_idle(job, value)
     state = migration.objects(['inspect', busy], source)[0]['State']
     assert not state['Running'] and state['ExitCode'] == 0
     assert (job / 'finished').read_text() == 'completed'
-    print('PASS queued migration waited for a real container to finish without stopping it')
+    assert migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
+    migration.stop_registries(value)
+    assert not migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
+    print('PASS queue waited for real work, kept legacy registry alive, then stopped it for transfer')
     run('sudo', 'bash', str(package / 'prepare.sh'), job.name, str(job))
     run('sudo', 'systemctl', 'start', engine.SERVICE)
+    assert Path('/sys/class/net/' + source_bridge).exists(), 'Target changed the source bridge'
     # Refresh group membership without changing the CI user's login session.
     script = """import sys;from pathlib import Path
 from expman import worker_transfer as t,worker_migration as m,worker_engine as e
@@ -96,8 +153,13 @@ except Exception:
 _,value=m.load_job(job)
 assert m.objects(['info','--format','{{json .}}'],e.ENDPOINT)['ID'] != value['engine_id']
 assert m.docker(['run','--rm','--network','none',value['helper'],'python','-c','print(6*7)'],e.ENDPOINT).strip()=='42'
-assert t.summary(value['endpoint'],value['registries'][0]['volume'],value['images'][value['helper']],hashed=True)==t.summary(e.ENDPOINT,value['registries'][0]['volume'],value['images'][value['helper']],hashed=True)
-print('PASS isolated engine provisioning, streamed images/volume hashes, replay and CPU container')
+for registry in value['registries']:
+ assert t.summary(value['endpoint'],registry['volume'],value['images'][value['helper']],hashed=True)==t.summary(e.ENDPOINT,registry['volume'],value['images'][value['helper']],hashed=True)
+ restored=m.registry(m.objects(['inspect',registry['name']],e.ENDPOINT)[0],registry['name'])
+ assert restored['running'] and restored['port']==registry['port']
+local_ref=next(ref for ref in value['images'] if ref.startswith('localhost:5000/'))
+assert m.docker(['run','--rm','--network','none',local_ref,'python','-c','print(6*7)'],e.ENDPOINT).strip()=='42'
+print('PASS isolated engine, legacy registry port/digest pull, all volume hashes, replay and CPU container')
 """
     probe = job / 'probe.py'
     probe.write_text(script)
@@ -106,7 +168,17 @@ print('PASS isolated engine provisioning, streamed images/volume hashes, replay 
     assert not engine.ENGINE.exists() and not engine.DATA.exists()
     assert migration.objects(['info', '--format', '{{json .}}'], source)['ID'] == source_id
     assert migration.objects(['inspect', registry['id']], source)[0]['Id'] == registry['id']
-    print('PASS rollback preserved the original daemon, source volume and container')
+    try:
+        migration.rollback(job)
+    except Exception:
+        # This fixture contains no user configuration or credentials. Preserve
+        # Docker's specific failure here; production errors remain redacted.
+        print(migration.objects(['inspect', legacy['id']], source)[0]['State'])
+        subprocess.run(['docker', '--host', source, 'start', legacy['id']], check=False)
+        raise
+    assert migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
+    assert Path('/sys/class/net/' + source_bridge).exists()
+    print('PASS rollback preserved original daemon/data and restarted the original legacy registry')
 
 
 if __name__ == '__main__':
