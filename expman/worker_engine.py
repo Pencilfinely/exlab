@@ -27,6 +27,15 @@ WSL = Path('/etc/wsl.conf')
 CONTAINERD_SERVICE = 'exlab-containerd.service'
 CONTAINERD_CONFIG = Path('/etc/exlab-containerd.toml')
 CONTAINERD_UNIT = Path('/etc/systemd/system') / CONTAINERD_SERVICE
+DEFAULT_BRIDGE = Path('/sys/class/net/docker0')
+
+
+def check_network_isolation():
+    # Docker's --bridge=none deletes docker0 if present, even with iptables off.
+    # Desktop runs in its own namespace; a bridge visible here belongs to some
+    # other native daemon and must never be removed by starting our engine.
+    if DEFAULT_BRIDGE.exists():
+        raise ValueError('Ubuntu 中已有其他 Docker 的 docker0 网桥，不能自动共用网络；原环境保留。')
 
 
 def capture(path):
@@ -107,6 +116,7 @@ def begin(job, identity):
     if any(path.exists() or path.is_symlink() for path in (MARKER, ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, client)):
         raise ValueError('此 Ubuntu 已有 ExLab 引擎或未完成的环境切换，请先恢复')
     source_socket(value['endpoint'])
+    check_network_isolation()
     private_write(backup_path, {'job_id': identity, 'files': {str(p): capture(p) for p in paths}})
     private_write(MARKER, {'job_id': identity, 'source_engine': value['engine_id'], 'service_root': value['service_root'],
                            'linux_user': value['linux_user'], 'mode': 'in_place'})
@@ -118,6 +128,7 @@ def configure(job, identity):
     job, value, user, paths = context(job, identity)
     if common.read_json(MARKER).get('job_id') != identity:
         raise ValueError('引擎归属不符')
+    check_network_isolation()
     for binary in ('docker', 'dockerd', 'containerd', 'runc'):
         if not (ENGINE / 'usr/bin' / binary).is_file():
             raise ValueError('独立引擎缺少组件：' + binary)
@@ -151,6 +162,7 @@ def configure(job, identity):
     CONTAINERD_UNIT.chmod(0o644)
     unit_text = ('[Unit]\nDescription=ExLab compute engine\nAfter=network-online.target exlab-containerd.service\nWants=network-online.target\nRequires=exlab-containerd.service\n'
                 '[Service]\nType=notify\nEnvironment="PATH=/opt/exlab/docker/usr/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+                'ExecStartPre=/usr/bin/test ! -e /sys/class/net/docker0\n'
                 'ExecStart=/opt/exlab/docker/usr/bin/dockerd --config-file=/etc/exlab-docker.json\n'
                 'Restart=on-failure\nRestartSec=5\nRuntimeDirectory=exlab-docker\nRuntimeDirectoryMode=0755\n'
                 'Delegate=yes\nKillMode=process\nTimeoutStartSec=120\nLimitNOFILE=1048576\n'

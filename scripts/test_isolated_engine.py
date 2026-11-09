@@ -35,6 +35,19 @@ def main():
     store = os.environ.get('EXLAB_TEST_IMAGE_STORE', 'classic')
     assert store in ('classic', 'containerd')
     daemon = common.read_json('/etc/docker/daemon.json', {})
+    # Desktop's source daemon has a separate network namespace. On this ordinary
+    # Linux runner give the source a dedicated bridge: --bridge=none on the
+    # target deletes docker0, so sharing the host default bridge is not a valid
+    # Desktop fixture (and production now refuses that unsafe native layout).
+    assert not run('docker', 'ps', '-aq'), 'Disposable source must have no existing containers'
+    run('sudo', 'systemctl', 'stop', 'docker.service', 'docker.socket')
+    if Path('/sys/class/net/docker0').exists():
+        run('sudo', 'ip', 'link', 'delete', 'docker0')
+    source_bridge = 'exlab-ci-src'
+    run('sudo', 'ip', 'link', 'add', source_bridge, 'type', 'bridge')
+    run('sudo', 'ip', 'addr', 'add', '172.31.254.1/24', 'dev', source_bridge)
+    run('sudo', 'ip', 'link', 'set', source_bridge, 'up')
+    daemon['bridge'] = source_bridge
     daemon.setdefault('features', {})['containerd-snapshotter'] = store == 'containerd'
     common.atomic_json(job / 'source-daemon.json', daemon)
     run('sudo', 'cp', str(job / 'source-daemon.json'), '/etc/docker/daemon.json')
@@ -120,6 +133,7 @@ def main():
     print('PASS queue waited for real work, kept legacy registry alive, then stopped it for transfer')
     run('sudo', 'bash', str(package / 'prepare.sh'), job.name, str(job))
     run('sudo', 'systemctl', 'start', engine.SERVICE)
+    assert Path('/sys/class/net/' + source_bridge).exists(), 'Target changed the source bridge'
     # Refresh group membership without changing the CI user's login session.
     script = """import sys;from pathlib import Path
 from expman import worker_transfer as t,worker_migration as m,worker_engine as e
@@ -154,6 +168,7 @@ print('PASS isolated engine, legacy registry port/digest pull, all volume hashes
         subprocess.run(['docker', '--host', source, 'start', legacy['id']], check=False)
         raise
     assert migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
+    assert Path('/sys/class/net/' + source_bridge).exists()
     print('PASS rollback preserved original daemon/data and restarted the original legacy registry')
 
 

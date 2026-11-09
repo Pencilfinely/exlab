@@ -209,8 +209,10 @@ def inspect_containers(endpoint, node_id, waiting=None):
 
 def inspect(service_root=None, *, defer_busy=False):
     import pwd
+    from .worker_engine import check_network_isolation
     if os.getuid() == 0:
         raise ValueError('请使用原节点的普通 Linux 用户。')
+    check_network_isolation()
     linux_user = pwd.getpwuid(os.getuid()).pw_name
     if not re.fullmatch('[a-z_][a-z0-9_-]*', linux_user):
         raise ValueError('Linux 用户名不符合无人值守配置要求。')
