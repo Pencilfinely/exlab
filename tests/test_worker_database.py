@@ -204,7 +204,7 @@ class WorkerDatabaseTests(unittest.TestCase):
         self.assertIsNone(json.loads(row[0]))
 
     def test_corruption_and_shutdown_errors_are_not_recovered(self):
-        for code, shutdown in ((11, False), (5, True)):
+        for code, shutdown in ((11, False), (5, True), (13, True)):
             with self.subTest(code=code, shutdown=shutdown):
                 error = sqlite3.OperationalError('failure')
                 error.sqlite_errorcode = code
@@ -215,6 +215,101 @@ class WorkerDatabaseTests(unittest.TestCase):
                     with self.assertRaises(sqlite3.OperationalError):
                         service._run_agent(self.root, str(self.config))
                 log.assert_not_called()
+
+    def test_real_sqlite_full_reopens_without_losing_or_relaunching_running_task(self):
+        self.agent._save(dict(id='existing', state='running', attempt=1, generation=2,
+            container_name='expman-existing-1', spec={'backend': 'docker'}))
+        expected = self.agent.records()
+        self.agent.close()
+        created, observed = [], []
+
+        def construct(config):
+            agent = Agent(config)
+            created.append(agent)
+            def tick(**kwargs):
+                if len(created) == 1:
+                    pages = agent.db.execute('PRAGMA page_count').fetchone()[0]
+                    agent.db.execute('PRAGMA max_page_count=' + str(pages))
+                    agent._save(agent.records()[0], payload='x' * (1024 * 1024))
+                    self.fail('The real SQLite write should exhaust the page limit')
+                observed.append(agent.records())
+                return dict(online=True, jobs=agent.records())
+            agent.tick = tick
+            return agent
+
+        with patch('expman.agent.Agent', side_effect=construct), \
+                patch.object(service, '_update_stop_at_boundary', side_effect=lambda *args: bool(observed)), \
+                patch.object(service.time, 'sleep'), redirect_stdout(io.StringIO()) as output, \
+                patch.object(Agent, '_exec', side_effect=AssertionError('Must not change Docker')), \
+                patch.object(Agent, '_start', side_effect=AssertionError('Must not create an attempt')):
+            service._run_agent(self.root / 'client', str(self.config))
+        self.assertEqual(len(created), 2)
+        self.assertEqual(observed, [expected])
+        self.assertTrue(all(agent.closed for agent in created))
+        state = common.read_json(self.root / 'client/status.json')
+        self.assertTrue(state['online'])
+        self.assertEqual(state['database_recoveries'], 1)
+        self.assertIn('database or disk is full', output.getvalue())
+        diagnostic = state['last_database_diagnostics']
+        self.assertEqual(diagnostic['pragmas']['page_count'], diagnostic['pragmas']['max_page_count'])
+        self.assertGreater(diagnostic['filesystems'][0]['available_bytes'], 1024 * 1024)
+        self.assertNotIn('private-test-secret', output.getvalue() + json.dumps(state))
+
+    def test_background_full_is_latched_before_main_loop_can_schedule(self):
+        db = self.agent.result_delivery.control_db
+        pages = db.execute('PRAGMA page_count').fetchone()[0]
+        db.execute('PRAGMA max_page_count=' + str(pages))
+        with self.assertRaises(sqlite3.OperationalError) as raised:
+            with db:
+                db.execute("INSERT INTO node_delivery_meta VALUES ('capacity-test', ?)", ('x' * 1048576,))
+        self.assertTrue(worker_database.storage_full(raised.exception))
+        self.assertFalse(db.in_transaction)
+        with patch.object(self.agent, '_start', side_effect=AssertionError('No scheduling while storage failed')):
+            with self.assertRaises(sqlite3.OperationalError) as main_error:
+                self.agent.tick()
+        self.assertIs(main_error.exception, raised.exception)
+        self.assertEqual(raised.exception.storage_diagnostics['phase'], 'execute')
+
+    def test_storage_failure_status_and_log_writes_cannot_kill_recovery(self):
+        import errno
+        from unittest.mock import Mock
+        self.agent.close()
+        full = sqlite3.OperationalError('database or disk is full')
+        full.sqlite_errorcode, full.sqlite_errorname = 13, 'SQLITE_FULL'
+        agent = Mock()
+        agent.config = common.read_json(self.config)
+        attempts, snapshots = [], []
+        write_status = service._write_status
+        def loop(root, current):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise full
+            snapshots.append(common.read_json(root / 'status.json'))
+        def status(root, **kwargs):
+            if len(attempts) == 1 and not getattr(status, 'failed', False):
+                status.failed = True
+                raise OSError(errno.ENOSPC, 'status filesystem full')
+            return write_status(root, **kwargs)
+        with patch('expman.agent.Agent', return_value=agent), \
+                patch.object(service, '_agent_loop', side_effect=loop), \
+                patch.object(service, '_write_status', side_effect=status), \
+                patch.object(service, '_log_exception', side_effect=OSError(errno.ENOSPC, 'log filesystem full')), \
+                patch.object(service.time, 'sleep'):
+            service._run_agent(self.root / 'client', str(self.config))
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(snapshots[0]['storage_recovery_pending'])
+        self.assertIn('last_database_diagnostics', snapshots[0])
+        self.assertEqual(agent.close.call_count, 2)
+
+    def test_storage_full_classification_does_not_retry_corruption_or_other_io(self):
+        import errno
+        self.assertTrue(worker_database.storage_full(OSError(errno.ENOSPC, 'full')))
+        self.assertTrue(worker_database.storage_full(OSError(errno.EDQUOT, 'quota')))
+        self.assertFalse(worker_database.storage_full(OSError(errno.EIO, 'I/O error')))
+        self.assertTrue(worker_database.storage_full(sqlite3.OperationalError('database or disk is full')))
+        error = sqlite3.OperationalError('database or disk is full')
+        error.sqlite_errorcode = 11
+        self.assertFalse(worker_database.storage_full(error))
 
     def test_extended_and_legacy_busy_codes_exclude_other_failures(self):
         for code in (5, 6, 261, 262, 517):

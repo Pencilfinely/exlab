@@ -755,7 +755,9 @@ def _log_exception(root, error):
                     python_version=sys.version.split()[0], sqlite_version=sqlite3.sqlite_version,
                     sqlite_errorcode=getattr(error, 'sqlite_errorcode', None),
                     sqlite_errorname=getattr(error, 'sqlite_errorname', None))
-    print('Worker exception / 算力端异常: ' + json.dumps(metadata, ensure_ascii=False), flush=True)
+    if getattr(error, 'storage_diagnostics', None):
+        metadata['storage'] = error.storage_diagnostics
+    print('Worker exception / 算力端异常: ' + _redact(root, json.dumps(metadata, ensure_ascii=False)), flush=True)
     trace = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
     print(_redact(root, trace), flush=True)
 
@@ -783,6 +785,7 @@ def _agent_loop(root, agent):
             state = record.get('state', 'unknown')
             counts[state] = counts.get(state, 0) + 1
         _write_status(root, status='online' if online else 'offline', online=online,
+                      storage_recovery_pending=False,
                       controller_agent=snapshot.get('controller_agent', {}), availability=snapshot.get('availability', {}),
                       compute_control=snapshot.get('compute_control'),
                       detail=detail, jobs=counts)
@@ -799,28 +802,72 @@ def _run_agent(root, config_path):
     from .agent import Agent
     from . import worker_database
     recoveries = 0
+    storage_failures = 0
+    pending_status = None
+
+    def persist_pending():
+        if pending_status is not None:
+            try:
+                _write_status(root, **pending_status)
+            except OSError as error:
+                if not worker_database.storage_full(error):
+                    raise
+                # Keep the original fault in memory when even status.json cannot
+                # be written. Persist it before the first successful reconnect.
+
     while True:
         agent = None
+        delay = 5
         try:
+            persist_pending()
             agent = Agent(config_path)
             _agent_loop(root, agent)
             return
-        except sqlite3.Error as error:
-            recoverable = isinstance(error, sqlite3.InterfaceError) or worker_database.transient(error)
+        except (sqlite3.Error, OSError) as error:
+            full = worker_database.storage_full(error)
+            recoverable = full or isinstance(error, sqlite3.InterfaceError) or worker_database.transient(error)
             if not recoverable or _shutdown_requested(root):
                 raise  # A failed save/exit must remain visible, not be retried silently.
-            _log_exception(root, error)
+            if full:
+                storage_failures += 1
+                delay = min(60, 5 * 2 ** min(storage_failures, 4))
+                if not getattr(error, 'storage_diagnostics', None):
+                    try:
+                        config = common.read_json(config_path)
+                        runtime = Path(config['root']).expanduser()
+                        if not runtime.is_absolute():
+                            runtime = Path(config_path).parent / runtime
+                        connection = getattr(agent, 'db', None)
+                        error.storage_diagnostics = worker_database.storage_snapshot(runtime / 'node.sqlite3',
+                            connection if isinstance(connection, sqlite3.Connection) else None)
+                        error.storage_diagnostics.update(os_errno=getattr(error, 'errno', None),
+                                                         failed_path=getattr(error, 'filename', None))
+                    except (OSError, ValueError, TypeError, KeyError):
+                        pass
+            try:
+                _log_exception(root, error)
+            except OSError as logging_error:
+                if not worker_database.storage_full(logging_error):
+                    raise
             recoveries += 1
-            detail = 'Transient database error; reconnecting worker / 数据库暂时异常，正在恢复管理代理'
-            _write_status(root, status='offline', online=False, detail=detail,
-                          database_recoveries=recoveries, last_database_error=_redact(root, str(error)),
-                          last_database_error_at=time.time())
+            detail = (f'存储写入受限，{delay} 秒后重试；保留现有 Docker 实验，故障信息将在可写时保存'
+                      if full else 'Transient database error; reconnecting worker / 数据库暂时异常，正在恢复管理代理')
+            first_diagnostics = (pending_status or {}).get('first_database_diagnostics')
+            pending_status = dict(status='offline', online=False, detail=detail,
+                storage_recovery_pending=full, database_recoveries=recoveries,
+                last_database_error=_redact(root, str(error)), last_database_error_at=time.time())
+            if getattr(error, 'storage_diagnostics', None):
+                pending_status['last_database_diagnostics'] = json.loads(_redact(root,
+                    json.dumps(error.storage_diagnostics, ensure_ascii=False)))
+                pending_status['first_database_diagnostics'] = (first_diagnostics or
+                    pending_status['last_database_diagnostics'])
+            persist_pending()
         finally:
             # Releases the SQLite connections and execution lock; Docker
             # containers keep running and the next Agent reads the same records.
             if agent is not None:
                 agent.close()
-        for _ in range(50):
+        for _ in range(int(delay * 10)):
             if _shutdown_requested(root) or _update_pending(root):
                 break
             time.sleep(0.1)

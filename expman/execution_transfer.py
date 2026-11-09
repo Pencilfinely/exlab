@@ -52,6 +52,7 @@ class ExecutionTransfer:
         self.root = agent.root
         self.config = agent.config
         self.write_lock = agent.db.write_lock
+        self.storage_faults = agent.db.storage_faults
         self.stop = threading.Event()
         self.thread = None
         initialize(agent.db)
@@ -170,7 +171,8 @@ class ExecutionTransfer:
             self._meta(db, "restoring", None)
 
     def _run(self):
-        db = worker_database.connect(self.root / "node.sqlite3", timeout=5, write_lock=self.write_lock)
+        db = worker_database.connect(self.root / "node.sqlite3", timeout=5, write_lock=self.write_lock,
+                                     storage_faults=self.storage_faults)
         db.row_factory = sqlite3.Row
         try:
             while not self.stop.is_set():
@@ -207,7 +209,7 @@ class ExecutionTransfer:
                         self._meta(db, "last_error", message)
                         self._meta(db, "next_retry_at", common.now() + 3)
                     except sqlite3.Error as reporting_error:
-                        if not worker_database.transient(reporting_error):
+                        if not (worker_database.transient(reporting_error) or worker_database.storage_full(reporting_error)):
                             raise
                         print("Checkpoint status deferred / 断点状态暂缓: " + message, flush=True)
                     self.stop.wait(3)

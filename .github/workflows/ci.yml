@@ -51,6 +51,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -t . -v
       - run: python -m compileall -q expman scripts
+      - name: Recover from real ENOSPC in a private 2 MiB filesystem
+        if: runner.os == 'Linux'
+        run: sudo "$(command -v python)" scripts/test_worker_storage_full.py
       - run: node --check expman/static/app.js
       - run: node tests/test_desktop_settings_ui.js
       - run: node --check expman/static/records.js
