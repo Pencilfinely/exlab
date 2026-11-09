@@ -145,7 +145,14 @@ print('PASS isolated engine, legacy registry port/digest pull, all volume hashes
     assert not engine.ENGINE.exists() and not engine.DATA.exists()
     assert migration.objects(['info', '--format', '{{json .}}'], source)['ID'] == source_id
     assert migration.objects(['inspect', registry['id']], source)[0]['Id'] == registry['id']
-    migration.rollback(job)
+    try:
+        migration.rollback(job)
+    except Exception:
+        # This fixture contains no user configuration or credentials. Preserve
+        # Docker's specific failure here; production errors remain redacted.
+        print(migration.objects(['inspect', legacy['id']], source)[0]['State'])
+        subprocess.run(['docker', '--host', source, 'start', legacy['id']], check=False)
+        raise
     assert migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
     print('PASS rollback preserved original daemon/data and restarted the original legacy registry')
 
