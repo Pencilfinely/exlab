@@ -1238,6 +1238,7 @@ class Agent:
                 self.active_legacy_upload = None
 
     def tick(self, stop_requested=None):
+        worker_database.raise_storage_fault(self.db)
         """One durable cycle; losing Hub connectivity never abandons local ownership."""
         self.result_delivery.start()
         self.execution_transfer.start()

@@ -216,6 +216,23 @@ bash /data/experiment-manager-a6000/client/Update-Worker.sh --auto disable
 
 ## 常见问题
 
+### 存储写入失败与自动恢复
+
+0.6.5 起，后台 Worker 遇到 `SQLITE_FULL`、`ENOSPC` 或 `EDQUOT` 会保留原节点与任务记录，
+暂停管理调度并按 10–60 秒间隔重连数据库；现有 Docker 容器不重建、不停止。
+状态中的 `storage_recovery_pending` 表示仍在等待恢复，下一次成功轮询后清除。
+这不等于自动释放了磁盘空间；持续空间不足仍需按实际占用处理。
+
+`Client-Worker.sh logs` 返回的状态含 `first_database_diagnostics` 和
+`last_database_diagnostics`，日志的异常记录也包含同样的现场信息。
+优先核对失败连接的 `page_count/max_page_count`、数据库和 WAL 大小，以及数据库目录和
+临时目录的可用字节数、inode、文件大小限制。只查重启后的 `df` 或新连接的页数上限，
+不能还原失败连接当时的限制。诊断不包含 SQL 参数、任务正文或完整环境变量。
+若连日志和状态文件都无法写入，代理会在内存中保留故障信息并在可写时补存。
+
+数据库损坏、其他 I/O 错误及“保存退出”中的失败仍会明确报错，不会假装已经恢复或退出成功。
+不要删除 `node.sqlite3`、WAL 或实验目录来绕过报错。
+
 | 现象 | 下一步 |
 |---|---|
 | 节点一直准备中 | 打开算力应用日志，首次镜像下载可能耗时较长 |

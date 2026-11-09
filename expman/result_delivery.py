@@ -119,7 +119,8 @@ class ResultDelivery:
 
     def _connect(self):
         db = worker_database.connect(self.root / "node.sqlite3", check_same_thread=False,
-                                     timeout=10, write_lock=self.agent.db.write_lock)
+                                     timeout=10, write_lock=self.agent.db.write_lock,
+                                     storage_faults=self.agent.db.storage_faults)
         db.row_factory = sqlite3.Row
         return db
 
@@ -695,6 +696,6 @@ class ResultDelivery:
             if key == "control_error":
                 self._meta(db, "control_error_at", common.now())
         except sqlite3.Error as reporting_error:
-            if not worker_database.transient(reporting_error):
+            if not (worker_database.transient(reporting_error) or worker_database.storage_full(reporting_error)):
                 raise
             print("Delivery status deferred / 回传状态暂缓: " + self._error(error), flush=True)
