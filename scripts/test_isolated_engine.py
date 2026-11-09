@@ -52,6 +52,15 @@ def main():
     common.atomic_json(job / 'source-daemon.json', daemon)
     run('sudo', 'cp', str(job / 'source-daemon.json'), '/etc/docker/daemon.json')
     run('sudo', 'systemctl', 'restart', 'docker.service')
+    source_network = migration.objects(['network', 'inspect', 'bridge'], source)[0]
+    assert source_network['Options']['com.docker.network.bridge.name'] == source_bridge
+    assert not source_network['Containers']
+    # Restoring the runner's previous network database can recreate its now
+    # unused docker0 once. Remove only this empty disposable-runner interface,
+    # after proving the source daemon uses our dedicated bridge instead.
+    if Path('/sys/class/net/docker0').exists():
+        assert not list(Path('/sys/class/net/docker0/brif').iterdir())
+        run('sudo', 'ip', 'link', 'delete', 'docker0')
     assert migration.containerd_store(migration.objects(['info', '--format', '{{json .}}'], source)) == (store == 'containerd')
     source_id = migration.objects(['info', '--format', '{{json .}}'], source)['ID']
     # Keep the standard /var/run proxy path used by real Desktop integration.
