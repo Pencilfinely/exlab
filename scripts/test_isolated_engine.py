@@ -105,7 +105,7 @@ def main():
     # Bound the regression: the broken implementation would wait forever for
     # expman-registry, even after the actual workload had exited successfully.
     queue_deadline = time.monotonic() + 45
-    def idle():
+    def idle(_root):
         assert time.monotonic() < queue_deadline, 'Permanent registry blocked migration queue'
         assert migration.objects(['inspect', legacy['id']], source)[0]['State']['Running']
         return True
