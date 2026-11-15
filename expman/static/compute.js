@@ -11,6 +11,7 @@
     const matching=control&&control.policy&&['mode','revision','source','until','reason'].every(key=>(control.policy[key]??null)===(availability[key]??null));
     const hostConfirmed=snap.host_control?.online&&snap.host_control.matches;
     if(hostConfirmed&&snap.host_control.phase==='restarting')return {label:'正在恢复运行环境',detail:snap.host_control.detail};
+    if(hostConfirmed&&snap.host_control.phase==='blocked'&&mode!=='release')return {label:'运行环境操作未完成',detail:snap.host_control.detail};
     if(pending&&!hostConfirmed)return {label:'策略待 Worker 接收',detail:'已保存的策略尚未被 Worker 接收，不能据此确认实验停止或资源释放。'};
     if(worker.online===false||!snap.host_control?.online&&worker.last_seen!==undefined&&Date.now()/1000-worker.last_seen>=45)
       return {label:'离线 · 当前执行状态未知',detail:matching?'上次回报：'+phaseLabels[control.phase]+'。'+control.detail:'等待 Worker 连接并核验；离线不能视为已释放。'};
@@ -46,12 +47,12 @@
   }
   function pauseEditor(worker,ctx,preset='pause'){
     const {node,api,refresh,notify}=ctx,snap=worker.snapshot||{},supported=(snap.capabilities||[]).includes('dynamic-compute-v1'),confirmed=(snap.capabilities||[]).includes('compute-control-v2');
-    const original={...defaults(),...clone(worker.compute_policy||{})},resuming=preset==='available';
+    const original={...defaults(),...clone(worker.compute_policy||{})},resuming=preset==='available',runtime=snap.runtime_host==='windows';
     const holds=restrictions(worker),centerPaused=worker.mode==='drain'||original.mode!=='available'&&(original.until==null||original.until>Date.now()/1000);
     const dialog=node('dialog',undefined,'workspace-dialog compute-dialog'),form=node('form'),feedback=node('p','','inline-feedback');
-    form.append(node('h2',`${worker.display_name||worker.id} · ${resuming?'恢复接单':'暂停节点'}`),node('p','当前：'+nodeState(worker).label,'compute-current'));
+    form.append(node('h2',`${worker.display_name||worker.id} · ${resuming?(runtime?'启用资源并接单':'恢复接单'):'暂停节点'}`),node('p','当前：'+nodeState(worker).label,'compute-current'));
     const options=[['drain','只暂停接单','当前实验继续运行，仍会占用资源。'],['stop','停止当前实验','保存并停止，保留本机任务和环境，之后手动续训。'],['release','停止并释放资源','保存并停止实验；Windows 同时关闭空闲 Docker / WSL，释放内存。可续训的任务交给其他节点。']];
-    let selected=resuming?'available':preset==='release'?'release':original.until!=null&&original.until<=Date.now()/1000?'drain':['drain','stop','release'].includes(original.mode)?original.mode:'drain';
+    let selected=resuming?'available':['release','shutdown'].includes(preset)?'release':original.until!=null&&original.until<=Date.now()/1000?'drain':['drain','stop','release'].includes(original.mode)?original.mode:'drain';
     if(!confirmed&&selected!=='available')selected='drain';
     const cards=[];
     if(!resuming){
@@ -76,9 +77,9 @@
     function update(){
       for(const item of cards){item.input.checked=item.mode===selected;item.input.autofocus=item.input.checked;item.card.className='compute-choice'+(item.input.checked?' is-selected':'')+(item.input.disabled?' is-disabled':'');}
       const option=options.find(item=>item[0]===selected);
-      save.textContent=resuming?(holds.length?(centerPaused?'解除管理端暂停':'请先满足上方条件'):'确认恢复接单'):{drain:'确认暂停接单',stop:'保存并停止实验',release:'停止并释放资源'}[selected];
+      save.textContent=resuming?(holds.length?(centerPaused?'解除管理端暂停':'请先满足上方条件'):runtime?'启用 Docker / WSL 并接单':'确认恢复接单'):{drain:'确认暂停接单',stop:'保存并停止实验',release:'停止并释放资源'}[selected];
       save.disabled=resuming&&holds.length>0&&!centerPaused;
-      summary.textContent=resuming?'恢复此节点接收新任务，保留电源与维护限制。':option[2]+(duration.value==='manual'?' 直到你手动恢复。':duration.value==='custom'?' 在指定时间恢复接单。':` ${Number(duration.value)/60} 小时后恢复接单。`);
+      summary.textContent=resuming?(runtime?'Windows 控制代理将启动 Docker / WSL 和 Worker，环境就绪后接单。':'恢复此节点接收新任务，保留电源与维护限制。'):option[2]+(duration.value==='manual'?' 直到你手动恢复。':duration.value==='custom'?' 在指定时间恢复接单。':` ${Number(duration.value)/60} 小时后恢复接单。`);
       summary.hidden=resuming&&holds.length>0;
       scope.hidden=selected!=='release';
     }
@@ -141,9 +142,13 @@
     const {node}=ctx,snap=worker.snapshot||{},supported=(snap.capabilities||[]).includes('dynamic-compute-v1'),availability=snap.availability;
     const state=nodeState(worker);
     if(availability)box.append(node('p',`${state.label}${availability.until?' · 截止 '+new Date(availability.until*1000).toLocaleString():''}`,'resource-sync'),node('p',state.detail,'muted'));
-    const actions=node('div',undefined,'actions compute-node-actions'),pause=node('button','暂停节点…'),resume=node('button','恢复接单','subtle');
+    const actions=node('div',undefined,'actions compute-node-actions'),pause=node('button','暂停 / 停止…'),resume=node('button',snap.runtime_host==='windows'?'启用资源并接单':'恢复接单','subtle');
     pause.dataset.control='true';resume.dataset.control='true';
-    pause.onclick=()=>pauseEditor(worker,ctx);resume.onclick=()=>pauseEditor(worker,ctx,'available');actions.append(pause,resume);box.append(actions);
+    pause.onclick=()=>pauseEditor(worker,ctx);resume.onclick=()=>pauseEditor(worker,ctx,'available');actions.append(pause,resume);
+    if((snap.capabilities||[]).includes('compute-control-v2')){
+      const release=node('button',snap.runtime_host==='windows'?'停用并释放 Docker / WSL':'停用并释放训练资源','subtle');release.dataset.control='true';release.onclick=()=>pauseEditor(worker,ctx,'shutdown');actions.append(release);
+    }
+    box.append(actions);
     for(const note of restrictions(worker))box.append(node('p',note,'compute-constraint'));
     const button=node('button','节点长期设置','subtle compute-settings');button.disabled=!supported;button.onclick=()=>policyEditor(worker,ctx,false);box.append(button);
     const delivery=snap.execution_delivery;

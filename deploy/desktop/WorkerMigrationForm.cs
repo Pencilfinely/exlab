@@ -32,7 +32,7 @@ namespace ExperimentManagerDesktop {
             Text="Worker · 开机启动";Size=new Size(720,740);MinimumSize=new Size(700,540);StartPosition=FormStartPosition.CenterParent;Font=new Font("Microsoft YaHei UI",10);BackColor=Color.White;ForeColor=WorkerUi.Ink;
             var panel=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(28)};Controls.Add(panel);
             panel.Controls.Add(WorkerUi.Copy("开机运行，无需登录",620,true));
-            panel.Controls.Add(WorkerUi.Copy("提交后等待当前实验结束，再自动迁移；可关闭窗口。",620));
+            panel.Controls.Add(WorkerUi.Copy("默认原位切换，不复制 Ubuntu 和实验数据。等待当前实验结束后自动迁移；可关闭窗口。",620));
             source.Text=selectedSource??App.Text(App.ReadSettings(),"distribution");
             if(String.IsNullOrWhiteSpace(source.Text)) {
                 var choices=Array.FindAll(App.RegisteredDistributions(),n=>!n.StartsWith("docker-desktop",StringComparison.OrdinalIgnoreCase));
@@ -42,7 +42,7 @@ namespace ExperimentManagerDesktop {
             dataFolder.Text=selectedDataFolder??WorkerDataMove.Suggested(source.Text);
             panel.Controls.Add(inputs);
             var selection=WorkerUi.Copy("环境："+(source.Text.Length>0?source.Text:"待选择"),620);inputs.Controls.Add(selection);
-            Add(inputs,"Worker 数据位置",dataFolder);
+            Add(inputs,"Worker 数据位置（默认保留原位置，换盘可选）",dataFolder);
             var diskActions=new FlowLayoutPanel {AutoSize=true,MaximumSize=new Size(620,0)};
             var chooseData=new Button {Text="选择数据目录"};var checkSpace=new Button {Text="检测空间"};
             foreach(var button in new[]{chooseData,checkSpace}){WorkerUi.Button(button);diskActions.Controls.Add(button);}inputs.Controls.Add(diskActions);
