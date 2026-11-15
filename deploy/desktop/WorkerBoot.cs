@@ -198,9 +198,11 @@ namespace ExperimentManagerDesktop {
                             var current=Command(c,"status");
                             if(App.Flag(current,"running")&&(App.Text(current,"status")=="online"||App.Text(current,"status")=="offline")) {
                                 hold=EnsureHold(c,hold);
+                                if(desired!=null)host.Observe(App.Text(desired,"intent"),"retained","Docker / WSL 已启用，Worker 正在运行。");
                                 WriteStatus(App.Text(current,"status"),App.Text(current,"detail"));retry.Completed();Thread.Sleep(5000);continue;
                             }
                             WriteStatus("starting","正在检查独立 Docker 与 GPU…");
+                            if(desired!=null)host.Observe(App.Text(desired,"intent"),"restarting","正在启用 Docker / WSL 并检查 GPU。");
                             App.RunWithTimeout(45000,"wsl.exe","-d",c.Distribution,"-u","root","--exec","systemctl","start",ServiceName(c));
                             var check=Inspect(c);if(!App.Flag(check,"ready")||App.Text(check,"node_id")!=c.NodeId)throw new IOException(App.Text(check,"detail","节点检查未通过。"));
                             var state=Command(c,"start");

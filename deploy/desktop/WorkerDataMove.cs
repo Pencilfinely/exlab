@@ -29,12 +29,12 @@ namespace ExperimentManagerDesktop {
             string current=null;
             try {current=WorkerMigration.DistributionPath(distribution);}catch(IOException){}
             string system=Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows));
-            if(current!=null&&!Same(Path.GetPathRoot(current),system))return current;
+            // Unattended startup does not require moving the existing VHD.
+            if(current!=null)return current;
             DriveInfo best=null;
             foreach(var drive in DriveInfo.GetDrives())try {
                 if(drive.IsReady&&drive.DriveType==DriveType.Fixed&&drive.DriveFormat=="NTFS"&&!Same(drive.Name,system)&&(best==null||drive.AvailableFreeSpace>best.AvailableFreeSpace))best=drive;
             }catch(IOException){}
-            if(best==null&&current!=null)return current;
             string name=Regex.Replace(distribution??"Ubuntu","[^A-Za-z0-9._-]","_");
             return Path.Combine(best==null?WorkerMigration.SuggestedFolder():Path.Combine(best.Name,"ExLabWorker"),name+"-Data");
         }

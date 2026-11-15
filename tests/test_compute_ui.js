@@ -43,6 +43,13 @@ async function main(){
   assert.equal(legacy.all().filter(x=>x.type==='radio'&&x.disabled).length,2);
   await legacy.onsubmit(event);assert.equal(calls[0][0],'/api/node-mode');assert.equal(calls[0][1].mode,'drain');
   console.log('PASS older workers retain simple admission pause with unsupported stop/release disabled');
+  calls=[];const windows=node('div');
+  compute.renderNode(windows,{id:'win2080',mode:'run',snapshot:{runtime_host:'windows',capabilities:['dynamic-compute-v1','compute-control-v2']}},ctx);
+  const releaseButton=windows.all().find(x=>x.textContent==='停用并释放 Docker / WSL');
+  assert.ok(releaseButton);assert.ok(windows.all().find(x=>x.textContent==='启用资源并接单'));
+  releaseButton.onclick();const shutdown=body.children.at(-1).children[0];await shutdown.onsubmit(event);
+  assert.equal(calls[0][1].policy.mode,'release');assert.equal(calls[0][1].policy.until,null);
+  console.log('PASS explicit runtime release remains stopped until manually enabled');
   const desired={mode:'release',revision:8,source:'center',until:null,reason:'游戏'};
   const worker={id:'70ti',online:true,mode:'run',compute_policy:{revision:8},snapshot:{compute_policy_revision:8,availability:desired}};
   assert.equal(compute.nodeState(worker).label,'等待 Worker 核验');

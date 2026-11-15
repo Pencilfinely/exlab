@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from contextlib import closing
 import hashlib
 import io
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import socket
+import sqlite3
 import subprocess
 import tarfile
 import time
@@ -142,6 +146,54 @@ def image_refs(value):
     return found
 
 
+def required_images(config, worker_root, available_refs):
+    """Keep configured environments and cached images used by recorded tasks.
+
+    Historical environments already evicted from the source stay on-demand;
+    their registry and task records are preserved by the migration.
+    """
+    refs = image_refs(config)
+    database = Path(worker_root) / 'node.sqlite3'
+    if database.exists():
+        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
+            for (record,) in db.execute('SELECT record FROM tasks'):
+                refs.update(image_refs(json.loads(record)) & set(available_refs))
+    return refs
+
+
+def image_space(endpoint, images):
+    """Engine-wide deduplicated usage is an upper bound for selected images.
+
+    Docker's containerd image Size is compressed content, while classic Size
+    is unpacked. Never multiply a sum of per-image sizes (shared CUDA layers).
+    A single-image load may stage its unpacked archive, so budget that peak too.
+    """
+    environment(endpoint)
+    connection = http.client.HTTPConnection('localhost', timeout=60)
+    connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    connection.sock.settimeout(60)
+    try:
+        connection.sock.connect(endpoint[7:])
+        connection.request('GET', '/system/df')
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError('无法读取 Docker 去重后的存储统计，请重试检测。')
+        used = json.load(response).get('LayersSize')
+    finally:
+        connection.close()
+    if type(used) is not int or used < 0:
+        raise ValueError('Docker 未提供有效的镜像存储统计。')
+    peak = 0
+    for item in images:
+        sizes = docker(['image', 'history', '--no-trunc', '--human=false',
+                        '--format', '{{.Size}}', item['Id']], endpoint).splitlines()
+        if not sizes or any(not size.strip().isdigit() for size in sizes):
+            raise ValueError('无法读取镜像展开大小，请重试检测。')
+        peak = max(peak, sum(int(size) for size in sizes), int(item['Size']))
+    return {'image_bytes': used, 'transfer_peak_bytes': peak,
+            'image_size_sum_bytes': sum(int(item['Size']) for item in images)}
+
+
 def docker_client_config(value):
     """Keep inline auths; Desktop-only credential helpers cannot survive uninstall."""
     value = dict(value)
@@ -257,23 +309,23 @@ def inspect(service_root=None, *, defer_busy=False):
     endpoint, info = desktop_source(checked['docker_endpoint'], checked.get('docker_id'))
     waiting = [] if defer_busy else None
     registries, preserved = inspect_containers(endpoint, candidate['node_id'], waiting)
-    refs = image_refs(config)
     image_ids = docker(['image', 'ls', '-q', '--no-trunc'], endpoint).split()
     all_images = objects(['image', 'inspect', *sorted(set(image_ids))], endpoint) if image_ids else []
-    for item in all_images:
-        refs.update(ref for ref in (item.get('RepoDigests') or []) if LOCAL_IMAGE.fullmatch(ref))
+    refs = required_images(config, candidate['root'],
+                          {ref for item in all_images for ref in (item.get('RepoDigests') or [])})
     images = {ref: objects(['image', 'inspect', ref], endpoint)[0]['Id'] for ref in sorted(refs)}
     gpus = [g for g in worker_gpu._inventory(config) if g['local_enabled']]
     if not gpus:
         raise ValueError('原节点没有已启用且已验证的 GPU，无法进行迁移验收。请先完成原节点的显卡设置。')
     helper = next(iter(worker_gpu._profiles(config, gpus[0]['name']).values()))
     used = int(run(['df', '--output=used', '--block-size=1', '/']).splitlines()[-1].strip())
-    cache = sum(int(i.get('Size', 0)) for i in all_images if i['Id'] in set(images.values()) | {r['image'] for r in registries})
+    selected = [i for i in all_images if i['Id'] in set(images.values()) | {r['image'] for r in registries}]
+    space = image_space(endpoint, selected)
     from .worker_transfer import summary
     registry_bytes = sum(summary(endpoint, r['volume'], images[helper])['bytes'] for r in registries)
     # Original filesystem stays in place. Account for the destination image
     # store (including compressed/unpacked layers), registry and package setup.
-    required = int(1.15 * (2 * cache + registry_bytes)) + 4 * 1024 ** 3
+    required = int(1.15 * (space['image_bytes'] + space['transfer_peak_bytes'] + registry_bytes)) + 2 * 1024 ** 3
     return dict(ready=True, service_root=str(root), config=str(path), node_id=candidate['node_id'],
                 worker_root=candidate['root'], linux_user=linux_user,
                 uid=os.getuid(), gid=os.getgid(), engine_id=info['ID'], endpoint=endpoint,
@@ -281,7 +333,7 @@ def inspect(service_root=None, *, defer_busy=False):
                 registries=registries, images=images, helper=helper, gpus=gpus,
                 required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved, waiting=waiting or [],
                 mode='in_place', space={'filesystem_copy_bytes': 0, 'existing_filesystem_bytes': used,
-                    'image_bytes': cache, 'registry_bytes': registry_bytes, 'required_bytes': required})
+                    **space, 'registry_bytes': registry_bytes, 'required_bytes': required})
 
 
 def load_job(job):
