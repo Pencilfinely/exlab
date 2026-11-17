@@ -132,16 +132,17 @@ class EngineTransactionTests(unittest.TestCase):
         engine.begin(self.job, self.job.name)
         binary = engine.ENGINE / 'usr/bin'
         binary.mkdir(parents=True)
-        for name in ('docker', 'dockerd', 'containerd', 'runc'):
+        for name in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
             (binary / name).write_text('extracted')
         desktop = Path(self.user.pw_dir) / '.docker/config.json'
         common.atomic_json(desktop, {'credsStore': 'desktop.exe', 'auths': {'registry': {'auth': 'test'}}})
         before = desktop.read_bytes()
-        with patch.object(engine.subprocess, 'run'):
+        with patch.object(engine.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
             engine.configure(self.job, self.job.name)
         daemon = common.read_json(engine.CONFIG)
         self.assertEqual(daemon['hosts'], [engine.ENDPOINT])
         self.assertEqual(daemon['data-root'], str(engine.DATA))
+        self.assertEqual(daemon['userland-proxy-path'], str(binary / 'docker-proxy'))
         self.assertNotIn('runc', daemon['runtimes'])  # reserved by Docker
         self.assertEqual(daemon['default-runtime'], 'exlab-runc')
         self.assertEqual(daemon['containerd'], '/run/exlab-containerd/containerd.sock')
@@ -160,9 +161,9 @@ class EngineTransactionTests(unittest.TestCase):
         engine.begin(self.job, self.job.name)
         binary = engine.ENGINE / 'usr/bin'
         binary.mkdir(parents=True)
-        for name in ('docker', 'dockerd', 'containerd', 'runc'):
+        for name in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
             (binary / name).write_text('extracted')
-        with patch.object(engine.subprocess, 'run'):
+        with patch.object(engine.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
             engine.configure(self.job, self.job.name)
         self.assertTrue(common.read_json(engine.CONFIG)['features']['containerd-snapshotter'])
 
@@ -174,6 +175,20 @@ class EngineTransactionTests(unittest.TestCase):
             self.skipTest('Symbolic links unavailable')
         with self.assertRaises(ValueError):
             engine.direct(link / 'new-config')
+
+    def test_docker_validation_error_preserves_detail_before_service_creation(self):
+        engine.begin(self.job, self.job.name)
+        binary = engine.ENGINE / 'usr/bin'
+        binary.mkdir(parents=True)
+        for name in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
+            (binary / name).write_text('extracted')
+        with patch.object(engine.subprocess, 'run', side_effect=[
+                subprocess.CompletedProcess([], 0, '', ''),
+                subprocess.CompletedProcess([], 1, '', 'invalid userland-proxy-path')]):
+            with self.assertRaisesRegex(ValueError, 'invalid userland-proxy-path'):
+                engine.configure(self.job, self.job.name)
+        self.assertFalse(engine.UNIT.exists())
+        self.systemctl.assert_not_called()
 
 
 class StreamTransferTests(unittest.TestCase):

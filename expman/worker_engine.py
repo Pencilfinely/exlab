@@ -129,12 +129,13 @@ def configure(job, identity):
     if common.read_json(MARKER).get('job_id') != identity:
         raise ValueError('引擎归属不符')
     check_network_isolation()
-    for binary in ('docker', 'dockerd', 'containerd', 'runc'):
+    for binary in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
         if not (ENGINE / 'usr/bin' / binary).is_file():
             raise ValueError('独立引擎缺少组件：' + binary)
     daemon = {'hosts': [ENDPOINT], 'data-root': str(DATA), 'exec-root': '/run/exlab-docker/exec',
               'pidfile': '/run/exlab-docker/dockerd.pid', 'group': 'docker',
               'bridge': 'none', 'iptables': False, 'ip6tables': False, 'ip-masq': False,
+              'userland-proxy-path': str(ENGINE / 'usr/bin/docker-proxy'),
               'containerd': '/run/exlab-containerd/containerd.sock',
               # Preserve image identity semantics across classic/containerd stores.
               'features': {'containerd-snapshotter': bool(value.get('containerd_store'))},
@@ -148,8 +149,10 @@ def configure(job, identity):
     private_write(CONFIG, daemon)
     CONFIG.chmod(0o644)
     subprocess.run(['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--config=' + str(CONFIG)], check=True, timeout=60)
-    subprocess.run([str(ENGINE / 'usr/bin/dockerd'), '--validate', '--config-file=' + str(CONFIG)],
-                   check=True, capture_output=True, text=True, timeout=30)
+    checked = subprocess.run([str(ENGINE / 'usr/bin/dockerd'), '--validate', '--config-file=' + str(CONFIG)],
+                             capture_output=True, text=True, timeout=30)
+    if checked.returncode:
+        raise ValueError('独立 Docker 配置校验失败：' + (checked.stderr or checked.stdout).strip()[:2000])
     CONTAINERD_CONFIG.write_text('version = 2\nroot = ' + json.dumps(str(DATA / 'containerd')) + '\n'
         'state = "/run/exlab-containerd"\n'
         'disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]\n'
