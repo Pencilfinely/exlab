@@ -37,6 +37,10 @@ class MigrationBusy(ValueError):
     """A transient occupancy condition, not a failed migration."""
 
 
+class SourceUnavailable(ValueError):
+    """Desktop has not yet recreated its socket inside this distribution."""
+
+
 def run(args, *, env=None, timeout=60):
     value = subprocess.run(args, env=env, capture_output=True, text=True, timeout=timeout)
     if value.returncode:
@@ -80,7 +84,7 @@ def source_socket(endpoint):
         if not socket.is_socket():
             raise ValueError('Docker 连接不是 Unix socket：' + endpoint)
     except OSError as error:
-        raise ValueError('Docker 连接暂不可用：' + endpoint + '；请等待 Docker Desktop 就绪后重试。') from error
+        raise SourceUnavailable('Docker 连接暂不可用：' + endpoint + '；请等待 Docker Desktop 就绪后重试。') from error
     resolved = PurePosixPath(socket.as_posix())
     reserved = ('/run/exlab-docker', '/run/exlab-containerd', '/opt/exlab/docker', '/var/lib/exlab-docker')
     if any(resolved.is_relative_to(prefix) for prefix in reserved):
@@ -344,15 +348,32 @@ def load_job(job):
     return job, value
 
 
-def same_source(value):
-    path, candidate, _ = worker_gpu._configuration(service._root(value['service_root']))
-    if str(path) != value['config'] or candidate['node_id'] != value['node_id']:
-        raise ValueError('原节点身份已变化，已阻止迁移。')
-    info = objects(['info', '--format', '{{json .}}'], value['endpoint'])
+def source_info(value, *, wait=False, timeout=120):
+    """Windows Desktop readiness precedes its per-distribution integration."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            source_socket(value['endpoint'])
+            info = objects(['info', '--format', '{{json .}}'], value['endpoint'])
+            break
+        except (SourceUnavailable, OSError, RuntimeError, subprocess.SubprocessError) as error:
+            if not wait:
+                raise
+            if time.monotonic() >= deadline:
+                raise RuntimeError('等待 Ubuntu 内的 Docker Desktop 连接超时；请检查 Docker Desktop 的 WSL 集成。') from error
+            time.sleep(1)
     if info.get('ID') != value['engine_id']:
         raise ValueError('原 Docker 引擎已变化，已阻止迁移。')
     if 'containerd_store' in value and containerd_store(info) != value['containerd_store']:
         raise ValueError('原 Docker 镜像存储已变化，请重新检测。')
+    return info
+
+
+def same_source(value, *, wait=False):
+    path, candidate, _ = worker_gpu._configuration(service._root(value['service_root']))
+    if str(path) != value['config'] or candidate['node_id'] != value['node_id']:
+        raise ValueError('原节点身份已变化，已阻止迁移。')
+    source_info(value, wait=wait)
 
 
 def cancelled(job):
@@ -709,7 +730,7 @@ def rollback(job):
         raise ValueError('环境已经交接，不能恢复旧配置。')
     if MARKER.exists() and common.read_json(MARKER, {}).get('job_id') == value['job_id']:
         raise ValueError('恢复原节点操作不能在迁移副本中执行。')
-    same_source(value)
+    same_source(value, wait=True)
     for item in value['registries']:
         current = registry(objects(['inspect', item['id']], value['endpoint'])[0], item['name'])
         if current['id'] != item['id']:

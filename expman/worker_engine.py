@@ -105,7 +105,7 @@ def context(job, identity):
 
 
 def begin(job, identity):
-    from .worker_migration import source_socket
+    from .worker_migration import source_info
     job, value, user, paths = context(job, identity)
     backup_path = job / 'engine-before.json'
     if backup_path.exists():
@@ -115,7 +115,7 @@ def begin(job, identity):
     client = Path(user.pw_dir) / '.config/exlab/docker'
     if any(path.exists() or path.is_symlink() for path in (MARKER, ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, client)):
         raise ValueError('此 Ubuntu 已有 ExLab 引擎或未完成的环境切换，请先恢复')
-    source_socket(value['endpoint'])
+    source_info(value, wait=True)
     check_network_isolation()
     private_write(backup_path, {'job_id': identity, 'files': {str(p): capture(p) for p in paths}})
     private_write(MARKER, {'job_id': identity, 'source_engine': value['engine_id'], 'service_root': value['service_root'],
@@ -235,14 +235,23 @@ def rollback(job, identity):
     private_write(job / 'engine-rollback.json', {'job_id': identity, 'ready': True})
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('begin', 'configure', 'rollback'))
     parser.add_argument('--job', required=True)
     parser.add_argument('--id', required=True)
-    args = parser.parse_args()
-    globals()[args.action](args.job, args.id)
+    args = parser.parse_args(argv)
+    try:
+        globals()[args.action](args.job, args.id)
+        return 0
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        from . import worker_service
+        value = common.read_json(Path(args.job) / 'manifest.json', {})
+        detail = worker_service._redact(worker_service._root(value.get('service_root')), str(error))[:4000]
+        # The Windows runner consumes structured stdout; stderr alone is lost.
+        print(json.dumps({'ready': False, 'detail': detail, 'step': args.action}, ensure_ascii=False))
+        return 2
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

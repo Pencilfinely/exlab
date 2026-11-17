@@ -1,4 +1,6 @@
 import os
+import io
+import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -36,6 +38,10 @@ class EngineTransactionTests(unittest.TestCase):
         manager.start();self.addCleanup(manager.stop)
         manager = patch.object(migration, 'source_socket', side_effect=lambda endpoint: endpoint)
         self.socket = manager.start();self.addCleanup(manager.stop)
+        manager = patch.object(migration, 'objects', side_effect=lambda *args: {
+            'ID': 'desktop-id', 'DriverStatus': [['driver-type', 'io.containerd.snapshotter.v1']]
+            if self.value.get('containerd_store') else []})
+        manager.start();self.addCleanup(manager.stop)
         manager = patch.object(engine, 'DEFAULT_BRIDGE', self.root / 'docker0')
         manager.start();self.addCleanup(manager.stop)
 
@@ -53,6 +59,24 @@ class EngineTransactionTests(unittest.TestCase):
         engine.begin(self.job, self.job.name)
         self.socket.assert_called_once_with(self.value['endpoint'])
         self.assertTrue((self.job / 'engine-before.json').exists())
+
+    def test_begin_waits_for_distribution_socket_before_creating_backup(self):
+        self.socket.side_effect = [migration.SourceUnavailable('socket pending'), self.value['endpoint']]
+        def waiting(_):
+            self.assertFalse((self.job / 'engine-before.json').exists())
+            self.assertFalse(engine.MARKER.exists())
+        with patch.object(migration.time, 'sleep', side_effect=waiting):
+            engine.begin(self.job, self.job.name)
+        self.assertTrue((self.job / 'engine-before.json').exists())
+
+    def test_engine_errors_reach_windows_as_structured_stdout(self):
+        output = io.StringIO()
+        with patch.object(engine, 'begin', side_effect=ValueError('原 Docker 引擎已变化')), \
+                patch('sys.stdout', output):
+            result = engine.main(['begin', '--job', str(self.job), '--id', self.job.name])
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(output.getvalue()), {
+            'ready': False, 'detail': '原 Docker 引擎已变化', 'step': 'begin'})
 
     def test_invalid_source_socket_stops_before_writing_configuration(self):
         self.socket.side_effect = ValueError('socket unavailable')
