@@ -428,6 +428,7 @@ namespace ExperimentManagerDesktop {
                 if(!App.Worker) DesktopSettings.SelectRoot(settings,dataPath);
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
                 settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.SaveSettings(settings);
+                if(App.Worker&&WorkerBoot.Managed)WorkerBoot.RefreshLauncher();
                 if(App.Worker&&WorkerBoot.Managed&&File.Exists(WorkerBoot.SuspendPath))File.Delete(WorkerBoot.SuspendPath);
                 string target=Path.Combine(destination,App.Executable);
                 App.InstallShortcuts(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),

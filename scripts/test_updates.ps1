@@ -421,6 +421,28 @@ static class InstallProbeTests {
     static Dictionary<string,object> Installed(Dictionary<string,object> stopped,string version="0.4.0") {
         var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
     }
+    static void BootLauncher(string folder) {
+        string root=Path.Combine(folder,"boot launcher"),version="1.2.3";
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root,"settings.json"),"{\"installed_version\":\"1.2.3\",\"release_detail\":\"已暂停接单，资源保留\"}",new System.Text.UTF8Encoding(false));
+        string launcher=Path.Combine(root,"boot-launcher.ps1");
+        File.WriteAllText(launcher,WorkerBoot.LauncherScript(),new System.Text.UTF8Encoding(true));
+        // Force a non-UTF8 default on every CI locale. The production script
+        // must explicitly select UTF8 to read the BOM-less settings file.
+        string wrapper=Path.Combine(root,"run.ps1");
+        File.WriteAllText(wrapper,"$PSDefaultParameterValues=@{'Get-Content:Encoding'='Unicode'}\n& (Join-Path $PSScriptRoot 'boot-launcher.ps1')\nexit $LASTEXITCODE\n",new System.Text.UTF8Encoding(true));
+        string executable=Path.Combine(root,"Programs","ExperimentManager","Worker",version,"ExLabWorker.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(executable));
+        File.Copy(Assembly.GetExecutingAssembly().Location,executable);
+        var info=new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe"),
+            App.Arguments("-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",wrapper)) {
+                UseShellExecute=false,CreateNoWindow=true,RedirectStandardError=true };
+        info.EnvironmentVariables["LOCALAPPDATA"]=root;
+        using(var child=Process.Start(info)) {
+            if(!child.WaitForExit(20000)){child.Kill();throw new Exception("Boot launcher timed out.");}
+            Assert(child.ExitCode==37,"UTF8 settings failed to launch the installed backend ("+child.ExitCode+"): "+child.StandardError.ReadToEnd());
+        }
+    }
     static void ComputeActivation(string folder) {
         var migrationFailure=WorkerMigration.FailureReply("Fetched packages\n{\"ready\": false, \"detail\": \"missing Docker proxy\", \"step\": \"configure\"}\n");
         Assert(migrationFailure!=null&&App.Text(migrationFailure,"detail")=="missing Docker proxy","Package output hid the structured migration error.");
@@ -950,8 +972,9 @@ static class InstallProbeTests {
         gated.SetResult(desired);await first;
     }
     static int Main(string[] args) {
+        if(args.Length==1&&args[0]=="--boot-run")return 37;
         try {
-            assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
+            BootLauncher(args[0]);assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");

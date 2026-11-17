@@ -18,6 +18,7 @@ namespace ExperimentManagerDesktop {
         readonly TextBox source=new TextBox {Width=590},folder=new TextBox {Width=590},dataFolder=new TextBox {Width=590};
         readonly TextBox password=new TextBox {Width=400,UseSystemPasswordChar=true};
         readonly Label status=WorkerUi.Copy("",620);
+        readonly Label bootStatus=WorkerUi.Copy("",620);
         readonly CheckBox dedicated=new CheckBox {Text="允许关闭 Ubuntu；改盘时重启空闲 Docker / WSL",AutoSize=true};
         readonly Button start=new Button {Text="迁移并开启"},recover=new Button {Text="恢复原节点"},cancel=new Button {Text="取消迁移",Visible=false};
         readonly TextBox details=new TextBox {Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Vertical,Width=620,Height=130,Visible=false,BorderStyle=BorderStyle.FixedSingle};
@@ -59,7 +60,7 @@ namespace ExperimentManagerDesktop {
             dedicated.Checked=confirmed;inputs.Controls.Add(dedicated);
             var actions=new FlowLayoutPanel {AutoSize=true,MaximumSize=new Size(620,0),Margin=new Padding(0,16,0,8)};
             panel.Controls.Add(actions);foreach(var button in new[]{start,recover,cancel}){WorkerUi.Button(button,button==start||button==recover);actions.Controls.Add(button);}
-            panel.Controls.Add(progress);panel.Controls.Add(status);
+            panel.Controls.Add(progress);panel.Controls.Add(status);panel.Controls.Add(bootStatus);
             panel.Controls.Add(WorkerUi.Link("查看详情",()=>details.Visible=!details.Visible));panel.Controls.Add(details);
             var secondary=new FlowLayoutPanel {AutoSize=true,MaximumSize=new Size(620,0)};panel.Controls.Add(secondary);
             secondary.Controls.Add(WorkerUi.Link("已有独立环境",()=>{if(!working)using(var form=new WorkerBootForm())form.ShowDialog(this);}));
@@ -82,7 +83,7 @@ namespace ExperimentManagerDesktop {
             password.Enabled=admin;RefreshMode();
             start.Click+=async(s,e)=>await Execute(async()=>{
                 if(WorkerMigration.Pending&&!WorkerMigration.CanRollback(App.Read(WorkerMigration.ActivePath))){if(await Elevate())await WorkerMigration.Finish(new Progress<string>(ShowProgress));return;}
-                if(WorkerBoot.Managed&&!WorkerMigration.Pending){WorkerBoot.ResumeAfterUpdate();ShowProgress("已请求启动后台。");return;}
+                if(WorkerBoot.Managed&&!WorkerMigration.Pending){WorkerBoot.ResumeAfterUpdate();ShowProgress("开机任务已登记，下方显示后台实时状态。");return;}
                 if(!await Elevate())return;
                 if(!dedicated.Checked)throw new IOException("请确认允许暂时关闭原 Ubuntu。");
                 await WorkerMigration.Migrate(source.Text.Trim(),folder.Text.Trim(),password.Text,new Progress<string>(ShowProgress),dataFolder.Text.Trim());
@@ -96,6 +97,9 @@ namespace ExperimentManagerDesktop {
         void OpenQueue(){Show();WindowState=FormWindowState.Normal;Activate();}
         void RefreshMode() {
             bool pending=WorkerMigration.Pending,managed=WorkerBoot.Managed;
+            bool showBootStatus=managed&&!pending&&!working;
+            bootStatus.Visible=showBootStatus;
+            if(showBootStatus)bootStatus.Text=WorkerBoot.DisplayStatus();
             if(!working&&WorkerMigration.Running) {
                 observing=true;inputs.Visible=start.Visible=recover.Visible=false;
                 cancel.Visible=pending&&WorkerMigration.CanRollback(App.Read(WorkerMigration.ActivePath));cancel.Enabled=true;

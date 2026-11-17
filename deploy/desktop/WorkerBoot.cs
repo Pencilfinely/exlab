@@ -80,16 +80,23 @@ namespace ExperimentManagerDesktop {
             doc.SelectSingleNode("//t:Arguments",ns).InnerText=App.Arguments("-NoProfile","-NonInteractive","-WindowStyle","Hidden","-ExecutionPolicy","Bypass","-File",launcher);
             return doc.OuterXml;
         }
+        internal static string LauncherScript() {
+            // Settings are UTF-8 without a BOM; Windows PowerShell defaults to ANSI.
+            return "$ErrorActionPreference='Stop'\n$root=Split-Path -Parent $PSCommandPath\n$s=Get-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8 -Raw | ConvertFrom-Json\n$v=[string]$s.installed_version\nif($v -notmatch '^\\d+\\.\\d+\\.\\d+([-.][A-Za-z0-9.]+)?$'){throw 'Invalid installed version'}\n$exe=Join-Path $env:LOCALAPPDATA ('Programs\\ExperimentManager\\Worker\\'+$v+'\\ExLabWorker.exe')\n$p=Start-Process -FilePath $exe -ArgumentList '--boot-run' -WindowStyle Hidden -PassThru -Wait\nexit $p.ExitCode\n";
+        }
+        internal static string RefreshLauncher() {
+            string launcher=Path.Combine(App.SettingsRoot,"boot-launcher.ps1");
+            Directory.CreateDirectory(App.SettingsRoot);File.WriteAllText(launcher,LauncherScript(),new System.Text.UTF8Encoding(true));
+            return launcher;
+        }
         internal static void Register(WorkerBootConfig c,string password) {
             Validate(c);
             string installed=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ExperimentManager","Worker",App.Version);
             if(!String.Equals(Path.GetFullPath(App.Package),Path.GetFullPath(installed),StringComparison.OrdinalIgnoreCase))throw new InvalidOperationException("请先安装此版本，再配置开机任务。");
             if(String.IsNullOrEmpty(password))throw new ArgumentException("请输入 Windows 账户密码（不是 PIN），由任务计划程序保存。");
             if(!new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))throw new UnauthorizedAccessException("创建开机任务需要管理员权限。");
-            string launcher=Path.Combine(App.SettingsRoot,"boot-launcher.ps1");
             // Stable launcher follows the installed version after updates.
-            string script="$ErrorActionPreference='Stop'\n$root=Split-Path -Parent $PSCommandPath\n$s=Get-Content -LiteralPath (Join-Path $root 'settings.json') -Raw | ConvertFrom-Json\n$v=[string]$s.installed_version\nif($v -notmatch '^\\d+\\.\\d+\\.\\d+([-.][A-Za-z0-9.]+)?$'){throw 'Invalid installed version'}\n$exe=Join-Path $env:LOCALAPPDATA ('Programs\\ExperimentManager\\Worker\\'+$v+'\\ExLabWorker.exe')\n$p=Start-Process -FilePath $exe -ArgumentList '--boot-run' -WindowStyle Hidden -PassThru -Wait\nexit $p.ExitCode\n";
-            Directory.CreateDirectory(App.SettingsRoot);File.WriteAllText(launcher,script,new System.Text.UTF8Encoding(true));
+            string launcher=RefreshLauncher();
             dynamic scheduler=Activator.CreateInstance(Type.GetTypeFromProgID("Schedule.Service"));scheduler.Connect();
             dynamic folder=scheduler.GetFolder("\\");
             string account=WindowsIdentity.GetCurrent().Name;
