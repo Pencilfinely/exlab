@@ -249,6 +249,23 @@ def rollback(job, identity):
     private_write(job / 'engine-rollback.json', {'job_id': identity, 'ready': True})
 
 
+def preparation_failure(job, step, code, error_path):
+    """Report external provisioning failures through the Windows JSON channel."""
+    from . import worker_service
+    job = Path(job)
+    value = common.read_json(job / 'manifest.json', {})
+    with open(error_path, 'rb') as stream:
+        stream.seek(max(0, os.fstat(stream.fileno()).st_size - 16000))
+        detail = stream.read().decode('utf-8', 'replace').strip()
+    detail = worker_service._redact(worker_service._root(value.get('service_root')), detail)
+    detail = re.sub(r'(https?://)[^\s/@]+@', r'\1[redacted]@', detail)
+    reply = {'ready': False, 'step': step, 'exit_code': int(code),
+             'detail': f'{step}失败（退出码 {code}）：{detail[-4000:] or "命令未返回错误详情"}'}
+    private_write(job / 'engine-error.json', reply)
+    print(json.dumps(reply, ensure_ascii=False))
+    return reply
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('begin', 'configure', 'rollback'))
