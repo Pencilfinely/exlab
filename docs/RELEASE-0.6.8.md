@@ -6,4 +6,6 @@
 
 同时显式配置独立引擎自带的 docker-proxy 路径，修复纯 Docker Desktop 环境没有全局 docker-proxy 时的 Docker 配置校验失败。
 
+Ubuntu 已运行 systemd 时直接启动独立引擎，避免多余的 WSL 终止触发 Docker 集成反复报错。需要启用 systemd 时先协调暂停 Docker 再重启；恢复时等待独立引擎的挂载释放，避免过早清理导致“资源正忙”。
+
 Windows Worker 使用“检查更新 → 下载并排队安装”升级。如果之前已经成功搬盘，保留当前 Ubuntu 数据位置即可，无需再次搬盘。

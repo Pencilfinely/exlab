@@ -79,6 +79,12 @@ namespace ExperimentManagerDesktop {
                 string detail=plan.Description;try{CheckMoveWindow(plan,manifest);}catch(Exception error){detail+="\n"+error.Message;}return detail;});
         }
         static string Desktop(params string[] args){return App.RunWithTimeout(150000,DesktopRuntime.DockerCli,args);}
+        internal static void RestartForSystemd(Dictionary<string,object> manifest,Action pauseDesktop,Action resumeDesktop) {
+            if(App.Flag(manifest,"systemd_running"))return;
+            // A live Desktop integration treats an abrupt distro termination
+            // as a crashed proxy and opens a blocking recovery dialog.
+            pauseDesktop();resumeDesktop();
+        }
         static void CheckMoveWindow(WorkerDataPlan plan,Dictionary<string,object> manifest) {
             if(!plan.Moving)return;
             try {Desktop("desktop","stop","--help");Desktop("desktop","start","--help");}
@@ -315,7 +321,9 @@ namespace ExperimentManagerDesktop {
                 await Task.Run(()=>Run(7200000,"-d",target,"-u","root","--exec","bash",LinuxPath(target,App.Package)+"/Prepare-Isolated-Engine.sh",id,LinuxPath(target,path)));
                 CheckCancelled(job);
                 Save(job,"4/8 启动独立引擎…",progress);
-                await Task.Run(()=>Run(60000,"--terminate",target));
+                await Task.Run(()=>RestartForSystemd(manifest,
+                    ()=>WorkerDataMove.PauseDesktop(source,App.Text(manifest,"engine_id"),job,()=>App.Write(ActivePath,job),Management,Desktop),
+                    ()=>ResumeDesktop(job)));
                 await Task.Run(()=>Run(120000,"-d",target,"-u","root","--exec","systemctl","start","exlab-docker.service"));CheckCancelled(job);
                 Save(job,"5/8 转移并校验镜像…",progress);
                 await Task.Run(()=>Helper(target,App.Text(job,"user"),"transfer",path));CheckCancelled(job);

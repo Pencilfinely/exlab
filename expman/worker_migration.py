@@ -336,7 +336,8 @@ def inspect(service_root=None, *, defer_busy=False):
                 containerd_store=containerd_store(info),
                 registries=registries, images=images, helper=helper, gpus=gpus,
                 required_bytes=required, asset_drives=sorted(drives), preserved_containers=preserved, waiting=waiting or [],
-                mode='in_place', space={'filesystem_copy_bytes': 0, 'existing_filesystem_bytes': used,
+                mode='in_place', systemd_running=Path('/proc/1/comm').read_text().strip() == 'systemd',
+                space={'filesystem_copy_bytes': 0, 'existing_filesystem_bytes': used,
                     **space, 'registry_bytes': registry_bytes, 'required_bytes': required})
 
 

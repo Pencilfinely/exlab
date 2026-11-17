@@ -1,4 +1,5 @@
 import os
+import errno
 import io
 import json
 from pathlib import Path
@@ -120,6 +121,23 @@ class EngineTransactionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.rollback(self.job, self.job.name)
         self.systemctl.assert_not_called()
+
+    def test_rollback_waits_for_docker_mount_cleanup(self):
+        engine.begin(self.job, self.job.name)
+        engine.DATA.mkdir()
+        remove = engine.shutil.rmtree
+        attempts = []
+        def delayed_remove(path):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise OSError(errno.EBUSY, 'mount still releasing')
+            remove(path)
+        with patch.object(engine.shutil, 'rmtree', side_effect=delayed_remove), \
+                patch.object(engine.time, 'sleep') as sleep:
+            engine.rollback(self.job, self.job.name)
+        sleep.assert_called_once_with(1)
+        self.assertFalse(engine.DATA.exists())
+        self.assertFalse(engine.MARKER.exists())
 
     def test_crash_between_journal_and_marker_is_recoverable_without_mutation(self):
         engine.begin(self.job, self.job.name)

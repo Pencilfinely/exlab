@@ -4,6 +4,7 @@ Never replaces Desktop's executable/socket or copies/deletes experiment data.
 """
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 
 from . import common
 from .worker_setup import private_write
@@ -228,7 +230,16 @@ def rollback(job, identity):
         if path.is_symlink() or path.resolve() != path:
             raise ValueError('独立引擎路径被重定向，已保留')
         if path.exists():
-            shutil.rmtree(path)
+            deadline = time.monotonic() + 30
+            while path.exists():
+                try:
+                    shutil.rmtree(path)
+                except OSError as error:
+                    if error.errno != errno.EBUSY or time.monotonic() >= deadline:
+                        raise
+                    # Docker's mount cleanup can lag behind service exit.
+                    # Wait for release; never force-unmount another process.
+                    time.sleep(1)
     CONFIG.unlink(missing_ok=True)
     UNIT.unlink(missing_ok=True)
     CONTAINERD_UNIT.unlink(missing_ok=True)
