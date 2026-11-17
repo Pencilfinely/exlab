@@ -432,7 +432,16 @@ def prepare(job):
         value = fresh
         private_write(job / 'manifest.json', value)
         with InstanceLock(root / 'control.lock'), InstanceLock(root / 'supervisor.lock'), InstanceLock(Path(value['worker_root']) / 'agent.lock'):
-            if not idle(root):
+            # We own agent.lock now. service.status() would mistake our fence
+            # for an external worker, so inspect durable work and Docker
+            # directly while all launch paths remain excluded by these locks.
+            from .agent import inspect_update_state
+            database = Path(value['worker_root']) / 'node.sqlite3'
+            with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
+                db.execute('BEGIN')
+                state = inspect_update_state(db, preserve_experiments=True)
+            candidate = {'path': value['config'], 'node_id': value['node_id']}
+            if not state['ready_for_update'] or service._update_containers(candidate, execution_only=True):
                 raise RuntimeError('停止后实验状态发生变化，已取消迁移。')
             private_write(root / FENCE, {'job_id': value['job_id'], 'detail': '节点正在迁移，原入口已锁定。请在无人值守向导继续或恢复。'})
             private_write(config.parent / FENCE, {'job_id': value['job_id']})

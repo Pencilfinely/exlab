@@ -1,7 +1,9 @@
 import configparser
+from contextlib import closing
 import io
 import json
 from pathlib import Path
+import sqlite3
 import tarfile
 import unittest
 from unittest.mock import patch
@@ -277,6 +279,48 @@ class MigrationTests(unittest.TestCase):
                 migration.prepare(self.job)
             stop.assert_not_called()
         self.assertEqual(common.read_json(self.job / 'rollback.json')['override']['mode'], 'available')
+
+    def prepare_stopped_node(self, *, boundary=None, containers=None):
+        Agent(self.config).close()
+        worker_service._save_settings(self.root, {'config': str(self.config), 'node_id': 'original'})
+
+        def inspect(root):
+            self.assertFalse(worker_service.status(root)['running'])
+            if boundary:
+                boundary()
+            return dict(self.value)
+
+        with patch.object(Path, 'home', return_value=self.job / 'home'), \
+                patch.object(migration, 'same_source'), \
+                patch.object(migration, 'inspect_containers', return_value=([], [])), \
+                patch.object(migration, 'inspect', side_effect=inspect), \
+                patch.object(worker_service, '_require_linux'), \
+                patch.object(worker_service, '_update_containers', side_effect=containers or [[], []]), \
+                patch.object(worker_service, 'install', return_value={'running': False}) as install:
+            result = migration.prepare(self.job)
+        install.assert_called_once()
+        return result
+
+    def test_prepare_owns_real_agent_lock_without_mistaking_it_for_a_running_node(self):
+        self.assertTrue(self.prepare_stopped_node()['ready'])
+        self.assertEqual(common.read_json(self.root / migration.FENCE)['job_id'], self.value['job_id'])
+        self.assertEqual(common.read_json(self.config.parent / migration.FENCE)['job_id'], self.value['job_id'])
+        self.assertFalse(worker_service.status(self.root)['running'])
+
+    def test_prepare_rechecks_containers_under_its_locks_before_fencing(self):
+        with self.assertRaisesRegex(RuntimeError, '停止后实验状态发生变化'):
+            self.prepare_stopped_node(containers=[[], ['late-container']])
+        self.assertFalse((self.root / migration.FENCE).exists())
+
+    def test_prepare_rechecks_durable_task_state_after_stopping(self):
+        def active_process():
+            with closing(sqlite3.connect(self.root / 'node.sqlite3')) as db, db:
+                record = {'id': 'late-demo', 'state': 'running', 'seq': 1, 'spec': {'backend': 'demo'}}
+                db.execute('INSERT INTO tasks VALUES (?, ?)', (record['id'], json.dumps(record)))
+
+        with self.assertRaisesRegex(RuntimeError, '停止后实验状态发生变化'):
+            self.prepare_stopped_node(boundary=active_process)
+        self.assertFalse((self.root / migration.FENCE).exists())
 
 
 if __name__ == '__main__':
