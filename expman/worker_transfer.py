@@ -68,7 +68,7 @@ def transfer(job):
     job, value = m.load_job(job)
     if value.get('mode') != 'in_place':
         raise ValueError('此迁移记录不支持原位切换')
-    m.same_source(value)
+    m.same_source(value, wait=True)
     info = m.target_identity(value)
     target, source = m.native_endpoint(value), value['endpoint']
     if source == target or info['ID'] == value['engine_id']:

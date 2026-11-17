@@ -6,6 +6,32 @@ from expman import worker_migration as migration
 
 
 class DesktopSocketTests(unittest.TestCase):
+    def test_restart_waits_for_socket_then_api_and_checks_engine_identity(self):
+        value = {'endpoint': 'unix:///var/run/docker.sock', 'engine_id': 'desktop-id'}
+        with patch.object(migration, 'source_socket', side_effect=[migration.SourceUnavailable('starting'), value['endpoint'], value['endpoint']]), \
+                patch.object(migration, 'objects', side_effect=[RuntimeError('daemon starting'), {'ID': 'desktop-id'}]), \
+                patch.object(migration.time, 'sleep') as sleep:
+            self.assertEqual(migration.source_info(value, wait=True)['ID'], 'desktop-id')
+            self.assertEqual(sleep.call_count, 2)
+
+    def test_changed_engine_or_storage_is_not_retried(self):
+        value = {'endpoint': 'unix:///var/run/docker.sock', 'engine_id': 'desktop-id', 'containerd_store': True}
+        for info in ({'ID': 'different'}, {'ID': 'desktop-id', 'DriverStatus': []}):
+            with self.subTest(info=info), patch.object(migration, 'source_socket'), \
+                    patch.object(migration, 'objects', return_value=info), \
+                    patch.object(migration.time, 'sleep') as sleep:
+                with self.assertRaises(ValueError):
+                    migration.source_info(value, wait=True)
+                sleep.assert_not_called()
+
+    def test_unavailable_integration_times_out_with_actionable_error(self):
+        with patch.object(migration, 'source_socket', side_effect=migration.SourceUnavailable('starting')), \
+                patch.object(migration.time, 'monotonic', side_effect=[0, 121]), \
+                patch.object(migration.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'WSL 集成'):
+                migration.source_info({'endpoint': 'unix:///var/run/docker.sock'}, wait=True)
+            sleep.assert_not_called()
+
     def probe(self, endpoint, resolved, info=None, expected='desktop-id'):
         info = info if info is not None else {'ID': 'desktop-id', 'OSType': 'linux', 'OperatingSystem': 'Docker Desktop'}
         with patch.object(Path, 'resolve', return_value=Path(resolved)), \

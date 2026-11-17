@@ -79,6 +79,12 @@ namespace ExperimentManagerDesktop {
                 string detail=plan.Description;try{CheckMoveWindow(plan,manifest);}catch(Exception error){detail+="\n"+error.Message;}return detail;});
         }
         static string Desktop(params string[] args){return App.RunWithTimeout(150000,DesktopRuntime.DockerCli,args);}
+        internal static void RestartForSystemd(Dictionary<string,object> manifest,Action pauseDesktop,Action resumeDesktop) {
+            if(App.Flag(manifest,"systemd_running"))return;
+            // A live Desktop integration treats an abrupt distro termination
+            // as a crashed proxy and opens a blocking recovery dialog.
+            pauseDesktop();resumeDesktop();
+        }
         static void CheckMoveWindow(WorkerDataPlan plan,Dictionary<string,object> manifest) {
             if(!plan.Moving)return;
             try {Desktop("desktop","stop","--help");Desktop("desktop","start","--help");}
@@ -101,6 +107,18 @@ namespace ExperimentManagerDesktop {
             return code==0||(code==-1&&args.Length==1&&args[0]=="--help"&&text.Contains("--manage")&&text.Contains("--move"));
         }
         static string Run(int timeout,params string[] args) {return RunEncoded(timeout,Encoding.UTF8,args);}
+        internal static Dictionary<string,object> FailureReply(string output) {
+            var lines=(output??"").Split(new[]{'\r','\n'},StringSplitOptions.RemoveEmptyEntries);
+            for(int i=lines.Length-1;i>=0;i--) {
+                string line=lines[i].Trim();if(!line.StartsWith("{"))continue;
+                try {
+                    var reply=App.Json.Deserialize<Dictionary<string,object>>(line);object ready,detail;
+                    if(reply!=null&&reply.TryGetValue("ready",out ready)&&ready is bool&&!(bool)ready&&
+                        reply.TryGetValue("detail",out detail)&&detail is string)return reply;
+                }catch(ArgumentException){}catch(InvalidOperationException){}
+            }
+            return null;
+        }
         static string RunEncoded(int timeout,Encoding encoding,params string[] args) {
             var info=new ProcessStartInfo("wsl.exe",App.Arguments(args)){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=encoding,StandardErrorEncoding=encoding};
             using(var process=new Process {StartInfo=info}) {
@@ -117,10 +135,11 @@ namespace ExperimentManagerDesktop {
                 if(!process.WaitForExit(timeout))process.WaitForExit();
                 process.WaitForExit();string value=output.ToString().Trim();
                 if(!SuccessfulWslReply(process.ExitCode,args,value)) {
-                    if(value.StartsWith("{")) {try {
-                        var reply=App.Json.Deserialize<Dictionary<string,object>>(value);string detail=App.Text(reply,"detail","迁移操作失败。");
+                    var reply=FailureReply(value);
+                    if(reply!=null) {
+                        string detail=App.Text(reply,"detail","迁移操作失败。");
                         if(App.Flag(reply,"waiting"))throw new BusyException(detail);throw new IOException(detail);
-                    }catch(ArgumentException){}}
+                    }
                     throw new IOException("WSL 迁移步骤失败（退出码 "+process.ExitCode+"）。原数据保留；请检查网络、WSL 和磁盘空间后重试。"+
                         (encoding==Encoding.Unicode&&!String.IsNullOrEmpty(value)?"\n"+value.Substring(Math.Max(0,value.Length-1024)):""));
                 }
@@ -315,7 +334,9 @@ namespace ExperimentManagerDesktop {
                 await Task.Run(()=>Run(7200000,"-d",target,"-u","root","--exec","bash",LinuxPath(target,App.Package)+"/Prepare-Isolated-Engine.sh",id,LinuxPath(target,path)));
                 CheckCancelled(job);
                 Save(job,"4/8 启动独立引擎…",progress);
-                await Task.Run(()=>Run(60000,"--terminate",target));
+                await Task.Run(()=>RestartForSystemd(manifest,
+                    ()=>WorkerDataMove.PauseDesktop(source,App.Text(manifest,"engine_id"),job,()=>App.Write(ActivePath,job),Management,Desktop),
+                    ()=>ResumeDesktop(job)));
                 await Task.Run(()=>Run(120000,"-d",target,"-u","root","--exec","systemctl","start","exlab-docker.service"));CheckCancelled(job);
                 Save(job,"5/8 转移并校验镜像…",progress);
                 await Task.Run(()=>Helper(target,App.Text(job,"user"),"transfer",path));CheckCancelled(job);

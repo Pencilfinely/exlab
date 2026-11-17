@@ -422,6 +422,14 @@ static class InstallProbeTests {
         var result=new Dictionary<string,object>(stopped);result["installed_version"]=version;return result;
     }
     static void ComputeActivation(string folder) {
+        var migrationFailure=WorkerMigration.FailureReply("Fetched packages\n{\"ready\": false, \"detail\": \"missing Docker proxy\", \"step\": \"configure\"}\n");
+        Assert(migrationFailure!=null&&App.Text(migrationFailure,"detail")=="missing Docker proxy","Package output hid the structured migration error.");
+        Assert(WorkerMigration.FailureReply("{not-json}\n{\"ready\":true,\"detail\":\"ok\"}")==null,"Unrelated output was interpreted as a failure.");
+        Assert(App.Flag(WorkerMigration.FailureReply("{\"ready\":false,\"detail\":\"waiting\",\"waiting\":true}"),"waiting"),"Migration retry detail lost its waiting flag.");
+        int restarts=0;
+        WorkerMigration.RestartForSystemd(new Dictionary<string,object>{{"systemd_running",true}},()=>{throw new Exception("Unnecessary Docker restart");},()=>{throw new Exception("Unnecessary Docker resume");});
+        WorkerMigration.RestartForSystemd(new Dictionary<string,object>{{"systemd_running",false}},()=>{Assert(restarts==0,"Desktop pause out of order");restarts++;},()=>{Assert(restarts==1,"Desktop resume preceded pause");restarts++;});
+        Assert(restarts==2,"Systemd activation did not coordinate Desktop restart");
         string archive=Path.Combine(folder,"verified-backup.tar");File.WriteAllText(archive,"preserve");
         try{WorkerDisk.DeleteVerified(archive,new String('0',64));throw new Exception("Unverified backup was deleted.");}catch(IOException){}
         Assert(File.ReadAllText(archive)=="preserve","Failed verification damaged an archive.");

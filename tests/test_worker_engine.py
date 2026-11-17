@@ -1,4 +1,7 @@
 import os
+import errno
+import io
+import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -36,6 +39,10 @@ class EngineTransactionTests(unittest.TestCase):
         manager.start();self.addCleanup(manager.stop)
         manager = patch.object(migration, 'source_socket', side_effect=lambda endpoint: endpoint)
         self.socket = manager.start();self.addCleanup(manager.stop)
+        manager = patch.object(migration, 'objects', side_effect=lambda *args: {
+            'ID': 'desktop-id', 'DriverStatus': [['driver-type', 'io.containerd.snapshotter.v1']]
+            if self.value.get('containerd_store') else []})
+        manager.start();self.addCleanup(manager.stop)
         manager = patch.object(engine, 'DEFAULT_BRIDGE', self.root / 'docker0')
         manager.start();self.addCleanup(manager.stop)
 
@@ -53,6 +60,24 @@ class EngineTransactionTests(unittest.TestCase):
         engine.begin(self.job, self.job.name)
         self.socket.assert_called_once_with(self.value['endpoint'])
         self.assertTrue((self.job / 'engine-before.json').exists())
+
+    def test_begin_waits_for_distribution_socket_before_creating_backup(self):
+        self.socket.side_effect = [migration.SourceUnavailable('socket pending'), self.value['endpoint']]
+        def waiting(_):
+            self.assertFalse((self.job / 'engine-before.json').exists())
+            self.assertFalse(engine.MARKER.exists())
+        with patch.object(migration.time, 'sleep', side_effect=waiting):
+            engine.begin(self.job, self.job.name)
+        self.assertTrue((self.job / 'engine-before.json').exists())
+
+    def test_engine_errors_reach_windows_as_structured_stdout(self):
+        output = io.StringIO()
+        with patch.object(engine, 'begin', side_effect=ValueError('原 Docker 引擎已变化')), \
+                patch('sys.stdout', output):
+            result = engine.main(['begin', '--job', str(self.job), '--id', self.job.name])
+        self.assertEqual(result, 2)
+        self.assertEqual(json.loads(output.getvalue()), {
+            'ready': False, 'detail': '原 Docker 引擎已变化', 'step': 'begin'})
 
     def test_invalid_source_socket_stops_before_writing_configuration(self):
         self.socket.side_effect = ValueError('socket unavailable')
@@ -97,6 +122,23 @@ class EngineTransactionTests(unittest.TestCase):
             engine.rollback(self.job, self.job.name)
         self.systemctl.assert_not_called()
 
+    def test_rollback_waits_for_docker_mount_cleanup(self):
+        engine.begin(self.job, self.job.name)
+        engine.DATA.mkdir()
+        remove = engine.shutil.rmtree
+        attempts = []
+        def delayed_remove(path):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise OSError(errno.EBUSY, 'mount still releasing')
+            remove(path)
+        with patch.object(engine.shutil, 'rmtree', side_effect=delayed_remove), \
+                patch.object(engine.time, 'sleep') as sleep:
+            engine.rollback(self.job, self.job.name)
+        sleep.assert_called_once_with(1)
+        self.assertFalse(engine.DATA.exists())
+        self.assertFalse(engine.MARKER.exists())
+
     def test_crash_between_journal_and_marker_is_recoverable_without_mutation(self):
         engine.begin(self.job, self.job.name)
         engine.MARKER.unlink()
@@ -108,16 +150,17 @@ class EngineTransactionTests(unittest.TestCase):
         engine.begin(self.job, self.job.name)
         binary = engine.ENGINE / 'usr/bin'
         binary.mkdir(parents=True)
-        for name in ('docker', 'dockerd', 'containerd', 'runc'):
+        for name in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
             (binary / name).write_text('extracted')
         desktop = Path(self.user.pw_dir) / '.docker/config.json'
         common.atomic_json(desktop, {'credsStore': 'desktop.exe', 'auths': {'registry': {'auth': 'test'}}})
         before = desktop.read_bytes()
-        with patch.object(engine.subprocess, 'run'):
+        with patch.object(engine.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
             engine.configure(self.job, self.job.name)
         daemon = common.read_json(engine.CONFIG)
         self.assertEqual(daemon['hosts'], [engine.ENDPOINT])
         self.assertEqual(daemon['data-root'], str(engine.DATA))
+        self.assertEqual(daemon['userland-proxy-path'], str(binary / 'docker-proxy'))
         self.assertNotIn('runc', daemon['runtimes'])  # reserved by Docker
         self.assertEqual(daemon['default-runtime'], 'exlab-runc')
         self.assertEqual(daemon['containerd'], '/run/exlab-containerd/containerd.sock')
@@ -136,9 +179,9 @@ class EngineTransactionTests(unittest.TestCase):
         engine.begin(self.job, self.job.name)
         binary = engine.ENGINE / 'usr/bin'
         binary.mkdir(parents=True)
-        for name in ('docker', 'dockerd', 'containerd', 'runc'):
+        for name in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
             (binary / name).write_text('extracted')
-        with patch.object(engine.subprocess, 'run'):
+        with patch.object(engine.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '', '')):
             engine.configure(self.job, self.job.name)
         self.assertTrue(common.read_json(engine.CONFIG)['features']['containerd-snapshotter'])
 
@@ -150,6 +193,20 @@ class EngineTransactionTests(unittest.TestCase):
             self.skipTest('Symbolic links unavailable')
         with self.assertRaises(ValueError):
             engine.direct(link / 'new-config')
+
+    def test_docker_validation_error_preserves_detail_before_service_creation(self):
+        engine.begin(self.job, self.job.name)
+        binary = engine.ENGINE / 'usr/bin'
+        binary.mkdir(parents=True)
+        for name in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
+            (binary / name).write_text('extracted')
+        with patch.object(engine.subprocess, 'run', side_effect=[
+                subprocess.CompletedProcess([], 0, '', ''),
+                subprocess.CompletedProcess([], 1, '', 'invalid userland-proxy-path')]):
+            with self.assertRaisesRegex(ValueError, 'invalid userland-proxy-path'):
+                engine.configure(self.job, self.job.name)
+        self.assertFalse(engine.UNIT.exists())
+        self.systemctl.assert_not_called()
 
 
 class StreamTransferTests(unittest.TestCase):

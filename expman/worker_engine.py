@@ -4,6 +4,7 @@ Never replaces Desktop's executable/socket or copies/deletes experiment data.
 """
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 
 from . import common
 from .worker_setup import private_write
@@ -105,7 +107,7 @@ def context(job, identity):
 
 
 def begin(job, identity):
-    from .worker_migration import source_socket
+    from .worker_migration import source_info
     job, value, user, paths = context(job, identity)
     backup_path = job / 'engine-before.json'
     if backup_path.exists():
@@ -115,7 +117,7 @@ def begin(job, identity):
     client = Path(user.pw_dir) / '.config/exlab/docker'
     if any(path.exists() or path.is_symlink() for path in (MARKER, ENGINE, DATA, CONFIG, UNIT, CONTAINERD_CONFIG, CONTAINERD_UNIT, client)):
         raise ValueError('此 Ubuntu 已有 ExLab 引擎或未完成的环境切换，请先恢复')
-    source_socket(value['endpoint'])
+    source_info(value, wait=True)
     check_network_isolation()
     private_write(backup_path, {'job_id': identity, 'files': {str(p): capture(p) for p in paths}})
     private_write(MARKER, {'job_id': identity, 'source_engine': value['engine_id'], 'service_root': value['service_root'],
@@ -129,12 +131,13 @@ def configure(job, identity):
     if common.read_json(MARKER).get('job_id') != identity:
         raise ValueError('引擎归属不符')
     check_network_isolation()
-    for binary in ('docker', 'dockerd', 'containerd', 'runc'):
+    for binary in ('docker', 'dockerd', 'docker-proxy', 'containerd', 'runc'):
         if not (ENGINE / 'usr/bin' / binary).is_file():
             raise ValueError('独立引擎缺少组件：' + binary)
     daemon = {'hosts': [ENDPOINT], 'data-root': str(DATA), 'exec-root': '/run/exlab-docker/exec',
               'pidfile': '/run/exlab-docker/dockerd.pid', 'group': 'docker',
               'bridge': 'none', 'iptables': False, 'ip6tables': False, 'ip-masq': False,
+              'userland-proxy-path': str(ENGINE / 'usr/bin/docker-proxy'),
               'containerd': '/run/exlab-containerd/containerd.sock',
               # Preserve image identity semantics across classic/containerd stores.
               'features': {'containerd-snapshotter': bool(value.get('containerd_store'))},
@@ -148,8 +151,10 @@ def configure(job, identity):
     private_write(CONFIG, daemon)
     CONFIG.chmod(0o644)
     subprocess.run(['nvidia-ctk', 'runtime', 'configure', '--runtime=docker', '--config=' + str(CONFIG)], check=True, timeout=60)
-    subprocess.run([str(ENGINE / 'usr/bin/dockerd'), '--validate', '--config-file=' + str(CONFIG)],
-                   check=True, capture_output=True, text=True, timeout=30)
+    checked = subprocess.run([str(ENGINE / 'usr/bin/dockerd'), '--validate', '--config-file=' + str(CONFIG)],
+                             capture_output=True, text=True, timeout=30)
+    if checked.returncode:
+        raise ValueError('独立 Docker 配置校验失败：' + (checked.stderr or checked.stdout).strip()[:2000])
     CONTAINERD_CONFIG.write_text('version = 2\nroot = ' + json.dumps(str(DATA / 'containerd')) + '\n'
         'state = "/run/exlab-containerd"\n'
         'disabled_plugins = ["io.containerd.grpc.v1.cri", "io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]\n'
@@ -225,7 +230,16 @@ def rollback(job, identity):
         if path.is_symlink() or path.resolve() != path:
             raise ValueError('独立引擎路径被重定向，已保留')
         if path.exists():
-            shutil.rmtree(path)
+            deadline = time.monotonic() + 30
+            while path.exists():
+                try:
+                    shutil.rmtree(path)
+                except OSError as error:
+                    if error.errno != errno.EBUSY or time.monotonic() >= deadline:
+                        raise
+                    # Docker's mount cleanup can lag behind service exit.
+                    # Wait for release; never force-unmount another process.
+                    time.sleep(1)
     CONFIG.unlink(missing_ok=True)
     UNIT.unlink(missing_ok=True)
     CONTAINERD_UNIT.unlink(missing_ok=True)
@@ -235,14 +249,23 @@ def rollback(job, identity):
     private_write(job / 'engine-rollback.json', {'job_id': identity, 'ready': True})
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('action', choices=('begin', 'configure', 'rollback'))
     parser.add_argument('--job', required=True)
     parser.add_argument('--id', required=True)
-    args = parser.parse_args()
-    globals()[args.action](args.job, args.id)
+    args = parser.parse_args(argv)
+    try:
+        globals()[args.action](args.job, args.id)
+        return 0
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        from . import worker_service
+        value = common.read_json(Path(args.job) / 'manifest.json', {})
+        detail = worker_service._redact(worker_service._root(value.get('service_root')), str(error))[:4000]
+        # The Windows runner consumes structured stdout; stderr alone is lost.
+        print(json.dumps({'ready': False, 'detail': detail, 'step': args.action}, ensure_ascii=False))
+        return 2
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
