@@ -107,6 +107,18 @@ namespace ExperimentManagerDesktop {
             return code==0||(code==-1&&args.Length==1&&args[0]=="--help"&&text.Contains("--manage")&&text.Contains("--move"));
         }
         static string Run(int timeout,params string[] args) {return RunEncoded(timeout,Encoding.UTF8,args);}
+        internal static Dictionary<string,object> FailureReply(string output) {
+            var lines=(output??"").Split(new[]{'\r','\n'},StringSplitOptions.RemoveEmptyEntries);
+            for(int i=lines.Length-1;i>=0;i--) {
+                string line=lines[i].Trim();if(!line.StartsWith("{"))continue;
+                try {
+                    var reply=App.Json.Deserialize<Dictionary<string,object>>(line);object ready,detail;
+                    if(reply!=null&&reply.TryGetValue("ready",out ready)&&ready is bool&&!(bool)ready&&
+                        reply.TryGetValue("detail",out detail)&&detail is string)return reply;
+                }catch(ArgumentException){}catch(InvalidOperationException){}
+            }
+            return null;
+        }
         static string RunEncoded(int timeout,Encoding encoding,params string[] args) {
             var info=new ProcessStartInfo("wsl.exe",App.Arguments(args)){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=encoding,StandardErrorEncoding=encoding};
             using(var process=new Process {StartInfo=info}) {
@@ -123,10 +135,11 @@ namespace ExperimentManagerDesktop {
                 if(!process.WaitForExit(timeout))process.WaitForExit();
                 process.WaitForExit();string value=output.ToString().Trim();
                 if(!SuccessfulWslReply(process.ExitCode,args,value)) {
-                    if(value.StartsWith("{")) {try {
-                        var reply=App.Json.Deserialize<Dictionary<string,object>>(value);string detail=App.Text(reply,"detail","迁移操作失败。");
+                    var reply=FailureReply(value);
+                    if(reply!=null) {
+                        string detail=App.Text(reply,"detail","迁移操作失败。");
                         if(App.Flag(reply,"waiting"))throw new BusyException(detail);throw new IOException(detail);
-                    }catch(ArgumentException){}}
+                    }
                     throw new IOException("WSL 迁移步骤失败（退出码 "+process.ExitCode+"）。原数据保留；请检查网络、WSL 和磁盘空间后重试。"+
                         (encoding==Encoding.Unicode&&!String.IsNullOrEmpty(value)?"\n"+value.Substring(Math.Max(0,value.Length-1024)):""));
                 }
