@@ -35,6 +35,7 @@ async function main(){
   const planning=node('div');compute.renderPlanning(planning,{expected_seconds:0,deadline:null,migrate:false},node);
   assert.deepEqual(plain(compute.readPlanning(planning)),{expected_seconds:0,deadline:null,migrate:false});
   const untouched=node('div');compute.renderPlanning(untouched,undefined,node);assert.equal(compute.readPlanning(untouched),undefined);
+  const leased=node('div');compute.renderPlanning(leased,{lease_seconds:120},node);assert.equal(compute.readPlanning(leased).lease_seconds,120);
   const timed=node('div');compute.renderPlanning(timed,{deadline:2000000001.25},node);assert.equal(compute.readPlanning(timed).deadline,2000000001.25);
   console.log('PASS planning preserves explicit zero and disabled migration, with no silent default changes');
   const box=node('div');compute.renderNode(box,{id:'old',snapshot:{capabilities:[]}},ctx);

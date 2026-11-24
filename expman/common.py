@@ -150,6 +150,11 @@ def validate_task(spec):
     result.setdefault("source", None)
     from .result_protocol import delivery_config
     result["result_delivery"] = delivery_config(result.get("result_delivery"), result.get("experiment_id", "default"))
+    if result.get("planning", {}).get("lease_seconds"):
+        if backend != "docker" or result.get("resume_supported") is not True:
+            raise ValueError("失联接管需要 Docker 任务声明原生续训能力")
+        if result["result_delivery"]["mode"] != "lightweight" or result["planning"].get("migrate") is False:
+            raise ValueError("失联接管需要轻量结果协议并允许跨节点接手")
     if backend == "docker":
         source = result["source"]
         if not isinstance(source, dict) or not isinstance(source.get("repo"), str):
@@ -191,9 +196,11 @@ def validate_task(spec):
 
 def validate_planning(value):
     """Execution planning never changes scientific parameters or result delivery."""
-    if not isinstance(value, dict) or set(value) - {"expected_seconds", "deadline", "migrate"}:
-        raise ValueError("planning accepts expected_seconds, deadline and migrate")
+    if not isinstance(value, dict) or set(value) - {"expected_seconds", "deadline", "migrate", "lease_seconds"}:
+        raise ValueError("planning accepts expected_seconds, deadline, migrate and lease_seconds")
     value = copy.deepcopy(value)
+    if "lease_seconds" in value:
+        value["lease_seconds"] = _number(value["lease_seconds"], "planning.lease_seconds", 30, 3600, True)
     for key in ("expected_seconds", "deadline"):
         if value.get(key) is not None:
             value[key] = _number(value[key], "planning." + key, 0, 10**12)

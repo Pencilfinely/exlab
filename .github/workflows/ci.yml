@@ -51,6 +51,12 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -t . -v
       - run: python -m compileall -q expman scripts
+      - name: Fail over a leased training container after its worker exits
+        if: runner.os == 'Linux' && matrix.python == '3.13'
+        run: |
+          docker pull python:3.13-slim
+          export EXLAB_LEASE_TEST_IMAGE="$(docker image inspect python:3.13-slim --format '{{index .RepoDigests 0}}')"
+          python -m unittest -v tests.test_lease_docker
       - name: Recover from real ENOSPC in a private 2 MiB filesystem
         if: runner.os == 'Linux'
         run: sudo "$(command -v python)" scripts/test_worker_storage_full.py

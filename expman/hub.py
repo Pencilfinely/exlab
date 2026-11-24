@@ -207,6 +207,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = HubLock()
+        self.lease_epoch = uuid.uuid4().hex
         self.updating = False
         self.active_update_requests = 0
         self.project_upload_locks = {}
@@ -640,7 +641,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 return {"id": row["id"], "command_id": row["command_id"], "action": action}
             if action == "resume" and row["state"] not in ("interrupted", "paused", "failed"):
                 raise APIError(409, "Only interrupted, paused or failed jobs can resume")
-            if action == "stop" and row["state"] in TERMINAL and row["resume_after_attempt"] is None:
+            if action == "stop" and row["state"] in TERMINAL and row["resume_after_attempt"] is None and not canceled.rowcount:
                 raise APIError(409, "This job has already stopped")
             if action == "cancel" and row["state"] == "canceled":
                 return {"id": row["id"], "command_id": row["command_id"], "action": action}
@@ -665,6 +666,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         return {"id": row["id"], **command}
 
     def _assign(self):
+        self._expire_leases()
         if (not self.db.execute("SELECT 1 FROM job_summaries j LEFT JOIN execution_queue_controls c ON c.job_id=j.id "
                                 "WHERE j.state='queued' AND j.node_id IS NULL AND COALESCE(c.hold,0)=0 LIMIT 1").fetchone()
                 and not self.db.execute("SELECT 1 FROM execution_handoffs WHERE status IN "
@@ -714,6 +716,8 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         if not isinstance(project_reports, list) or len(project_reports) > 100:
             raise APIError(400, "project_reports must be an array with at most 100 entries")
         with self.transaction():
+            self._expire_leases()
+            lease_requests = _object(payload.get("lease_requests", {}), "lease requests")
             project_checked = []
             for report in project_reports:
                 _object(report, "project report")
@@ -784,6 +788,11 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                     valid = False
                 if attempt == row["attempt"] and state in PROGRESS and row["state"] in PROGRESS and PROGRESS[state] < PROGRESS[row["state"]]:
                     valid = False
+                leased = json.loads(row["spec"]).get("planning", {}).get("lease_seconds")
+                if leased and not (resume or cancel) and self.db.execute(
+                        "SELECT 1 FROM execution_leases WHERE job_id=? AND generation=? AND attempt=? AND expired=1",
+                        (row["id"], row["generation"], attempt)).fetchone():
+                    valid = False
                 if valid:
                     timestamp = now()
                     # The worker owns accumulated runtime, including offline runs.
@@ -794,6 +803,11 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                     self.db.execute("UPDATE jobs SET runtime=? WHERE id=?",
                                     (_json({**runtime, "received_at": timestamp}) if runtime is not None else None, row["id"]))
                     self.db.execute("UPDATE jobs SET execution_state=? WHERE id=?", (_json(execution) if execution else None, row["id"]))
+                    if leased and state in TERMINAL:
+                        if state == "interrupted" and report.get("lease_lost") is True and execution and execution["stopped_confirmed"]:
+                            self.db.execute("UPDATE execution_leases SET deadline=0 WHERE job_id=? AND expired=0", (row["id"],))
+                        else:
+                            self.db.execute("DELETE FROM execution_leases WHERE job_id=? AND expired=0", (row["id"],))
                     if state != row["state"] or attempt != row["attempt"]:
                         self._event(row["id"], "state", {"state": state, "detail": detail, "attempt": attempt})
                     if _json(metrics) != row["metrics"] or attempt != row["attempt"] and metrics:
@@ -820,10 +834,16 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             jobs = []
             for owned in self.db.execute(f"SELECT id FROM job_summaries WHERE node_id=? AND {PENDING_SQL} ORDER BY created,id", (node_id,)).fetchall():
                 row = self._find_job(owned["id"])
-                jobs.append({"id": row["id"], "spec": json.loads(row["spec"]), "generation": row["generation"],
+                spec = json.loads(row["spec"])
+                seconds = spec.get("planning", {}).get("lease_seconds")
+                if seconds and "docker-execution-lease-v1" not in snapshot.get("capabilities", []):
+                    continue
+                jobs.append({"id": row["id"], "spec": spec, "generation": row["generation"],
                              "attempt": max(1, row["attempt"]), "resume_checkpoint": json.loads(row["resume_checkpoint"]) if row["resume_checkpoint"] else None,
                              "timing": json.loads(row["timing"]) if row["timing"] else None,
                              "command_id": row["command_id"], "action": row["action"] if row["command_id"] > row["command_ack"] else None})
+                if seconds:
+                    jobs[-1]["lease_granted"] = self._renew_lease(row, seconds, lease_requests.get(row["id"]))
             mode = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()[0]
             deployments = [dict(row) for row in self.db.execute(
                 "SELECT d.digest,p.size,p.project_id,p.bundle_id,d.revision,CASE WHEN p.deleted_at IS NULL THEN 'install' ELSE 'delete' END AS action FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed','deleted','delete_failed') ORDER BY d.updated LIMIT 100", (node_id,))]

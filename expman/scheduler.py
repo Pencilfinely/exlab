@@ -40,6 +40,8 @@ def in_window(snapshot):
 
 
 def eligible(task, snapshot):
+    if task.get("planning", {}).get("lease_seconds") and "docker-execution-lease-v1" not in snapshot.get("capabilities", []):
+        return False
     if not in_window(snapshot):
         return False
     if not set(task.get("tags", [])).issubset(snapshot.get("tags", [])):

@@ -182,14 +182,21 @@
     const details=node('details');details.append(node('summary','运行时间与交接策略'));const fields=node('div',undefined,'form-grid');details.append(fields);
     const expected=field(node,fields,'预计运行分钟数（可留空）',planning?.expected_seconds!=null?planning.expected_seconds/60:'','number');expected.min=0;expected.step='any';expected.dataset.control='expected';
     const deadline=field(node,fields,'期望完成时间（可留空）',localTime(planning?.deadline),'datetime-local');deadline.dataset.control='deadline';
+    const lease=field(node,fields,'失联停训宽限期（秒，留空可离线训练）',planning?.lease_seconds??'','number');
+    lease.min=30;lease.max=3600;lease.step=1;lease.dataset.control='lease';
     const label=node('label',undefined,'checkbox-label'),migrate=node('input');migrate.type='checkbox';migrate.checked=planning?.migrate!==false;migrate.dataset.control='migrate';label.append(migrate,node('span','允许停止确认后跨节点接手（需完整续训能力）'));details.append(label);details.planningOriginal=planning?clone(planning):null;details.dataset.planning='true';container.append(details);
   }
   function readPlanning(container){
     const details=container.querySelector('[data-planning]');if(!details)return undefined;
     const get=name=>details.querySelector('[data-control="'+name+'"]'),expected=get('expected').value,deadline=get('deadline').value,migrate=get('migrate').checked;
-    if(!expected&&!deadline&&migrate&&!details.planningOriginal)return undefined;
+    const seconds=get('lease').value;
+    if(!expected&&!deadline&&!seconds&&migrate&&!details.planningOriginal)return undefined;
+    if(seconds&&(!migrate||!Number.isInteger(Number(seconds))||Number(seconds)<30||Number(seconds)>3600))
+      throw new Error('失联接管需允许跨节点接手，宽限期为 30 至 3600 秒的整数。');
     if(expected&&(!Number.isFinite(Number(expected))||Number(expected)<0))throw new Error('预计运行时间应为非负数。');
-    return {expected_seconds:expected?Number(expected)*60:null,deadline:readTime(get('deadline'),details.planningOriginal?.deadline),migrate};
+    const planning={expected_seconds:expected?Number(expected)*60:null,deadline:readTime(get('deadline'),details.planningOriginal?.deadline),migrate};
+    if(seconds)planning.lease_seconds=Number(seconds);
+    return planning;
   }
   function openAssistant(ctx){
     const {node,api,notify,refresh}=ctx,dialog=node('dialog',undefined,'workspace-dialog'),form=node('form'),instructions=node('textarea'),generate=node('button','生成规划建议'),feedback=node('p'),output=node('div'),close=node('button','关闭','subtle');
