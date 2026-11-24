@@ -1,7 +1,6 @@
 """Mutable execution state and checkpoint transport, separate from final results.
 
-Ownership does not expire on a missed heartbeat. A new generation can be issued
-only after the old generation explicitly reports a confirmed process exit.
+Offline ownership is retained unless the task opted into a container-enforced lease.
 """
 from __future__ import annotations
 
@@ -12,10 +11,12 @@ import json
 import os
 import re
 import threading
+import time
 
 from .common import now, safe_child, sha256_file
 from .compute_policy import number
 from .scheduler import choose_assignment
+from .execution_lease import CAPABILITY as LEASE_CAPABILITY
 
 CAPABILITY = "execution-state-v1"
 CHUNK = 512 * 1024
@@ -79,6 +80,10 @@ def initialize(db):
         CREATE TABLE IF NOT EXISTS execution_queue_controls (
             job_id TEXT PRIMARY KEY REFERENCES jobs(id), priority INTEGER NOT NULL,
             hold INTEGER NOT NULL, revision INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS execution_leases (
+            job_id TEXT PRIMARY KEY REFERENCES jobs(id), generation INTEGER NOT NULL, attempt INTEGER NOT NULL,
+            seconds INTEGER NOT NULL, epoch TEXT NOT NULL, deadline REAL NOT NULL,
+            granted INTEGER NOT NULL DEFAULT 0, expired INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS execution_checkpoint_uploads (
             job_id TEXT NOT NULL REFERENCES jobs(id), attempt INTEGER NOT NULL, generation INTEGER NOT NULL,
             sha256 TEXT NOT NULL, manifest TEXT NOT NULL, complete INTEGER NOT NULL DEFAULT 0,
@@ -88,9 +93,63 @@ def initialize(db):
 
 
 class ExecutionControlHubMixin:
+    def _arm_lease(self, job_id, generation, attempt, seconds):
+        # The guard starts its clock before asking for renewal. The Center
+        # grants an extra margin for guard scheduling and container teardown.
+        self.db.execute("INSERT INTO execution_leases(job_id,generation,attempt,seconds,epoch,deadline) VALUES (?,?,?,?,?,?) "
+                        "ON CONFLICT(job_id) DO UPDATE SET generation=excluded.generation,attempt=excluded.attempt,"
+                        "seconds=excluded.seconds,epoch=excluded.epoch,deadline=excluded.deadline,granted=0,expired=0",
+                        (job_id, generation, attempt, seconds, self.lease_epoch, time.monotonic() + seconds + 15))
+
+    def _expire_leases(self):
+        tick = time.monotonic()
+        # A restarted or promoted Center waits a full interval before fencing
+        # a grant made by its predecessor, irrespective of wall clock skew.
+        self.db.execute("UPDATE execution_leases SET epoch=?,deadline=?+seconds+15 WHERE epoch!=? AND expired=0",
+                        (self.lease_epoch, tick, self.lease_epoch))
+        due = self.db.execute("SELECT * FROM execution_leases WHERE expired=0 AND deadline<=?", (tick,)).fetchall()
+        for lease in due:
+            row = self._find_job(lease["job_id"])
+            self.db.execute("UPDATE execution_leases SET expired=1 WHERE job_id=?", (row["id"],))
+            if row["generation"] != lease["generation"] or max(1, row["attempt"]) != lease["attempt"]:
+                continue
+            if row["state"] in ("canceled", "succeeded", "failed", "paused"):
+                continue
+            handoff = self.db.execute("SELECT 1 FROM execution_handoffs WHERE job_id=? AND generation=? "
+                                      "AND status IN ('requested','waiting_checkpoint','waiting_capacity')",
+                                      (row["id"], row["generation"])).fetchone()
+            if not handoff and row["action"] in ("stop", "cancel"):
+                self.db.execute("UPDATE jobs SET state=?,attempt=?,updated=?,detail=?,runtime=NULL WHERE id=?",
+                                ("canceled" if row["action"] == "cancel" else "interrupted", lease["attempt"],
+                                 now(), "执行租约到期，保留已下达的停止指令", row["id"]))
+                continue
+            self.db.execute("UPDATE jobs SET state='interrupted',attempt=?,updated=?,detail=?,runtime=NULL WHERE id=?",
+                            (lease["attempt"], now(), "执行租约到期，等待接管", row["id"]))
+            if not handoff:
+                self.db.execute("INSERT OR REPLACE INTO execution_handoffs VALUES (?,?,NULL,?,'requested',?)",
+                                (row["id"], row["generation"], "执行租约到期", now()))
+            self._event(row["id"], "lease_expired", {"generation": row["generation"], "attempt": lease["attempt"]})
+
+    def _renew_lease(self, row, seconds, requested):
+        attempt = max(1, row["attempt"])
+        if row["state"] in ("paused", "canceled", "failed", "interrupted", "succeeded") or row["action"] in ("stop", "cancel"):
+            return False
+        lease = self.db.execute("SELECT * FROM execution_leases WHERE job_id=?", (row["id"],)).fetchone()
+        if not lease or (lease["generation"], lease["attempt"]) != (row["generation"], attempt):
+            self._arm_lease(row["id"], row["generation"], attempt, seconds)
+        elif lease["expired"]:
+            return False
+        grant = requested == [row["generation"], attempt]
+        self.db.execute("UPDATE execution_leases SET deadline=?, granted=MAX(granted,?) WHERE job_id=?",
+                        (time.monotonic() + seconds + 15, int(grant), row["id"]))
+        return grant
+
     def _record_execution_owner(self, job_id, node_id, generation=1, first_attempt=1):
         self.db.execute("INSERT OR IGNORE INTO execution_owners VALUES (?,?,?,?,NULL)",
                         (job_id, generation, node_id, first_attempt))
+        seconds = self.db.execute("SELECT json_extract(spec,'$.planning.lease_seconds') FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
+        if seconds:
+            self._arm_lease(job_id, generation, first_attempt, seconds)
 
     def _execution_result_owner(self, node_id, job_id, attempt):
         from .hub import APIError
@@ -221,10 +280,22 @@ class ExecutionControlHubMixin:
             if row["state"] in ("succeeded", "canceled"):
                 self.db.execute("UPDATE execution_handoffs SET status='finished',updated=? WHERE job_id=?", (now(), row["id"]))
                 continue
-            if row["state"] not in ("paused", "interrupted", "failed") or not state.get("stopped_confirmed"):
+            fence = self.db.execute("SELECT granted FROM execution_leases WHERE job_id=? AND generation=? AND attempt=? AND expired=1",
+                                    (row["id"], row["generation"], row["attempt"])).fetchone()
+            if row["state"] not in ("paused", "interrupted", "failed") or not (state.get("stopped_confirmed") or fence):
                 continue
             spec, resume = json.loads(row["spec"]), None
-            if state.get("ever_started"):
+            if fence:
+                saved = self.db.execute("SELECT manifest FROM execution_checkpoint_uploads WHERE job_id=? AND generation<=? "
+                                        "AND attempt<=? AND complete=1 ORDER BY generation DESC,attempt DESC,"
+                                        "json_extract(manifest,'$.step') DESC,received DESC LIMIT 1",
+                                        (row["id"], row["generation"], row["attempt"])).fetchone()
+                manifest = saved[0] if saved else row["resume_checkpoint"]
+                if not manifest and fence["granted"]:
+                    self.db.execute("UPDATE execution_handoffs SET status='waiting_checkpoint',updated=? WHERE job_id=?", (now(), row["id"]))
+                    continue
+                resume = json.loads(manifest) if manifest else None
+            elif state.get("ever_started"):
                 manifest = state.get("checkpoint")
                 if not manifest or (spec.get("resume_supported") is not True and spec["backend"] != "demo"):
                     self.db.execute("UPDATE execution_handoffs SET status='waiting_checkpoint',updated=? WHERE job_id=?", (now(), row["id"]))
@@ -240,7 +311,7 @@ class ExecutionControlHubMixin:
             destinations = [n for n in nodes if CAPABILITY in n["snapshot"].get("capabilities", [])]
             if handoff["target_node_id"]:
                 destinations = [n for n in destinations if n["id"] == handoff["target_node_id"]]
-            elif handoff["reason"] == "手动交接":
+            elif fence or handoff["reason"] == "手动交接":
                 destinations = [n for n in destinations if n["id"] != row["node_id"]]
             assignment = choose_assignment(spec, destinations, counts)
             if not assignment:
@@ -252,7 +323,7 @@ class ExecutionControlHubMixin:
             self.db.execute("UPDATE jobs SET node_id=?,spec=?,state='assigned',generation=?,attempt=?,seq=0,execution_state=NULL,"
                             "resume_checkpoint=?,action=NULL,command_ack=command_id,resume_after_attempt=NULL,updated=?,detail=? WHERE id=?",
                             (target, json.dumps(assignment["spec"]), generation, attempt, json.dumps(resume) if resume else None,
-                             now(), "已确认原进程停止，正在交接至 " + target, row["id"]))
+                             now(), ("执行租约到期，正在交接至 " if fence else "已确认原进程停止，正在交接至 ") + target, row["id"]))
             self.db.execute("UPDATE execution_handoffs SET status='assigned',updated=? WHERE job_id=?", (now(), row["id"]))
             self._event(row["id"], "ownership_transferred", {"from": row["node_id"], "to": target,
                 "generation": generation, "attempt": attempt, "checkpoint": resume})

@@ -25,7 +25,7 @@ import time
 import urllib.parse
 
 from . import common, scheduler, node_policy
-from . import compute_policy, worker_database
+from . import compute_policy, execution_lease, worker_database
 
 TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
 ACTIVE = {"starting", "running"}
@@ -476,6 +476,8 @@ class Agent:
         from .python_stack_observation import CAPABILITY as STACK_CAPABILITY
         result["capabilities"].append(STACK_CAPABILITY)
         result["capabilities"] += [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY]
+        if sys.platform == "linux":
+            result["capabilities"].append(execution_lease.CAPABILITY)
         cpus = os.cpu_count()
         if hasattr(os, "sched_getaffinity"):
             try:
@@ -621,6 +623,8 @@ class Agent:
         report["execution_state"] = describe(self, record)
         if record["state"] == "interrupted" and record.get("resume_after_reboot"):
             report["resume_after_reboot"] = True
+        if record["state"] == "interrupted" and record.get("lease_lost"):
+            report["lease_lost"] = True
         if (record.get("runtime") or {}).get("attempt") == record["attempt"]:
             report["runtime"] = validate_runtime(record["runtime"], record["attempt"])
         # The server limit is bytes, not characters (Chinese logs can use 3 bytes/character).
@@ -667,6 +671,10 @@ class Agent:
             payload["reports"].append(report)
             body_bytes += report_bytes
         try:
+            pending_grants = execution_lease.challenges(self) if sys.platform == "linux" else {}
+            if pending_grants:
+                payload["lease_requests"] = {key: [record.get("generation", 1), record["attempt"]]
+                                             for key, (record, nonce) in pending_grants.items()}
             response = self._sync_request(payload)
             self.online = True
             if isinstance(response.get("controller_agent"), dict):
@@ -715,6 +723,7 @@ class Agent:
             for job in response.get("jobs", []):
                 if not re.fullmatch(r"[0-9a-f]{32}", str(job.get("id", ""))):
                     continue
+                execution_lease.deliver(self, job, pending_grants)
                 record = existing.get(job["id"])
                 if getattr(self, 'maintenance', None) and self.maintenance.cleaning and record and record['state'] == 'succeeded':
                     continue  # Defer new generations until their old workspace is archived.
@@ -807,7 +816,7 @@ class Agent:
                 attempt=record["attempt"] + 1, command_ack=command_id, stop_at=None,
                 stop_action=None, container_name=None, worker_pid=None, gpu_uuid=None,
                 execution_stopped=False, resource_release=None,
-                resume_after_reboot=False,
+                resume_after_reboot=False, lease_lost=False,
                 environment=None, archive_scanned=False, resume_from_checkpoint=valid_checkpoint,
                 detail="Resume accepted; checkpoint will be validated by algorithm")
         else:
@@ -919,6 +928,8 @@ class Agent:
         spec, output = record["spec"], self._output(record)
         if record.get("execution_retired"):
             return
+        if spec.get("planning", {}).get("lease_seconds") and not self.online:
+            return
         if record.get("resume_checkpoint") and not record.get("checkpoint_restored"):
             marker = output / (".execution-resume-" + str(record["generation"]) + ".json")
             if common.read_json(marker) != record["resume_checkpoint"]:
@@ -991,6 +1002,11 @@ class Agent:
                 "--memory", str(spec["resources"]["ram_mb"]) + "m", "--network", "none",
                 "--user", container_user, "--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges",
                 "--tmpfs", "/tmp:rw,nosuid,size=512m", "--workdir", "/workspace/code"]
+        command = spec["command"]
+        if spec.get("planning", {}).get("lease_seconds"):
+            guard_mounts, command = execution_lease.prepare(self, record, current)
+            mounts.extend(guard_mounts)
+            argv += ["--entrypoint", "python3"]
         for source, destination, readonly in mounts:
             if "," in str(source):
                 raise ValueError("Docker bind paths must not contain commas")
@@ -1001,7 +1017,7 @@ class Agent:
                            "EXPERIMENT_ATTEMPT": str(record["attempt"]), "PYTHONDONTWRITEBYTECODE": "1",
                            "CUDA_VISIBLE_DEVICES": choice["gpu_uuid"]}.items():
             argv += ["--env", key + "=" + value]
-        argv += [environment["image"], *spec["command"]]
+        argv += [environment["image"], *command]
         if stop_requested is not None and stop_requested():
             self._save(record, state="ready", container_name=None, detail="Start deferred for application exit")
             return
@@ -1037,6 +1053,12 @@ class Agent:
             state = "canceled"
         elif action == "stop" or (self._output(record) / "STOP").exists():
             state = "paused" if self._checkpoint(record) else "interrupted"
+        elif (record["spec"].get("planning", {}).get("lease_seconds") and exit_code == 75
+              and (execution_lease.directory(self, record) / "watch" / "expired").is_file()):
+            self._save(record, state="interrupted", execution_stopped=True, lease_lost=True,
+                       exit_code=exit_code, archive_scanned=False, _timing_end=finished_at,
+                       detail="容器执行租约到期，训练已停止")
+            return
         else:
             state = "succeeded" if exit_code == 0 else "failed"
         detail = f"Process exited with code {exit_code}" if exit_code is not None else "Container missing after node reboot"
@@ -1146,6 +1168,10 @@ class Agent:
     def _reboot_exit(self, record, exit_code=None):
         if record.get("stop_action") or (self._output(record) / "STOP").exists():
             self._finish(record, exit_code, timing_uncertain=True)
+            return
+        if record["spec"].get("planning", {}).get("lease_seconds"):
+            self._save(record, state="interrupted", execution_stopped=True, lease_lost=True,
+                       exit_code=exit_code, _timing_uncertain=True, detail="节点重启，等待租约接管")
             return
         eligible = False
         if record["spec"].get("resume_supported") is False:
