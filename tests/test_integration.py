@@ -1,5 +1,7 @@
 """Real HTTP + SQLite + real built-in subprocesses; no Docker simulation claim."""
+import json
 from pathlib import Path
+import subprocess
 import threading
 import time
 import unittest
@@ -8,6 +10,7 @@ from unittest.mock import patch
 from expman.agent import Agent
 from expman.common import atomic_json, api_request, sha256_file
 from expman.hub import Hub, make_server
+from expman.sdk import Run
 from expman.__main__ import node_config
 from tests.support import temporary_directory
 
@@ -120,6 +123,62 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(record["attempt"], 1)
         logs = list((self.agent.root / "runs" / identity).glob("attempt-*.log"))
         self.assertEqual(len(logs), 1)
+
+    def test_rebooted_gpu_worker_resumes_once_after_lost_sync_response(self):
+        repo = "https://example.test/training.git"
+        env = {"profile": "test", "image": "test@sha256:" + "a" * 64}
+        gpu = {"uuid": "GPU-2080ti", "profiles": ["test"], "total_mb": 11000, "free_mb": 11000}
+        snapshot = {**self.agent.snapshot(), "profiles": {"test": env["image"]}, "allowed_repos": [repo],
+                    "gpus": [gpu], "free_ram_mb": 8192, "disk_free_mb": 8192}
+        spec = {"backend": "docker", "source": {"repo": repo, "commit": "b" * 40},
+                "environments": [env], "command": ["python", "train.py"], "resources": {"gpu_memory_mb": 2000}}
+        identity = self.hub.submit({"spec": spec, "request_id": "reboot"})["ids"][0]
+        self.agent._sync(snapshot)
+        record, = self.agent.records()
+        output = self.agent._output(record)
+        (output / "weights").write_bytes(b"epoch 7 weights")
+        Run(output, {}).publish_checkpoint("weights", 7)
+        self.agent._save(record, state="running", execution_boot_id="old-boot", ever_started=True,
+                         container_name=f"expman-{identity}-1", prepared=True,
+                         cached_environments=[{**env, "image_id": "sha256:cached"}])
+        self.agent._sync(snapshot)
+        self.assertEqual(self.hub.job(identity)["state"], "running")
+        self.agent.close()
+        with patch("expman.agent._linux_boot", return_value=("new-boot", time.time())):
+            self.agent = Agent(self.config_path)
+
+        dropped_commands = []
+        def request(url, token, payload=None, timeout=10):
+            response = api_request(url, token, payload, timeout)
+            if url.endswith("/api/sync") and any(job["action"] == "resume" for job in response["jobs"]):
+                dropped_commands.append(response["jobs"][0]["command_id"])
+                if len(dropped_commands) == 1:
+                    raise TimeoutError("Lost response after Center committed resume")
+            return response
+
+        def docker(argv, **kwargs):
+            data = json.dumps([{"Id": "sha256:cached"}]) if argv[:3] == ["docker", "image", "inspect"] else ""
+            return subprocess.CompletedProcess(argv, 0, data, "")
+
+        def inspect(task):
+            return None if task["attempt"] == 1 else {"State": {"Status": "running", "Running": True}}
+
+        with patch.object(self.agent, "snapshot", return_value=snapshot), patch.object(self.agent, "_inspect", inspect), \
+                patch("expman.agent.common.api_request", side_effect=request), patch("expman.agent.sys.platform", "linux"), \
+                patch("expman.agent.os.getuid", return_value=1000, create=True), \
+                patch("expman.agent.os.getgid", return_value=1000, create=True), patch.object(self.agent, "_verify_checkout"), \
+                patch.object(self.agent, "_exec", side_effect=docker) as commands:
+            self.pump(lambda: self.hub.job(identity)["attempt"] == 2)
+            self.agent.tick()
+        create, = [call.args[0] for call in commands.call_args_list if call.args[0][:2] == ["docker", "create"]]
+        self.assertIn("EXPERIMENT_RESUME=1", create)
+        self.assertIn("EXPERIMENT_ATTEMPT=2", create)
+        self.assertEqual([call.args[0] for call in commands.call_args_list if call.args[0][:2] == ["docker", "start"]],
+                         [["docker", "start", f"expman-{identity}-2"]])
+        self.assertEqual(dropped_commands, [1, 1])
+        self.assertEqual(Run(output, {}).checkpoint().read_bytes(), b"epoch 7 weights")
+        job = self.hub.job(identity)
+        self.assertEqual((job["node_id"], job["generation"], job["state"]), ("worker", 1, "running"))
 
     def test_real_cooperative_stop_resume_preserves_steps(self):
         identity = self.submit(70)[0]

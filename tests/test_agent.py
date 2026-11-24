@@ -343,6 +343,8 @@ class AgentTests(unittest.TestCase):
 
     def test_docker_recovery_inspects_existing_container_without_duplicate_create(self):
         record = self.record("starting", self.docker_spec())
+        self.agent.boot_id = "current-boot"
+        record["execution_boot_id"] = "previous-boot"
         record["container_name"] = f"expman-{self.job_id}-1"
         self.agent._save(record)
         container = {"State": {"Running": True, "Status": "running"},
@@ -357,6 +359,7 @@ class AgentTests(unittest.TestCase):
             self.agent._reconcile(record)
         self.assertEqual(record["state"], "running")
         self.assertEqual(calls, [["docker", "inspect", record["container_name"]]])
+        self.assertEqual(record["execution_boot_id"], self.agent.boot_id)
 
     def test_management_restart_keeps_docker_attempts_queue_and_report_ack_state(self):
         running = self.record("running", self.docker_spec())
@@ -394,6 +397,35 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ownership"):
                 self.agent._reconcile(record)
         self.assertEqual(execute.call_count, 1)
+
+    def test_docker_reboot_exit_only_requests_resume_for_checkpointed_interruption(self):
+        self.agent.boot_id = "new"
+        self.agent.boot_started_at = time.time() - 10
+        for boot, code, oom, stop, supported, valid, expected, resume in (
+                ("old", 255, False, None, True, True, "interrupted", True),
+                (None, 143, False, None, True, True, "interrupted", True),  # Pre-upgrade record.
+                ("old", 137, True, None, True, True, "failed", False),
+                ("new", 137, False, None, True, True, "failed", False),
+                ("old", 1, False, None, True, True, "failed", False),
+                ("old", 0, False, None, True, True, "succeeded", False),
+                ("old", 137, False, "stop", True, True, "paused", False),
+                ("old", 137, False, "cancel", True, True, "canceled", False),
+                ("old", 255, False, None, False, True, "interrupted", False),
+                ("old", 255, False, None, True, False, "interrupted", False)):
+            with self.subTest(boot=boot, code=code, oom=oom, stop=stop, supported=supported, valid=valid):
+                record = self.record("running", {**self.docker_spec(), "resume_supported": supported})
+                record.update(execution_boot_id=boot, updated=self.agent.boot_started_at - 1,
+                              container_name="container", stop_action=stop, ever_started=True)
+                output = self.agent._output(record)
+                weights = output / "weights"
+                weights.write_bytes(b"checkpoint")
+                common.atomic_json(output / "checkpoint.json", {"path": "weights", "sha256":
+                    common.sha256_file(weights) if valid else "0" * 64, "step": 7, "time": time.time()})
+                state = {"Status": "exited", "ExitCode": code, "OOMKilled": oom}
+                with patch.object(self.agent, "_inspect", return_value={"State": state}), patch("expman.agent.subprocess.run"):
+                    self.agent._reconcile(record)
+                self.assertEqual(record["state"], expected)
+                self.assertEqual(self.agent._report(record).get("resume_after_reboot", False), resume)
 
     def test_missing_container_error_formats_are_recognized_only_with_a_reachable_daemon(self):
         record = self.record("running", self.docker_spec())

@@ -118,6 +118,21 @@ class HubTests(unittest.TestCase):
         self.assertEqual(response["jobs"][0]["id"], identity)
         self.assertIsNone(self.hub.job(waiting)["node_id"])
 
+    def test_commands_queued_while_powered_off_take_precedence_over_reboot_resume(self):
+        for action in ("stop", "cancel"):
+            with self.subTest(action=action):
+                identity = self.submit(action)
+                self.sync()
+                self.sync([self.report(identity, 1, "running")])
+                command = self.hub.action({"job_id": identity, "action": action})
+                execution = {"schema_version": 1, "generation": 1, "attempt": 1, "ever_started": True,
+                             "stopped_confirmed": True, "checkpoint": {"path": "weights", "step": 7,
+                             "time": 1, "size": 3, "sha256": "a" * 64}}
+                response = self.sync([self.report(identity, 2, "interrupted", resume_after_reboot=True,
+                                                  execution_state=execution)])
+                job = next(job for job in response["jobs"] if job["id"] == identity)
+                self.assertEqual((job["action"], job["command_id"]), (action, command["command_id"]))
+
     def test_cancel_paused_and_prevent_same_attempt_regression(self):
         identity = self.assigned()
         self.sync([self.report(identity, 1, "running")])

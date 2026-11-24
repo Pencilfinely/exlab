@@ -646,18 +646,23 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 return {"id": row["id"], "command_id": row["command_id"], "action": action}
             if action == "cancel" and row["state"] == "succeeded":
                 raise APIError(409, "A successful job cannot be canceled")
-            command_id = row["command_id"] + 1
-            timestamp = now()
-            # A queued, unowned job has no worker to acknowledge the command.
-            if row["node_id"] is None:
-                if action == "resume":
-                    raise APIError(409, "An unassigned job cannot resume")
-                self.db.execute("UPDATE jobs SET state='canceled', updated=?, action=?, command_id=?, command_ack=? WHERE id=?", (timestamp, action, command_id, command_id, row["id"]))
-            else:
-                resume_after = row["attempt"] if action == "resume" else row["resume_after_attempt"]
-                self.db.execute("UPDATE jobs SET updated=?,action=?,command_id=?,resume_after_attempt=? WHERE id=?", (timestamp, action, command_id, resume_after, row["id"]))
-            self._event(row["id"], "command", {"action": action, "command_id": command_id})
-            return {"id": row["id"], "command_id": command_id, "action": action}
+            return self._issue_command(row, action)
+
+    def _issue_command(self, row, action, *, reason=None):
+        command_id = row["command_id"] + 1
+        # A queued, unowned job has no worker to acknowledge the command.
+        if row["node_id"] is None:
+            if action == "resume":
+                raise APIError(409, "An unassigned job cannot resume")
+            self.db.execute("UPDATE jobs SET state='canceled',updated=?,action=?,command_id=?,command_ack=? WHERE id=?",
+                            (now(), action, command_id, command_id, row["id"]))
+        else:
+            resume_after = row["attempt"] if action == "resume" else row["resume_after_attempt"]
+            self.db.execute("UPDATE jobs SET updated=?,action=?,command_id=?,resume_after_attempt=? WHERE id=?",
+                            (now(), action, command_id, resume_after, row["id"]))
+        command = {"action": action, "command_id": command_id}
+        self._event(row["id"], "command", {**command, "reason": reason} if reason else command)
+        return {"id": row["id"], **command}
 
     def _assign(self):
         if (not self.db.execute("SELECT 1 FROM job_summaries j LEFT JOIN execution_queue_controls c ON c.job_id=j.id "
@@ -793,6 +798,14 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                         self._event(row["id"], "state", {"state": state, "detail": detail, "attempt": attempt})
                     if _json(metrics) != row["metrics"] or attempt != row["attempt"] and metrics:
                         self._event(row["id"], "metrics", {"metrics": metrics, "attempt": attempt})
+                    if (report.get("resume_after_reboot") is True and state == "interrupted"
+                            and (row["state"] not in TERMINAL or resume)
+                            and execution and execution["stopped_confirmed"]
+                            and command_ack == row["command_id"] and row["action"] not in ("stop", "cancel")):
+                        spec = json.loads(row["spec"])
+                        if spec.get("resume_supported") is not False and not self._project_is_deleted(spec):
+                            # Persist permission for the next attempt with the interruption and its ACK.
+                            self._issue_command(self._find_job(row["id"]), "resume", reason="node_reboot")
                 else:
                     # Consume stale state too, preventing an endless resend loop.
                     self.db.execute("UPDATE jobs SET seq=? WHERE id=?", (seq, row["id"]))
