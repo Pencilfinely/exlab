@@ -43,6 +43,20 @@ def _new_timing(complete=True):
             "segment_started_at": None, "last_observed_at": None, "complete": complete}
 
 
+def _linux_boot():
+    """Identify the running kernel and date pre-upgrade Docker attempts on Linux/WSL."""
+    if sys.platform == "linux":
+        try:
+            identity = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            for line in Path("/proc/stat").read_text().splitlines():
+                if line.startswith("btime "):
+                    return identity, int(line.split()[1])
+            return identity, None
+        except (OSError, ValueError):
+            pass
+    return None, None
+
+
 def _docker_timestamp(value):
     """Docker uses an all-zero date for containers that have never run."""
     if not isinstance(value, str) or value.startswith("0001-"):
@@ -233,6 +247,7 @@ class Agent:
         """)
         self.db.commit()
         self.processes = {}
+        self.boot_id, self.boot_started_at = _linux_boot()
         self.online = False
         self.last_error = None
         self.closed = False
@@ -604,6 +619,8 @@ class Agent:
         from .execution_transfer import describe
         report["generation"] = record.get("generation", 1)
         report["execution_state"] = describe(self, record)
+        if record["state"] == "interrupted" and record.get("resume_after_reboot"):
+            report["resume_after_reboot"] = True
         if (record.get("runtime") or {}).get("attempt") == record["attempt"]:
             report["runtime"] = validate_runtime(record["runtime"], record["attempt"])
         # The server limit is bytes, not characters (Chinese logs can use 3 bytes/character).
@@ -626,7 +643,9 @@ class Agent:
         # Timing advances even when a workload has not emitted fresh metrics.
         # Persist a fresh sequence so the Hub can accept each duration sample.
         for record in self.records(("running",)):
-            if record["state"] == "running" and "_timing" in record:
+            if record["spec"]["backend"] == "docker" and self._previous_boot(record):
+                continue  # Keep the last live observation while the rebooted engine is unavailable.
+            if "_timing" in record:
                 self._save(record)
         confirmed = dict(self.db.execute("SELECT job_id,seq FROM report_acks"))
         pending = [json.loads(row[0]) for row in self.db.execute(
@@ -754,6 +773,9 @@ class Agent:
                            command_ack=command_id, detail="Stopped before execution")
             elif action == "cancel" and record["state"] not in {"succeeded", "canceled"}:
                 self._save(record, state="canceled", command_ack=command_id, detail="Task canceled; retained outputs remain archived")
+            elif action == "stop" and record.get("resume_after_reboot"):
+                self._save(record, command_ack=command_id, resume_after_reboot=False,
+                           detail="节点重启后收到停止命令，已保留检查点")
             else:
                 self._save(record, command_ack=command_id)
         elif action == "resume" and record["state"] in TERMINAL - {"succeeded", "canceled"}:
@@ -775,7 +797,7 @@ class Agent:
                     self._save(record, detail="Previous container still running; resume is waiting, no second attempt started")
                     return
             valid_checkpoint = self._checkpoint(record)
-            if record.get("ever_started") and not valid_checkpoint:
+            if (record.get("ever_started") or record.get("resume_after_reboot")) and not valid_checkpoint:
                 self._save(record, command_ack=command_id,
                     detail="Resume refused: previous execution has no verified checkpoint; submit a new task to start afresh")
                 return
@@ -785,6 +807,7 @@ class Agent:
                 attempt=record["attempt"] + 1, command_ack=command_id, stop_at=None,
                 stop_action=None, container_name=None, worker_pid=None, gpu_uuid=None,
                 execution_stopped=False, resource_release=None,
+                resume_after_reboot=False,
                 environment=None, archive_scanned=False, resume_from_checkpoint=valid_checkpoint,
                 detail="Resume accepted; checkpoint will be validated by algorithm")
         else:
@@ -911,7 +934,7 @@ class Agent:
         record.setdefault("_timing", _new_timing(complete=False))
         # Intent is durable before a create/spawn side effect.
         self._save(record, state="starting", gpu_uuid=choice["gpu_uuid"], environment=choice["environment"],
-                   execution_stopped=False,
+                   execution_stopped=False, execution_boot_id=self.boot_id,
                    container_name=f"expman-{record['id']}-{record['attempt']}", detail="Start intent persisted")
         execution = {"node_id": self.config["node_id"], "job_id": record["id"], "attempt": record["attempt"],
                      "gpu_uuid": choice["gpu_uuid"], "environment": choice["environment"],
@@ -1008,7 +1031,7 @@ class Agent:
             raise ValueError("Container ownership labels do not match; refusing to control it")
         return container
 
-    def _finish(self, record, exit_code, finished_at=None):
+    def _finish(self, record, exit_code, finished_at=None, *, timing_uncertain=False):
         action = record.get("stop_action")
         if action == "cancel":
             state = "canceled"
@@ -1016,9 +1039,10 @@ class Agent:
             state = "paused" if self._checkpoint(record) else "interrupted"
         else:
             state = "succeeded" if exit_code == 0 else "failed"
+        detail = f"Process exited with code {exit_code}" if exit_code is not None else "Container missing after node reboot"
         self._save(record, state=state, exit_code=exit_code, archive_scanned=False, _timing_end=finished_at,
-                   execution_stopped=True,
-                   detail=f"Process exited with code {exit_code}" + ("; checkpoint verified" if state == "paused" else ""))
+                   execution_stopped=True, _timing_uncertain=timing_uncertain,
+                   detail=detail + ("; checkpoint verified" if state == "paused" else ""))
 
     def _docker_timing(self, record, state):
         """Recover the current attempt from Docker, including an unobserved exit."""
@@ -1057,12 +1081,19 @@ class Agent:
                 self._finish(record, code)
             return
         container = self._inspect(record)
+        previous_boot = self._previous_boot(record)
         if container is None:
+            if previous_boot:
+                self._reboot_exit(record)
+                return
             self._save(record, state="interrupted", _timing_uncertain=True,
                        detail="Container missing; explicit resume required, no duplicate launch")
             return
         state = container["State"]
         finished_at = self._docker_timing(record, state)
+        if previous_boot and state.get("Status") == "created" and record["state"] == "running":
+            self._reboot_exit(record)
+            return
         if state.get("Status") == "created" and record["state"] == "starting":
             if record.get("stop_at"):
                 self._finish(record, 143)
@@ -1078,15 +1109,15 @@ class Agent:
                 return  # A recovered container is still subject to current admission policy.
             if stop_requested is not None and stop_requested():
                 return
-            self._save(record, ever_started=True)
+            self._save(record, ever_started=True, execution_boot_id=self.boot_id)
             self._exec(["docker", "start", record["container_name"]], timeout=60)
             self._save(record, state="running", detail="Recovered existing created container")
         elif state.get("Running"):
             # Recovery can find a live process while the durable intent still
             # says starting. Enter running before any stop/metrics persistence
             # so this execution segment is closed only after confirmed exit.
-            if record["state"] != "running":
-                self._save(record, state="running", detail="Reattached to existing container")
+            if record["state"] != "running" or previous_boot:
+                self._save(record, state="running", execution_boot_id=self.boot_id, detail="Reattached to existing container")
             elif "_timing" in record:
                 self._save(record)
             if overdue:
@@ -1098,7 +1129,34 @@ class Agent:
                                stdin=subprocess.DEVNULL, timeout=30, shell=False, env=self._docker_environment())
             if finished_at is None and "_timing" in record:
                 record["_timing"]["complete"] = False
-            self._finish(record, state.get("ExitCode", 1), finished_at=finished_at)
+            exit_code = state.get("ExitCode", 1)
+            # SIGKILL, SIGTERM and Docker's unknown-exit code can follow a host shutdown.
+            if previous_boot and not state.get("OOMKilled") and exit_code in (137, 143, 255):
+                self._reboot_exit(record, exit_code)
+            else:
+                self._finish(record, exit_code, finished_at=finished_at)
+
+    def _previous_boot(self, record):
+        if record.get("execution_boot_id"):
+            return bool(self.boot_id and record["execution_boot_id"] != self.boot_id)
+        # Older workers persisted timing and sequence data before boot IDs existed.
+        observed = record.get("_timing", {}).get("segment_started_at") or record.get("updated")
+        return bool(self.boot_started_at and observed and observed < self.boot_started_at)
+
+    def _reboot_exit(self, record, exit_code=None):
+        if record.get("stop_action") or (self._output(record) / "STOP").exists():
+            self._finish(record, exit_code, timing_uncertain=True)
+            return
+        eligible = False
+        if record["spec"].get("resume_supported") is False:
+            detail = "节点重启后训练中断，算法未配置续训入口"
+        elif self._checkpoint(record):
+            eligible = True
+            detail = "节点重启后训练中断，已请求中控从本地检查点续训"
+        else:
+            detail = "节点重启后训练中断，缺少校验通过的本地检查点"
+        self._save(record, state="interrupted", execution_stopped=True, exit_code=exit_code,
+                   resume_after_reboot=eligible, _timing_uncertain=True, detail=detail)
 
     def _metrics(self, record):
         try:

@@ -66,6 +66,8 @@ Each new Docker container receives both `--gpus device=<assigned UUID>` and an e
 
 Stop: write root/runs/ID/STOP, request cooperative checkpoint; after configured grace timeout stop only own container, mark interrupted if no valid checkpoint. SDK supports should_stop(), metric(step,**values), publish_checkpoint(file,step), finish(result). Checkpoint manifest has path/hash/step; validates complete file before `paused`. Resume increments attempt, same output directory, sets EXPERIMENT_RESUME=1, removes STOP; checkpoint passed through persistent output. No automatic restart of failed scientific jobs.
 
+After a Linux/WSL reboot, the worker inspects each active Docker attempt. When it confirms a reboot interruption and verifies a published local checkpoint, it sends `resume_after_reboot: true` with the interrupted report. The Center records a same-owner resume command in the transaction that acknowledges the report. Pending stop and cancel commands take precedence. The worker rechecks the previous container and checkpoint before accepting the next attempt and applies normal admission policy before launch.
+
 Metrics: sdk appends metrics.jsonl and atomic latest_metrics.json; node reports latest metrics while running, stdout attempt-N.log. Archived files use closed-file snapshot: config and final files after terminal status, not live SQLite, not half-written checkpoints. Sync events first; chunk transfers bounded per tick, reconnect retries. Agent continues polling/running if Hub unavailable. Already cached ready tasks run offline; global new assignments paused.
 
 ## Experiment timing
