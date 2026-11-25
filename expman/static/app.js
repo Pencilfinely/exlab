@@ -14,7 +14,14 @@ const requestId = () => Array.from({length:32},()=>Math.floor(Math.random()*16).
 if(globalThis.ExLabCompute)ExLabCompute.mount({node,$,api,notify,refresh});
 globalThis.ExLabAutonomousUI=globalThis.ExLabAutonomy?.mount({node,api,host:$('ai-settings-form')?.parentElement,after:$('ai-settings-form')?.parentElement});
 function node(tag, text, cls) { const e=document.createElement(tag); if(text!==undefined)e.textContent=String(text); if(cls)e.className=cls;return e; }
-function notify(message) { $('notice').textContent=message; $('notice').hidden=!message; }
+let noticeTimer;
+function notify(message) {
+  clearTimeout(noticeTimer);
+  const notice=$('notice');
+  notice.textContent=message;
+  notice.hidden=!message;
+  if(message)noticeTimer=setTimeout(()=>notify(''),6000);
+}
 async function writeClipboardText(text) {
   if(navigator.clipboard?.writeText){
     try{await navigator.clipboard.writeText(text);return;}catch{}
@@ -281,11 +288,12 @@ function render(){if(globalThis.ExLabAutonomousUI)globalThis.ExLabAutonomousUI.r
     const rename=node('button','改名','text-button');rename.onclick=async()=>{const name=prompt('算力端显示名称',n.display_name||n.id);if(!name?.trim())return;try{await api('/api/node-rename',{node_id:n.id,name:name.trim()});await refresh();}catch(error){notify(error.message);}};box.append(rename);
     if(!(snap.gpus||[]).length)box.append(node('p',snap.allow_demo?'CPU 演示节点':'GPU 尚未就绪或未授权'));
     for(const g of snap.gpus||[]){const gpu=node('div',`${g.name} · 空闲 ${Number.isFinite(g.free_mb)?(g.free_mb/1024).toFixed(1):'?'} / ${(g.total_mb/1024).toFixed(1)} GiB`,'gpu'),bar=node('div',undefined,'bar'),fill=node('i');fill.style.width=Math.max(0,Math.min(100,100*(1-g.free_mb/g.total_mb)))+'%';bar.append(fill);gpu.append(bar);box.append(gpu);}
-    if(Number.isFinite(snap.pending_uploads))box.append(node('p',`待回传文件：${snap.pending_uploads}`));
-    if(globalThis.ExLabDelivery){for(const text of ExLabDelivery.nodeSummary(snap.delivery))box.append(node('p',text,'muted'));
+    if(online(n)&&!snap.delivery&&snap.pending_uploads>0)box.append(node('p',`待回传文件：${snap.pending_uploads}`));
+    if(globalThis.ExLabDelivery){
+      if(online(n)){
+        for(const text of ExLabDelivery.nodeSummary(snap.delivery))box.append(node('p',text,'muted'));
+      }
       const delivery=snap.delivery||{};box.append(node('p',`Agent ${snap.agent_version||delivery.agent_version||'未知'} · Hub ${delivery.hub_version||state.version||'未知'}`,'muted'));
-      box.append(node('p',`最近字节进展 ${formatTimestamp(delivery.last_byte_progress_at)} · 最近完整文件 ${formatTimestamp(delivery.last_file_completed_at)}`,'muted'));
-      if(delivery.last_error)box.append(node('p',`错误时间 ${formatTimestamp(delivery.last_error_at)} · 下次重试 ${formatTimestamp(delivery.next_retry_at)}`,'muted'));
     }
     box.append(node('p',`节点并发上限 ${snap.policy?.max_running??'—'} · `+(snap.gpus||[]).map(g=>`${g.name}：每卡 ${g.max_jobs??1} 个任务`).join('；'),'muted'));
     const resourceButton=node('button','资源设置','subtle');resourceButton.onclick=()=>openNodeResources(n.id);box.append(resourceButton);

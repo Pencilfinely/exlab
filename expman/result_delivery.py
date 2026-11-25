@@ -79,12 +79,17 @@ def telemetry(db, active=None):
     legacy = db.execute("SELECT COUNT(*),COALESCE(SUM(MAX(0,u.size-u.offset)),0) FROM uploads u "
                         "LEFT JOIN legacy_upload_policy p ON p.job_id=u.job_id AND p.name=u.name AND p.sha=u.sha "
                         "WHERE u.complete=0 AND COALESCE(p.disposition,'automatic')!='retained'").fetchone()
-    errors = dictionaries("SELECT error,error_at,retries,next_retry FROM node_results WHERE error!='' ORDER BY error_at DESC LIMIT 1") + dictionaries("SELECT error,error_at,retries,next_retry FROM node_evidence WHERE error!='' ORDER BY error_at DESC LIMIT 1")
+    errors = dictionaries("SELECT error,error_at,retries,next_retry FROM node_results "
+                          "WHERE error!='' AND status IN ('retrying','unsupported','invalid','conflict') ORDER BY error_at DESC LIMIT 1")
+    errors += dictionaries("SELECT error,error_at,retries,next_retry FROM node_evidence "
+                           "WHERE error!='' AND (transfer_status='retrying' OR retention='pending') ORDER BY error_at DESC LIMIT 1")
     latest = max(errors, key=lambda row: row["error_at"] or 0) if errors else None
     meta = {row[0]: json.loads(row[1]) for row in db.execute("SELECT key,value FROM node_delivery_meta")}
-    if meta.get("legacy_error_at", 0) > ((latest["error_at"] or 0) if latest else 0):
+    if legacy[0] and meta.get("legacy_next_retry_at") and meta.get("legacy_error_at", 0) > ((latest["error_at"] or 0) if latest else 0):
         latest = {"error": meta["legacy_error"], "error_at": meta["legacy_error_at"],
                   "retries": meta.get("legacy_retry_count", 0), "next_retry": meta.get("legacy_next_retry_at", 0)}
+    error_at = meta.get("control_error_at") if meta.get("control_error") else None
+    error = latest["error"] if latest else meta.get("control_error") or meta.get("scan_error")
     return {"agent_version": __version__, "protocol_version": 1,
             "pending_results": pending[0], "pending_result_bytes": pending[1],
             "pending_evidence": len(evidence), "pending_evidence_bytes": None if any(row["size"] is None for row in evidence) else sum(max(0, row["size"] - row["confirmed_bytes"]) for row in evidence),
@@ -93,8 +98,8 @@ def telemetry(db, active=None):
             "current_result": meta.get("current_result"), "current_evidence": meta.get("current_evidence"),
             "current_legacy": active, "last_byte_progress_at": meta.get("last_byte_progress_at"),
             "last_file_completed_at": meta.get("last_file_completed_at"),
-            "last_error": latest["error"] if latest else meta.get("control_error") or meta.get("scan_error"),
-            "last_error_at": latest["error_at"] if latest else meta.get("control_error_at"),
+            "error_active": bool(error), "last_error": error,
+            "last_error_at": latest["error_at"] if latest else error_at,
             "retry_count": latest["retries"] if latest else 0,
             "next_retry_at": latest["next_retry"] if latest and latest["next_retry"] else None,
             "result_worker_at": meta.get("result_worker_at"), "evidence_worker_at": meta.get("evidence_worker_at"),
@@ -281,6 +286,7 @@ class ResultDelivery:
 
     def results_once(self, *, indexed=False):
         db = self.result_db
+        scan_error = None
         with self.result_lock:
             records = scan_index.due(db, 'results') if indexed else self._records(db)
         for record in records:
@@ -289,11 +295,11 @@ class ResultDelivery:
             try:
                 self.discover_record(record)
             except (OSError, ValueError, TypeError, KeyError) as exc:
-                with self.result_lock:
-                    self._meta(db, "scan_error", self._error(exc))
+                scan_error = self._error(exc)
             else:
                 scan_index.completed(db, 'results', record, 60 if record['state'] in protocol.TERMINAL else 0.25)
         with self.result_lock:
+            self._meta(db, "scan_error", scan_error)
             queue = [dict(row) for row in db.execute("SELECT * FROM node_results WHERE status IN ('queued','retrying','sending') AND next_retry<=? ORDER BY retries,rowid DESC LIMIT 100", (common.now(),))]
         sending_started = time.monotonic()
         for item in queue:
@@ -434,7 +440,7 @@ class ResultDelivery:
             if row["sha256"] is not None and digest != row["sha256"] or row["size"] is not None and size != row["size"]:
                 raise ValueError("Evidence differs from the declared size/SHA-256; no upload or rerun")
             with db:
-                db.execute("UPDATE node_evidence SET path=?,size=?,sha256=?,retention='retained',availability='available',dirty=1 WHERE job_id=? AND attempt=? AND experiment_id=? AND evidence_id=?", (str(destination), size, digest, *key))
+                db.execute("UPDATE node_evidence SET path=?,size=?,sha256=?,retention='retained',availability='available',error='',error_at=NULL,dirty=1 WHERE job_id=? AND attempt=? AND experiment_id=? AND evidence_id=?", (str(destination), size, digest, *key))
         except (OSError, ValueError) as exc:
             status = "missing" if isinstance(exc, FileNotFoundError) else "changed" if isinstance(exc, ValueError) else "pending"
             with db:
@@ -613,7 +619,7 @@ class ResultDelivery:
             if response.get("complete") and response["offset"] != row["size"]:
                 raise ValueError("Incomplete evidence must not be marked complete")
             with db:
-                db.execute("UPDATE node_evidence SET transfer_status=?,confirmed_bytes=?,dirty=1 WHERE job_id=? AND attempt=? AND experiment_id=? AND evidence_id=?",
+                db.execute("UPDATE node_evidence SET transfer_status=?,confirmed_bytes=?,dirty=1,error='',error_at=NULL,next_retry=0 WHERE job_id=? AND attempt=? AND experiment_id=? AND evidence_id=?",
                            ("delivered" if response.get("complete") else "uploading", response["offset"], *key))
             self._meta(db, "last_byte_progress_at", common.now())
             if response.get("complete"):
