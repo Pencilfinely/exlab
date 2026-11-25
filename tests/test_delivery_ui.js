@@ -16,6 +16,13 @@ async function main(){
   const summary=delivery.nodeSummary({pending_results:2,pending_result_bytes:123,pending_evidence:1,pending_evidence_bytes:456,
     current_evidence:{confirmed_bytes:null,total_bytes:900},result_worker_at:100},101).join(' ');
   assert.match(summary,/待回传结果 2/);assert.match(summary,/按需证据 1/);assert.match(summary,/未知 \/ 900 B/);assert.doesNotMatch(summary,/剩余时间|卡死/);
+  const stale={pending_results:0,pending_evidence:0,legacy_pending_files:0,last_error:'timed out',last_error_at:1,retry_count:5260};
+  assert.deepEqual(delivery.nodeSummary(stale,100),['回传队列为空']);
+  assert.doesNotMatch(delivery.nodeSummary({...stale,pending_results:1,next_retry_at:80},100).join(' '),/timed out|5260/);
+  assert.match(delivery.nodeSummary({...stale,pending_results:1,next_retry_at:102},100).join(' '),/timed out.*下次重试/);
+  const active=delivery.nodeSummary({...stale,error_active:true,blocked_results:1},100).join(' ');
+  assert.match(active,/需要处理的结果 1.*timed out/);
+  assert.doesNotMatch(active,/5260|下次重试|错误时间/);
   const ctx=context(),job={id:'job',spec:{algorithm:'research',result_delivery:{mode:'lightweight'}},
     experiment_progress:[{attempt:1,experiment_id:'first',phase:'succeeded',complete:1}],
     experiment_results:[{attempt:1,experiment_id:'first',independent:'quarantined',sha256:'sha',name:'result.json',

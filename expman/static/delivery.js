@@ -9,16 +9,25 @@
   function label(value){return states[value]||value||'未知';}
   function nodeSummary(delivery,now=Date.now()/1000){
     if(!delivery)return ['回传详情未知；旧节点需要升级后提供结果与证据状态。'];
-    const lines=[`待回传结果 ${delivery.pending_results??'未知'} 个 · ${bytes(delivery.pending_result_bytes)}`,
-      `按需证据 ${delivery.pending_evidence??'未知'} 个 · ${bytes(delivery.pending_evidence_bytes)}`];
+    const lines=[];
+    if(delivery.pending_results>0)lines.push(`待回传结果 ${delivery.pending_results} 个 · ${bytes(delivery.pending_result_bytes)}`);
+    if(delivery.pending_evidence>0)lines.push(`按需证据 ${delivery.pending_evidence} 个 · ${bytes(delivery.pending_evidence_bytes)}`);
     if(delivery.legacy_pending_files)lines.push(`旧队列 ${delivery.legacy_pending_files} 个文件 · ${bytes(delivery.legacy_pending_bytes)}`);
     if(delivery.blocked_results)lines.push(`需要处理的结果 ${delivery.blocked_results} 个`);
     for(const [name,key] of [['结果','current_result'],['证据','current_evidence'],['旧队列','current_legacy']]){
       const current=delivery[key];if(current)lines.push(`${name}传输：${bytes(current.confirmed_bytes)} / ${bytes(current.total_bytes)}`);
     }
-    lines.push('结果上传器：'+(Number.isFinite(delivery.result_worker_at)?(now-delivery.result_worker_at<10?'正常':'心跳过期'):'未知'));
-    lines.push('证据上传器：'+(Number.isFinite(delivery.evidence_worker_at)?(now-delivery.evidence_worker_at<10?'正常':'心跳过期'):'未知'));
-    if(delivery.last_error)lines.push(`最近回传错误：${delivery.last_error} · 重试 ${delivery.retry_count??'未知'} 次`);
+    if(delivery.pending_results>0 && Number.isFinite(delivery.result_worker_at) && now-delivery.result_worker_at>=10)lines.push('结果上传器心跳过期');
+    if(delivery.pending_evidence>0 && Number.isFinite(delivery.evidence_worker_at) && now-delivery.evidence_worker_at>=10)lines.push('证据上传器心跳过期');
+    const counts=[delivery.pending_results,delivery.pending_evidence,delivery.legacy_pending_files];
+    const scheduled=Number.isFinite(delivery.next_retry_at) && delivery.next_retry_at>now;
+    // Older workers also report errors from files that have since been delivered.
+    const active=delivery.error_active??(scheduled && counts.some(count=>count>0));
+    if(delivery.last_error && active){
+      const retry=scheduled?' · 下次重试 '+new Date(delivery.next_retry_at*1000).toLocaleTimeString():'';
+      lines.push('回传异常：'+delivery.last_error+retry);
+    }
+    if(!lines.length)lines.push(counts.every(count=>count===0)?'回传队列为空':'回传队列状态未知');
     return lines;
   }
   async function render(job,context){
@@ -48,7 +57,7 @@
     for(const item of evidence){
       const line=node('div',undefined,'delivery-row');line.append(node('strong',`${item.experiment_id} / ${item.name}`),
         node('p',`${bytes(item.size)} · ${label(item.availability)} · ${label(item.transfer_status)}`));
-      if(item.error)line.append(node('p',item.error,'muted'));
+      if(item.error && item.transfer_status!=='delivered')line.append(node('p',item.error,'muted'));
       if(item.transfer_status==='delivered'){
         const button=node('button','下载证据','subtle');button.onclick=()=>download('/api/artifact?job_id='+encodeURIComponent(job.id)+'&sha256='+encodeURIComponent(item.sha256),item.name.split('/').pop());line.append(button);
       }else{

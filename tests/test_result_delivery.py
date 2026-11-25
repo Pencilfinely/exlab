@@ -572,6 +572,12 @@ class ResultDeliveryTests(unittest.TestCase):
             self.agent._uploads()
         self.assertEqual(self.agent.db.execute("SELECT complete FROM uploads").fetchone()[0], 0)
         self.assertIn("Incomplete", self.agent.snapshot()["delivery"]["last_error"])
+        with patch("expman.agent.common.now", return_value=time.time() + 60):
+            self.agent._uploads()
+        recovered = self.agent.snapshot()["delivery"]
+        self.assertEqual(recovered["legacy_pending_files"], 0)
+        self.assertFalse(recovered["error_active"])
+        self.assertEqual(recovered["retry_count"], 0)
 
     def test_spliced_checkpoint_selection_is_not_accepted_as_a_scientific_result(self):
         record, run = self.job(state="succeeded")
@@ -596,3 +602,13 @@ class ResultDeliveryTests(unittest.TestCase):
         self.assertEqual(snapshot["retry_count"], 1)
         self.assertGreater(snapshot["next_retry_at"], time.time())
         self.assertEqual(self.agent.records(), before)
+        with self.agent.db:
+            self.agent.db.execute("UPDATE node_results SET next_retry=0")
+        self.delivery.results_once()
+        with self.agent.db:  # Delivered rows from earlier releases retain the old error.
+            self.agent.db.execute("UPDATE node_results SET error='old timeout',retries=5260 WHERE status='delivered'")
+        recovered = self.agent.snapshot()["delivery"]
+        self.assertEqual(recovered["pending_results"], 0)
+        self.assertFalse(recovered["error_active"])
+        self.assertIsNone(recovered["last_error"])
+        self.assertIsNone(recovered["next_retry_at"])

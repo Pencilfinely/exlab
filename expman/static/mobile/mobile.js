@@ -5,6 +5,7 @@
   const storage=(kind,operation,key,value)=>{try{return window[kind][operation](key,value);}catch{return null;}};
   const key='expman_mobile_token';
   let token=storage('sessionStorage','getItem',key)||storage('localStorage','getItem',key)||'';
+  let noticeTimer;
   if(location.hash.startsWith('#pair=')){
     try{token=M.pairing(location.href,location.origin);}catch(error){notice(error.message);}
     // Remove the pairing credential from browser history immediately.
@@ -12,7 +13,12 @@
   }
   let data={jobs:[],nodes:[]}, session=null, connected=false, sampledAt=0, serverTime=0;
   let generation=0, busy=false, polling=false, timer=null, selected=null, detail=null, view='overview', confirmation=null, connectionError=false;
-  function notice(message){$('notice').textContent=message;$('notice').hidden=!message;}
+  function notice(message,transient=false){
+    clearTimeout(noticeTimer);
+    $('notice').textContent=message;$('notice').hidden=!message;
+    if(message && transient)noticeTimer=setTimeout(()=>notice(''),6000);
+  }
+  const notify=message=>notice(message,true);
   function usable(){return M.canControl(session,connected,sampledAt,busy)&&!document.hidden;}
   async function agentAPI(path,body){if(body!==undefined&&!usable())throw new Error('请连接主控，并使用具有控制权限的移动凭证。');return request(path.replace('/api/',''),body);}
   const autonomousUI=rootAutonomy();
@@ -78,7 +84,7 @@
     $('nodes').replaceChildren(...data.nodes.map(worker=>{
       const box=el('article',undefined,'card'),heading=el('div',undefined,'heading');heading.append(el('h3',worker.id),el('span',worker.online?'在线':'离线','badge '+(worker.online?'online':'offline')));box.append(heading);
       box.append(el('p',`${globalThis.ExLabCompute?ExLabCompute.nodeState(worker).label:worker.mode==='drain'?'已暂停接单':'允许接单'} · ${data.jobs.filter(j=>j.node_id===worker.id&&!M.terminal.has(j.state)).length} 个活跃任务`,'muted small'));
-      if(globalThis.ExLabCompute&&session?.permission==='control')ExLabCompute.renderNode(box,worker,{node:el,api:agentAPI,refresh,notify:notice});
+      if(globalThis.ExLabCompute&&session?.permission==='control')ExLabCompute.renderNode(box,worker,{node:el,api:agentAPI,refresh,notify});
       else if(worker.snapshot.availability)box.append(el('p',worker.snapshot.availability.reason||'','muted small'));
       const available=[['内存',worker.snapshot.free_ram_mb],['磁盘',worker.snapshot.disk_free_mb]].filter(([,n])=>Number.isFinite(n)).map(([label,n])=>`${label}剩余 ${(n/1024).toFixed(1)} GiB`);if(available.length)box.append(el('p',available.join(' · '),'muted small'));
       for(const gpu of worker.snapshot.gpus){const card=el('div',undefined,'gpu');card.append(el('h3',gpu.name||gpu.uuid));const known=Number.isFinite(gpu.free_mb)&&Number.isFinite(gpu.total_mb)&&gpu.total_mb>0;if(known){card.append(el('p',`显存剩余 ${(gpu.free_mb/1024).toFixed(1)} / ${(gpu.total_mb/1024).toFixed(1)} GiB`,'muted small'));const bar=el('progress');bar.max=gpu.total_mb;bar.value=Math.max(0,gpu.total_mb-gpu.free_mb);bar.setAttribute('aria-label','已用显存');card.append(bar);}else card.append(el('p','暂无显存数据','muted small'));box.append(card);}
@@ -97,7 +103,7 @@
     const worker=data.nodes.find(n=>n.id===detail.node_id);
     $('detail-node').textContent=`${detail.node_id||'等待分配'}${worker?' · '+(worker.online?'算力端在线':'算力端离线'):''} · 第 ${detail.attempt||0} 次运行`;
     $('detail-message').textContent=typeof detail.detail==='string'?detail.detail:JSON.stringify(detail.detail);
-    if(globalThis.ExLabCompute){ExLabCompute.renderExecution(detail,{node:el,$,api:agentAPI,notify:notice,workers:data.nodes,refresh:()=>openJob(detail.id)});if(!usable())$('execution-control-panel').querySelectorAll('input,select,button').forEach(input=>input.disabled=true);}
+    if(globalThis.ExLabCompute){ExLabCompute.renderExecution(detail,{node:el,$,api:agentAPI,notify,workers:data.nodes,refresh:()=>openJob(detail.id)});if(!usable())$('execution-control-panel').querySelectorAll('input,select,button').forEach(input=>input.disabled=true);}
     if($('lightweight-results'))$('lightweight-results').textContent=JSON.stringify(detail.experiment_results||[],null,2);
     $('detail-pending').hidden=!(detail.command_id>detail.command_ack);$('detail-pending').textContent='请求已记录，等待算力端确认；这不表示操作已经完成。';
     $('detail-actions').replaceChildren();if(session?.permission==='control')for(const action of M.actions(detail)){const b=el('button',action.label,action.value==='cancel'?'danger':'quiet');b.dataset.control='true';b.disabled=!usable();b.onclick=()=>confirmAction(action.label,`实验「${detail.spec.name}」：${action.label}。`,'action',{job_id:detail.id,action:action.value,expected_command_id:detail.command_id});$('detail-actions').append(b);}
@@ -116,7 +122,7 @@
   async function submitAction(){
     if(!confirmation||!usable()){closeConfirm();notice('连接状态已变化，请刷新后再操作。');return;}
     const action=confirmation,epoch=generation;closeConfirm();busy=true;status();
-    try{await request(action.path,action.payload);if(epoch!==generation)return;notice('请求已记录，请等待节点执行并回传结果。');await refresh();}
+    try{await request(action.path,action.payload);if(epoch!==generation)return;notify('请求已记录，请等待节点执行并回传结果。');await refresh();}
     catch(error){if(epoch!==generation)return;if(error.status)failure(error);else{connected=false;notice('未能确认提交结果，请恢复连接后查看状态。请勿立即重复提交。');}}
     finally{if(epoch===generation){busy=false;status();}}
   }

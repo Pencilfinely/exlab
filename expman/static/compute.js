@@ -96,7 +96,7 @@
         pending={signature,payload:supported?{node_id:worker.id,expected_node_mode:worker.mode||'run',policy:{...original,mode:selected,until,reason:resuming?'':modeLabels[selected]}}:{node_id:worker.id,mode:resuming?'run':'drain',expected_mode:worker.mode||'run'}};
       }
       save.disabled=true;
-      try{await api(supported?'/api/compute-policy':'/api/node-mode',pending.payload);dialog.close();notify(resuming?'恢复接单请求已发送；其他限制会继续显示在节点状态中。':'暂停请求已发送，执行进度请看节点状态。');await refresh();}
+      try{await api(supported?'/api/compute-policy':'/api/node-mode',pending.payload);dialog.close();notify(resuming?'恢复接单请求已发送。':'暂停请求已发送。');await refresh();}
       catch(error){feedback.textContent='未确认成功：'+error.message+'。可原样重试。';}
       finally{save.disabled=false;}
     };
@@ -152,7 +152,10 @@
     for(const note of restrictions(worker))box.append(node('p',note,'compute-constraint'));
     const button=node('button','节点长期设置','subtle compute-settings');button.disabled=!supported;button.onclick=()=>policyEditor(worker,ctx,false);box.append(button);
     const delivery=snap.execution_delivery;
-    if(delivery){box.append(node('p',`续训检查点待传 ${delivery.pending_checkpoints||0} · 最近备份 ${delivery.last_checkpoint_received_at?new Date(delivery.last_checkpoint_received_at*1000).toLocaleString():'暂无'}`,'muted'));if(delivery.last_error)box.append(node('p','执行资料回传：'+delivery.last_error,'muted'));}
+    if(delivery && worker.online!==false){
+      if(delivery.pending_checkpoints>0)box.append(node('p',`续训检查点待传 ${delivery.pending_checkpoints}`,'muted'));
+      if(delivery.last_error)box.append(node('p','执行资料回传：'+delivery.last_error,'muted'));
+    }
   }
   function renderExecution(job,ctx){
     const {node,$,api,notify,refresh,workers}=ctx;let panel=$('execution-control-panel');

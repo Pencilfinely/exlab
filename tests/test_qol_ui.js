@@ -24,3 +24,16 @@ assert.equal(counts.overview, 1);assert.equal(counts.jobs, 0);assert.equal(count
 env.currentView = 'experiments';env.render();assert.equal(counts.jobs, 1);
 env.currentView = 'projects';env.render();assert.equal(counts.projects, 1);
 console.log('PASS visibility pause, immediate foreground refresh and visible-view-only rendering');
+const notice={}, timers=new Map();
+let timerId=0;
+const feedback=vm.createContext({$:()=>notice,setTimeout(fn,delay){timers.set(++timerId,{fn,delay});return timerId;},clearTimeout(id){timers.delete(id);}});
+vm.runInContext(source.slice(source.indexOf('let noticeTimer;'),source.indexOf('async function writeClipboardText')),feedback);
+feedback.notify('已暂停');
+const first=timerId;
+feedback.notify('恢复接单请求已发送');
+assert.equal(notice.hidden,false);
+assert.equal(timers.has(first),false);
+assert.equal(timers.get(timerId).delay,6000);
+timers.get(timerId).fn();
+assert.equal(notice.hidden,true);
+assert.equal(notice.textContent,'');
