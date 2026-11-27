@@ -116,6 +116,17 @@ namespace ExperimentManagerDesktop {
                 time=DateTime.UtcNow.ToString("o"),role=Role,version=Version,stage=stage,status=status,detail=detail }); }
             catch(IOException) { } catch(UnauthorizedAccessException) { }
         }
+        internal static void VerifyUpdateInstaller(UpdateRelease release,string installer) {
+            UpdateService.ValidateDownloaded(release,installer);
+            string report=Path.Combine(SettingsRoot,"updates","verify-"+Guid.NewGuid().ToString("N")+".json");
+            try {
+                Run(installer,"--self-test","--report",report);
+                var result=Read(report);
+                if(Text(result,"status")!="passed"||Text(result,"role")!=Role||Text(result,"version")!=release.Version||
+                    !result.ContainsKey("payload_files")||Convert.ToInt32(result["payload_files"])<=0)
+                    throw new IOException("安装包版本或角色不匹配，请重新下载。");
+            } finally {if(File.Exists(report))File.Delete(report);}
+        }
         internal static void ClientTrace(string stage,string detail="") {
             try {
                 string path=Path.Combine(SettingsRoot,"client-lifecycle.jsonl");
@@ -307,7 +318,9 @@ namespace ExperimentManagerDesktop {
                         string dataRoot=Arg(args,"--data-root")??DesktopSettings.Root(ReadSettings());
                         bool startup=Has(args,"--startup");
                         startup=startup||DesktopRuntime.AutoStart;
-                        string installed=InstallerForm.Install(dataRoot,Arg(args,"--pairing"),Has(args,"--desktop"),startup);
+                        bool bootUpdate=Worker&&Has(args,"--boot-update")&&WorkerBoot.Managed;
+                        bool desktop=bootUpdate?Flag(ReadSettings(),"desktop_shortcut"):Has(args,"--desktop");
+                        string installed=InstallerForm.Install(dataRoot,Arg(args,"--pairing"),desktop,startup,bootUpdate);
                         Write(Arg(args,"--report")??Path.Combine(SettingsRoot,"install-report.json"),new {status="installed",role=Role,path=installed});
                         ScheduleInstallerCleanup(installed);
                     } else using(var form=new InstallerForm(args)) Application.Run(form);
@@ -377,7 +390,7 @@ namespace ExperimentManagerDesktop {
             if(App.Has(args,"--apply-update"))Shown+=(s,e)=>install.PerformClick();
             ResumeLayout(true);
         }
-        internal static string Install(string dataPath,string credential,bool makeDesktop,bool autoStart) {
+        internal static string Install(string dataPath,string credential,bool makeDesktop,bool autoStart,bool bootUpdate=false) {
             Mutex active;
             if(Mutex.TryOpenExisting(App.InstanceKey,out active)) {active.Dispose();throw new Exception("此客户端已经运行。请通过客户端更新入口交接管理服务，或只退出旧管理代理和同角色客户端后安装；Docker 实验和待回传数据保留。");}
             using(var payload=Assembly.GetExecutingAssembly().GetManifestResourceStream("AppPayload")) using(var zip=new ZipArchive(payload,ZipArchiveMode.Read)) {
@@ -429,7 +442,7 @@ namespace ExperimentManagerDesktop {
                 if(App.Worker&&!string.IsNullOrWhiteSpace(credential)) settings["pairing_file"]=Path.GetFullPath(credential);
                 settings["installed_version"]=version;settings["desktop_shortcut"]=makeDesktop; App.SaveSettings(settings);
                 if(App.Worker&&WorkerBoot.Managed)WorkerBoot.RefreshLauncher();
-                if(App.Worker&&WorkerBoot.Managed&&File.Exists(WorkerBoot.SuspendPath))File.Delete(WorkerBoot.SuspendPath);
+                if(App.Worker&&WorkerBoot.Managed&&!bootUpdate&&File.Exists(WorkerBoot.SuspendPath))File.Delete(WorkerBoot.SuspendPath);
                 string target=Path.Combine(destination,App.Executable);
                 App.InstallShortcuts(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                     Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),"Programs"),
@@ -746,6 +759,10 @@ namespace ExperimentManagerDesktop {
         }
         async Task PumpUpdates() {
             if(App.Worker&&(WorkerMigration.Pending||WorkerMigration.Running))return;
+            if(WorkerBoot.Managed) {
+                string installed=App.Text(App.ReadSettings(),"installed_version");
+                if(!String.IsNullOrEmpty(installed)&&UpdateService.CompareVersions(installed,App.Version)>0)return;
+            }
             if(App.Worker&&(WorkerBoot.Managed?!WorkerBoot.CanAutoUpdate(App.Read(WorkerBoot.StatusPath)):deactivated)&&(!UpdateQueue.Active||UpdateQueue.State.Automatic))return;
             if(pumpingUpdates||exiting)return;pumpingUpdates=true;
             try {
@@ -768,19 +785,19 @@ namespace ExperimentManagerDesktop {
         internal async Task InstallUpdate(UpdateRelease release,string installer) {
             if(busy||hostLoop.Applying)throw new Exception("当前操作尚未完成，请稍后安装。");
             busy=true;timer.Stop();
-            bool wasRunning=false,stopRequested=false;
+            bool wasRunning=false,stopRequested=false,bootSuspended=false;
+            FileStream bootUpdate=null;
             Exception failure=null;
             try {
-                await Task.Run(()=>UpdateService.ValidateDownloaded(release,installer));
-                if(WorkerBoot.Managed)await WorkerBoot.SuspendForUpdate();
-                string report=Path.Combine(App.SettingsRoot,"updates","verify-"+Guid.NewGuid().ToString("N")+".json");
-                try {
-                    await Task.Run(()=>App.Run(installer,"--self-test","--report",report));
-                    var result=App.Read(report);
-                    if(App.Text(result,"status")!="passed"||App.Text(result,"role")!=App.Role||App.Text(result,"version")!=release.Version||
-                        !result.ContainsKey("payload_files")||Convert.ToInt32(result["payload_files"])<=0)
-                        throw new Exception("安装包版本或角色不匹配，请重新下载。");
-                } finally {if(File.Exists(report))File.Delete(report);}
+                await Task.Run(()=>App.VerifyUpdateInstaller(release,installer));
+                if(WorkerBoot.Managed) {
+                    bootUpdate=WorkerBoot.AcquireUpdateLock();
+                    string installed=App.Text(App.ReadSettings(),"installed_version");
+                    if(!String.IsNullOrEmpty(installed)&&UpdateService.CompareVersions(installed,release.Version)>=0)
+                        throw new InvalidOperationException("后台已安装新版，请重新打开客户端。");
+                    bootSuspended=true;
+                    await WorkerBoot.SuspendForUpdate();
+                }
                 var ready=App.Worker?await WorkerCommand("update-status"):await Controller("controller-update-status");
                 if(!App.Flag(ready,"ready_for_update"))throw new Exception(App.Text(ready,"detail","管理服务尚未完成当前操作，请稍后交接。"));
                 wasRunning=App.Flag(ready,"running");
@@ -802,8 +819,9 @@ namespace ExperimentManagerDesktop {
                     next.Dispose();
                 }
             } catch(Exception ex) {failure=ex;}
+            finally {if(bootUpdate!=null)bootUpdate.Dispose();}
             if(failure!=null) {
-                if(WorkerBoot.Managed)WorkerBoot.ResumeAfterUpdate();
+                if(bootSuspended)WorkerBoot.ResumeAfterUpdate();
                 App.UpdateReport("preparing_install","failed",failure.Message);
                 string recovery="";
                 if(stopRequested&&wasRunning&&!WorkerBoot.Managed) {

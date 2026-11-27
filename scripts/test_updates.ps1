@@ -442,6 +442,25 @@ static class InstallProbeTests {
             if(!child.WaitForExit(20000)){child.Kill();throw new Exception("Boot launcher timed out.");}
             Assert(child.ExitCode==37,"UTF8 settings failed to launch the installed backend ("+child.ExitCode+"): "+child.StandardError.ReadToEnd());
         }
+        string next=Path.Combine(root,"Programs","ExperimentManager","Worker","1.2.4","ExLabWorker.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(next));File.Copy(executable,next);
+        info.EnvironmentVariables["EXLAB_TEST_BOOT_HANDOFF"]="1";
+        using(var child=Process.Start(info)) {
+            if(!child.WaitForExit(20000)){child.Kill();throw new Exception("Boot update handoff timed out.");}
+            Assert(child.ExitCode==38,"Boot task failed to follow the installed version ("+child.ExitCode+"): "+child.StandardError.ReadToEnd());
+        }
+    }
+    static void BootUpdateHandoff() {
+        var trace=new List<string>();
+        WorkerBootUpdater.Handoff(action=>{
+            trace.Add(action);
+            var state=Stopped();state["ready_for_update"]=true;return state;
+        },()=>trace.Add("install"));
+        Assert(String.Join(",",trace)=="stop-for-update,status,install-status,install","Boot installed without confirming management handoff.");
+        bool installed=false;
+        try {WorkerBootUpdater.Handoff(action=>new Dictionary<string,object>(),()=>installed=true);throw new Exception("Boot accepted unsafe handoff.");}
+        catch(IOException){}
+        Assert(!installed,"Boot launched the installer after the worker refused to stop management.");
     }
     static void ComputeActivation(string folder) {
         var migrationFailure=WorkerMigration.FailureReply("Fetched packages\n{\"ready\": false, \"detail\": \"missing Docker proxy\", \"step\": \"configure\"}\n");
@@ -972,9 +991,14 @@ static class InstallProbeTests {
         gated.SetResult(desired);await first;
     }
     static int Main(string[] args) {
-        if(args.Length==1&&args[0]=="--boot-run")return 37;
+        if(args.Length==1&&args[0]=="--boot-run") {
+            if(Environment.GetEnvironmentVariable("EXLAB_TEST_BOOT_HANDOFF")!="1")return 37;
+            if(Path.GetFileName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location))=="1.2.4")return 38;
+            File.WriteAllText(Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"),"settings.json"),"{\"installed_version\":\"1.2.4\"}");
+            return WorkerBoot.StartInstalledVersion;
+        }
         try {
-            BootLauncher(args[0]);assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
+            BootLauncher(args[0]);BootUpdateHandoff();assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");

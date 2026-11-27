@@ -20,10 +20,18 @@ namespace ExperimentManagerDesktop {
         public bool DedicatedDistribution {get;set;}
     }
     internal static class WorkerBoot {
+        internal const int StartInstalledVersion=42;
         internal static string FilePath {get{return Path.Combine(App.SettingsRoot,"boot-config.json");}}
         internal static string StatusPath {get{return Path.Combine(App.SettingsRoot,"boot-status.json");}}
         internal static string TaskName {get{return "ExLab-Worker-Boot-"+WindowsIdentity.GetCurrent().User.Value;}}
         internal static string SuspendPath {get{return Path.Combine(App.SettingsRoot,"boot-suspend");}}
+        internal static FileStream AcquireUpdateLock() {
+            return new FileStream(Path.Combine(App.SettingsRoot,"boot-update.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
+        }
+        static string PowerShell {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe");}}
+        static string LauncherArguments(string launcher) {
+            return App.Arguments("-NoProfile","-NonInteractive","-WindowStyle","Hidden","-ExecutionPolicy","Bypass","-File",launcher);
+        }
         internal static WorkerBootConfig Load() {
             return App.Json.ConvertToType<WorkerBootConfig>(App.Read(FilePath));
         }
@@ -76,13 +84,18 @@ namespace ExperimentManagerDesktop {
             var doc=new XmlDocument();doc.LoadXml("<Task version='1.2' xmlns='http://schemas.microsoft.com/windows/2004/02/mit/task'><RegistrationInfo><Description>ExLab unattended Worker</Description></RegistrationInfo><Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT30S</Delay></BootTrigger></Triggers><Principals><Principal id='Owner'><UserId/><LogonType>Password</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure></Settings><Actions Context='Owner'><Exec><Command/><Arguments/></Exec></Actions></Task>");
             var ns=new XmlNamespaceManager(doc.NameTable);ns.AddNamespace("t",doc.DocumentElement.NamespaceURI);
             doc.SelectSingleNode("//t:UserId",ns).InnerText=account;
-            doc.SelectSingleNode("//t:Command",ns).InnerText=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe");
-            doc.SelectSingleNode("//t:Arguments",ns).InnerText=App.Arguments("-NoProfile","-NonInteractive","-WindowStyle","Hidden","-ExecutionPolicy","Bypass","-File",launcher);
+            doc.SelectSingleNode("//t:Command",ns).InnerText=PowerShell;
+            doc.SelectSingleNode("//t:Arguments",ns).InnerText=LauncherArguments(launcher);
             return doc.OuterXml;
         }
         internal static string LauncherScript() {
             // Settings are UTF-8 without a BOM; Windows PowerShell defaults to ANSI.
-            return "$ErrorActionPreference='Stop'\n$root=Split-Path -Parent $PSCommandPath\n$s=Get-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8 -Raw | ConvertFrom-Json\n$v=[string]$s.installed_version\nif($v -notmatch '^\\d+\\.\\d+\\.\\d+([-.][A-Za-z0-9.]+)?$'){throw 'Invalid installed version'}\n$exe=Join-Path $env:LOCALAPPDATA ('Programs\\ExperimentManager\\Worker\\'+$v+'\\ExLabWorker.exe')\n$p=Start-Process -FilePath $exe -ArgumentList '--boot-run' -WindowStyle Hidden -PassThru -Wait\nexit $p.ExitCode\n";
+            return "$ErrorActionPreference='Stop'\n$root=Split-Path -Parent $PSCommandPath\n$previous=''\nwhile($true){\n"+
+                "$s=Get-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8 -Raw | ConvertFrom-Json\n"+
+                "$v=[string]$s.installed_version\nif($v -notmatch '^\\d+\\.\\d+\\.\\d+([-.][A-Za-z0-9.]+)?$' -or $v -eq $previous){throw 'Invalid installed version for boot handoff'}\n"+
+                "$exe=Join-Path $env:LOCALAPPDATA ('Programs\\ExperimentManager\\Worker\\'+$v+'\\ExLabWorker.exe')\n"+
+                "$p=Start-Process -FilePath $exe -ArgumentList '--boot-run' -WindowStyle Hidden -PassThru -Wait\n"+
+                "if($p.ExitCode -ne "+StartInstalledVersion+"){exit $p.ExitCode}\n$previous=$v\n}\n";
         }
         internal static string RefreshLauncher() {
             string launcher=Path.Combine(App.SettingsRoot,"boot-launcher.ps1");
@@ -128,10 +141,10 @@ namespace ExperimentManagerDesktop {
             if(!Managed||File.Exists(SuspendPath)||WorkerMigration.Pending)return;
             try {using(new FileStream(Path.Combine(App.SettingsRoot,"boot-owner.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None)){} }
             catch(IOException){return;}
-            string version=App.Text(App.ReadSettings(),"installed_version");
-            if(!System.Text.RegularExpressions.Regex.IsMatch(version,"\\A[0-9]+\\.[0-9]+\\.[0-9]+([-.][A-Za-z0-9.]+)?\\z"))throw new IOException("已安装版本记录无效，请重新安装 Worker。");
-            string executable=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","ExperimentManager","Worker",version,App.Executable);
-            Process.Start(new ProcessStartInfo(executable,"--boot-run"){UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden});
+            string launcher=Path.Combine(App.SettingsRoot,"boot-launcher.ps1");
+            if(!File.Exists(launcher))launcher=RefreshLauncher();
+            using(var process=Process.Start(new ProcessStartInfo(PowerShell,LauncherArguments(launcher)){
+                UseShellExecute=false,CreateNoWindow=true,WindowStyle=ProcessWindowStyle.Hidden})){}
         }
         internal static async Task SuspendForUpdate() {
             App.Write(SuspendPath,new{time=DateTime.UtcNow.ToString("o")});
@@ -164,10 +177,13 @@ namespace ExperimentManagerDesktop {
                 var c=Load();Validate(c);if(!c.Enabled)return 0;
                 var host=new DesktopHostControl(Path.Combine(App.SettingsRoot,"host-control.json"));
                 var retry=new DesktopRetrySchedule();Process hold=null;
+                var updates=new WorkerBootUpdater(c);
                 Dictionary<string,object> desired=null;bool known=false;
                 try {while(Load().Enabled) {
                     try {
                         if(File.Exists(SuspendPath)||WorkerMigration.Pending){WriteStatus("suspended","等待更新或迁移交接。");return 0;}
+                        string installed=App.Text(App.ReadSettings(),"installed_version");
+                        if(!String.IsNullOrEmpty(installed)&&UpdateService.CompareVersions(installed,App.Version)>0)return StartInstalledVersion;
                         if(host.Linked) {
                             if(host.NodeId!=c.NodeId||host.Distribution!=c.Distribution)throw new IOException("Windows 控制连接与无人值守节点不一致，请重新检测并配置。");
                             try {desired=host.Sync();known=true;}catch(System.Net.WebException){ /* Retain last confirmed policy during an outage. */ }
@@ -206,7 +222,9 @@ namespace ExperimentManagerDesktop {
                             if(App.Flag(current,"running")&&(App.Text(current,"status")=="online"||App.Text(current,"status")=="offline")) {
                                 hold=EnsureHold(c,hold);
                                 if(desired!=null)host.Observe(App.Text(desired,"intent"),"retained","Docker / WSL 已启用，Worker 正在运行。");
-                                WriteStatus(App.Text(current,"status"),App.Text(current,"detail"));retry.Completed();Thread.Sleep(5000);continue;
+                                WriteStatus(App.Text(current,"status"),App.Text(current,"detail"));
+                                if(updates.Tick())return StartInstalledVersion;
+                                retry.Completed();Thread.Sleep(5000);continue;
                             }
                             WriteStatus("starting","正在检查独立 Docker 与 GPU…");
                             if(desired!=null)host.Observe(App.Text(desired,"intent"),"restarting","正在启用 Docker / WSL 并检查 GPU。");
@@ -224,5 +242,81 @@ namespace ExperimentManagerDesktop {
             return 0;
         }
         static void WriteStatus(string status,string detail) {App.Write(StatusPath,new{time=DateTime.UtcNow.ToString("o"),status=status,detail=detail,pid=Process.GetCurrentProcess().Id});}
+    }
+
+    internal sealed class WorkerBootUpdater {
+        readonly WorkerBootConfig config;
+        Task<Tuple<UpdateRelease,string>> checking;
+        Tuple<UpdateRelease,string> pending;
+        DateTime next;
+
+        internal WorkerBootUpdater(WorkerBootConfig config) {this.config=config;}
+
+        static bool Enabled() {
+            if(!App.Flag(App.ReadSettings(),"auto_update")||WorkerMigration.Pending||File.Exists(WorkerBoot.SuspendPath)||
+                App.Text(App.Read(Path.Combine(App.SettingsRoot,"boot-request.json")),"mode")=="release")return false;
+            // A desktop client in this session uses its existing update queue.
+            Mutex client;
+            if(!Mutex.TryOpenExisting(App.InstanceKey,out client))return true;
+            client.Dispose();return false;
+        }
+
+        internal bool Tick() {
+            try {
+                if(checking!=null) {
+                    if(!checking.IsCompleted)return false;
+                    var completed=checking;checking=null;
+                    pending=completed.GetAwaiter().GetResult();
+                    next=pending==null?DateTime.UtcNow.AddHours(1):DateTime.UtcNow;
+                }
+                if(!Enabled()||DateTime.UtcNow<next)return false;
+                if(pending==null) {
+                    checking=Task.Run(()=>{
+                        var release=UpdateService.Check(App.Version,true);
+                        if(release==null)return null;
+                        App.UpdateReport("boot_download","running","正在下载 Worker "+release.Version);
+                        return Tuple.Create(release,UpdateService.Download(release,Path.Combine(App.SettingsRoot,"updates"),null,CancellationToken.None));
+                    });
+                    return false;
+                }
+                using(WorkerBoot.AcquireUpdateLock()) {
+                    if(!Enabled())return false;
+                    if(Install(pending.Item1,pending.Item2))return true;
+                    next=DateTime.UtcNow.AddSeconds(30);
+                }
+            } catch(Exception ex) {
+                pending=null;next=DateTime.UtcNow.AddMinutes(5);
+                App.UpdateReport("boot_update","retry",ex.Message);
+            }
+            return false;
+        }
+
+        bool Install(UpdateRelease release,string installer) {
+            var ready=WorkerBoot.Command(config,"update-status");
+            if(!App.Flag(ready,"ready_for_update")||!App.Flag(ready,"running")) {
+                App.UpdateReport("boot_update","waiting",App.Text(ready,"detail"));
+                return false;
+            }
+            App.VerifyUpdateInstaller(release,installer);
+            if(!Enabled())return false;
+            App.UpdateReport("boot_update","running","正在交接无人值守 Worker "+release.Version);
+            Handoff(action=>WorkerBoot.Command(config,action),()=>{
+                UpdateService.ValidateDownloaded(release,installer);
+                string result=Path.Combine(App.SettingsRoot,"boot-install-result.json");
+                App.RunWithTimeout(240000,installer,"--install","--apply-update","--boot-update","--report",result);
+                if(App.Text(App.Read(result),"status")!="installed"||App.Text(App.ReadSettings(),"installed_version")!=release.Version)
+                    throw new IOException("无法确认无人值守 Worker 已安装新版。");
+                App.UpdateReport("boot_update","completed","已安装 Worker "+release.Version+"，正在恢复管理服务。");
+            });
+            return true;
+        }
+
+        internal static void Handoff(Func<string,Dictionary<string,object>> command,Action install) {
+            var stopped=command("stop-for-update");
+            if(!App.Flag(stopped,"ready_for_update"))throw new IOException(App.Text(stopped,"detail","暂时无法安全停止管理代理。"));
+            DesktopLifecycle.WaitForStopped(()=>Task.FromResult(command("status")),null,TimeSpan.FromSeconds(30)).GetAwaiter().GetResult();
+            DesktopLifecycle.RequireInstallReady(command("install-status"),true);
+            install();
+        }
     }
 }
