@@ -111,7 +111,7 @@ class IntegrationTests(unittest.TestCase):
         def request(url, token, payload=None, timeout=10):
             nonlocal dropped
             response = original(url, token, payload, timeout)
-            if url.endswith("/api/sync") and response["jobs"] and not dropped:
+            if url.endswith("/api/sync") and response.get("jobs") and not dropped:
                 dropped = True
                 raise TimeoutError("simulated lost response after committed assignment")
             return response

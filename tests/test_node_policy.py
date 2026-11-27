@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
-from expman import common, node_policy, scheduler
+from expman import common, node_catalog, node_policy, scheduler
 from expman.agent import Agent
 from expman.hub import APIError, Hub, make_server
 from tests.support import temporary_directory
@@ -55,6 +55,8 @@ class NodePolicyTests(unittest.TestCase):
 
     def sync(self, lose_response=False):
         def request(url, token, payload, **kwargs):
+            if url.endswith('/api/node-catalog'):
+                return node_catalog.receive(self.hub, 'worker', payload)
             result = self.hub.sync('worker', payload)
             if lose_response:
                 raise OSError('Response lost after hub commit')
