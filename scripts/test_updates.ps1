@@ -996,10 +996,27 @@ static class InstallProbeTests {
         gated.SetResult(desired);await first;
     }
     static int Main(string[] args) {
+        if(args.Length==1&&args[0]=="--boot-test-hold") {
+            string release=Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"),"release-hold");
+            var until=DateTime.UtcNow.AddSeconds(30);
+            while(!File.Exists(release)&&DateTime.UtcNow<until)Thread.Sleep(100);
+            return 0;
+        }
         if(args.Length==1&&args[0]=="--boot-run") {
             if(Environment.GetEnvironmentVariable("EXLAB_TEST_BOOT_HANDOFF")!="1")return 37;
-            if(Path.GetFileName(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location))=="1.2.4")return 38;
-            File.WriteAllText(Path.Combine(Environment.GetEnvironmentVariable("LOCALAPPDATA"),"settings.json"),"{\"installed_version\":\"1.2.4\"}");
+            string root=Environment.GetEnvironmentVariable("LOCALAPPDATA");
+            string self=Assembly.GetExecutingAssembly().Location;
+            string held=Path.Combine(root,"hold.pid");
+            if(Path.GetFileName(Path.GetDirectoryName(self))=="1.2.4") {
+                try {using(var hold=Process.GetProcessById(Int32.Parse(File.ReadAllText(held))))if(hold.HasExited)return 39;}
+                catch(ArgumentException){return 39;}
+                finally {File.WriteAllText(Path.Combine(root,"release-hold"),"");}
+                return 38;
+            }
+            using(var hold=Process.Start(new ProcessStartInfo(self,"--boot-test-hold"){
+                UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true}))
+                File.WriteAllText(held,hold.Id.ToString());
+            File.WriteAllText(Path.Combine(root,"settings.json"),"{\"installed_version\":\"1.2.4\"}");
             return WorkerBoot.StartInstalledVersion;
         }
         try {

@@ -106,7 +106,8 @@ namespace ExperimentManagerDesktop {
                 "$s=Get-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8 -Raw | ConvertFrom-Json\n"+
                 "$v=[string]$s.installed_version\nif($v -notmatch '^\\d+\\.\\d+\\.\\d+([-.][A-Za-z0-9.]+)?$' -or $v -eq $previous){throw 'Invalid installed version for boot handoff'}\n"+
                 "$exe=Join-Path $env:LOCALAPPDATA ('Programs\\ExperimentManager\\Worker\\'+$v+'\\ExLabWorker.exe')\n"+
-                "$p=Start-Process -FilePath $exe -ArgumentList '--boot-run' -WindowStyle Hidden -PassThru -Wait\n"+
+                // Waiting for the process tree would also wait for the WSL hold.
+                "$p=Start-Process -FilePath $exe -ArgumentList '--boot-run' -WindowStyle Hidden -PassThru\n$p.WaitForExit()\n"+
                 "if($p.ExitCode -ne "+StartInstalledVersion+"){exit $p.ExitCode}\n$previous=$v\n}\n";
         }
         internal static string RefreshLauncher() {
