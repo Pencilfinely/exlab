@@ -150,7 +150,7 @@ class IntegrationTests(unittest.TestCase):
         dropped_commands = []
         def request(url, token, payload=None, timeout=10):
             response = api_request(url, token, payload, timeout)
-            if url.endswith("/api/sync") and any(job["action"] == "resume" for job in response["jobs"]):
+            if url.endswith("/api/sync") and any(job["action"] == "resume" for job in response.get("jobs", [])):
                 dropped_commands.append(response["jobs"][0]["command_id"])
                 if len(dropped_commands) == 1:
                     raise TimeoutError("Lost response after Center committed resume")

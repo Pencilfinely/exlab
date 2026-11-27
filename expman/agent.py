@@ -22,9 +22,10 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 
-from . import common, scheduler, node_policy
+from . import common, scheduler, node_policy, node_catalog
 from . import compute_policy, execution_lease, worker_database
 
 TERMINAL = {"succeeded", "failed", "paused", "interrupted", "canceled"}
@@ -431,8 +432,39 @@ class Agent:
         for origin in candidates:
             try:
                 origin = validate_origin(origin)
-                response = common.api_request(origin + '/api/sync', self.config['token'], payload,
-                                              timeout=min(10, self.config.get('sync_timeout', 10)))
+                timeout = min(10, self.config.get('sync_timeout', 10))
+                token = self.config['token']
+                cached = getattr(self, '_catalog_support', {})
+                wire = payload
+                supported = cached.get(origin, False)
+                if not supported and node_catalog.needs_catalog(payload['snapshot']):
+                    info = common.api_request(origin + '/api/node-info', token, timeout=timeout)
+                    if 'node-catalog-v1' not in info.get('capabilities', []):
+                        raise ValueError('Upgrade the Center to sync this installed template catalog')
+                    supported = True
+                if supported:
+                    summary, data = node_catalog.split(payload['snapshot'])
+                    wire = dict(payload, snapshot=summary)
+                try:
+                    response = common.api_request(origin + '/api/sync', token, wire, timeout=timeout)
+                except urllib.error.HTTPError as error:
+                    if supported or error.code not in (400, 413):
+                        raise
+                    # Retry with a catalog reference if the Center rejected the inline shape.
+                    info = common.api_request(origin + '/api/node-info', token, timeout=timeout)
+                    if 'node-catalog-v1' not in info.get('capabilities', []):
+                        raise error
+                    supported = True
+                    summary, data = node_catalog.split(payload['snapshot'])
+                    wire = dict(payload, snapshot=summary)
+                    response = common.api_request(origin + '/api/sync', token, wire, timeout=timeout)
+                if supported and response.get('catalog_needed') == summary['catalog_digest']:
+                    node_catalog.upload(origin, token, summary['catalog_digest'], data, timeout)
+                    response = common.api_request(origin + '/api/sync', token, wire, timeout=timeout)
+                    if 'catalog_needed' in response:
+                        raise ValueError('Center has not received the complete project catalog')
+                cached[origin] = response.get('catalog_protocol') == 1
+                self._catalog_support = cached
                 endpoints = response.get('hub_urls', [])
                 if not isinstance(endpoints, list) or len(endpoints) > 8:
                     raise ValueError('Invalid Center address list')
@@ -661,7 +693,13 @@ class Agent:
         pending.sort(key=lambda record: (record.get("updated", 0), record["id"]))
         payload = {"node_id": self.config["node_id"], "snapshot": snapshot, "reports": [],
                    "project_reports": self.project_delivery.reports()}
-        body_bytes = len(json.dumps(payload, allow_nan=False).encode("utf-8"))
+        # Size reports against the catalog reference on upgraded Centers.
+        wire_snapshot = snapshot
+        cached = getattr(self, '_catalog_support', {}).get(self.config['hub_url'].rstrip('/'))
+        if cached:
+            wire_snapshot = {k: v for k, v in snapshot.items() if k not in node_catalog.FIELDS}
+            wire_snapshot['catalog_digest'] = '0' * 64
+        body_bytes = len(json.dumps(dict(payload, snapshot=wire_snapshot), allow_nan=False).encode("utf-8"))
         for record in pending:
             report = self._report(record)
             report_bytes = len(json.dumps(report, allow_nan=False).encode("utf-8")) + 2

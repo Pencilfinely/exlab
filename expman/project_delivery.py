@@ -126,7 +126,8 @@ class ProjectDelivery:
         # download after a stop/release request. The receipt waits for it to end.
         if getattr(self.agent, "last_availability", {}).get("stopping"):
             return
-        for digest, item in self.items.items():
+        # Free storage from completed deployments before picking up more data.
+        for digest, item in sorted(self.items.items(), key=lambda entry: entry[1]['status'] != 'deleting'):
             if item["status"] == "deleting":
                 try:
                     self._delete(digest, item)

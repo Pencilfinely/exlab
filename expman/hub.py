@@ -37,12 +37,14 @@ from .node_policy import (NodePolicyHubMixin, initialize as initialize_node_poli
                           validate_snapshot as validate_policy_snapshot, CAPABILITY as NODE_POLICY_CAPABILITY)
 from .result_hub import ResultHubMixin, initialize as initialize_results
 from . import result_protocol
-from . import host_control
+from . import host_control, node_catalog
 from .compute_policy import (ComputePolicyHubMixin, initialize as initialize_compute, apply as apply_compute,
                              validate_snapshot as validate_compute_snapshot)
 from .execution_control import ExecutionControlHubMixin, initialize as initialize_execution, validate_state
 from .hub_read_model import initialize as initialize_read_model, PENDING_SQL, TERMINAL_SQL
 from .hub_lock import HubLock
+from .center_storage import CenterMaintenance, archive_signature, eligible_bundles
+from .project_cleanup import owned_path
 
 
 TERMINAL = frozenset(("succeeded", "canceled", "failed", "paused", "interrupted"))
@@ -108,7 +110,10 @@ def _timing(value):
 def _snapshot(value):
     """Reject shapes which could crash scheduling; unknown descriptive keys pass."""
     value = _object(value, "snapshot")
-    if len(_json(value)) > 256 * 1024:
+    if 'catalog_digest' in value and (not node_catalog.valid_digest(value['catalog_digest'])
+                                      or any(key in value for key in node_catalog.FIELDS)):
+        raise APIError(400, "Invalid project catalog reference")
+    if len(_json(value)) > node_catalog.LEGACY_SNAPSHOT_BYTES:
         raise APIError(400, "snapshot is too large")
     policy = _object(value.get("policy", {}), "snapshot.policy")
     for key in ("run_enabled",):
@@ -136,7 +141,7 @@ def _snapshot(value):
     if any(not isinstance(x, str) for x in profiles.values()):
         raise APIError(400, "snapshot.profiles must map names to image strings")
     templates = value.get('task_templates', [])
-    if not isinstance(templates, list) or len(templates) > 100:
+    if not isinstance(templates, list) or len(templates) > node_catalog.LEGACY_TEMPLATE_COUNT:
         raise APIError(400, 'snapshot.task_templates must contain at most 100 tasks')
     for template in templates:
         if not isinstance(template, dict) or 'token' in template or 'admin_token' in template:
@@ -278,6 +283,10 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 self.db.execute("ALTER TABLE projects ADD COLUMN deleted_at REAL")
             if "cleanup_error" not in project_columns:
                 self.db.execute("ALTER TABLE projects ADD COLUMN cleanup_error TEXT NOT NULL DEFAULT ''")
+            if "auto_archived" not in project_columns:
+                self.db.execute("ALTER TABLE projects ADD COLUMN auto_archived INTEGER NOT NULL DEFAULT 0")
+            if "last_deployed" not in project_columns:
+                self.db.execute("ALTER TABLE projects ADD COLUMN last_deployed REAL NOT NULL DEFAULT 0")
         for node_id in self.config["nodes"]:
             self.db.execute("INSERT OR IGNORE INTO nodes(id) VALUES (?)", (node_id,))
         self._cleanup_project_archives()
@@ -290,6 +299,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         initialize_execution(self.db)
         initialize_read_model(self.db)
         host_control.initialize(self.db)
+        node_catalog.initialize(self.db)
         from .agent_tools import initialize as initialize_agent_tools
         from .autonomy import initialize as initialize_autonomy, AgentManager
         initialize_agent_tools(self.db)
@@ -300,6 +310,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         initialize_centers(self)
         self.autonomy = AgentManager(self)
         self.center_start_sync()
+        self.storage_maintenance = CenterMaintenance(self)
 
     @contextmanager
     def transaction(self):
@@ -361,6 +372,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             return result
 
     def close(self):
+        self.storage_maintenance.close()
         self.autonomy.close()
         self.center_stop.set()
         if self.center_thread is not None:
@@ -558,7 +570,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         nodes = []
         for row in self.db.execute("SELECT * FROM nodes ORDER BY id"):
             item = dict(row)
-            item["snapshot"] = json.loads(item["snapshot"])
+            item["snapshot"] = node_catalog.hydrate(self.db, item["id"], json.loads(item["snapshot"]))
             delivery = self.db.execute("SELECT value,updated FROM node_delivery_status WHERE node_id=?", (item["id"],)).fetchone()
             if delivery:
                 item["snapshot"]["delivery"] = {**json.loads(delivery["value"]), "observed_at": delivery["updated"]}
@@ -716,6 +728,10 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
         if not isinstance(project_reports, list) or len(project_reports) > 100:
             raise APIError(400, "project_reports must be an array with at most 100 entries")
         with self.transaction():
+            catalog = snapshot.get('catalog_digest')
+            if catalog and not self.db.execute('SELECT 1 FROM node_catalogs WHERE node_id=? AND digest=?',
+                                               (node_id, catalog)).fetchone():
+                return {'catalog_needed': catalog}
             self._expire_leases()
             lease_requests = _object(payload.get("lease_requests", {}), "lease requests")
             project_checked = []
@@ -732,7 +748,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 deleting = owned["deleted_at"] is not None
                 if (revision == owned["revision"] and deleting == (status in ("deleting", "deleted", "delete_failed"))
                         and (owned["status"] not in ("deleted", "delete_failed") or status == owned["status"])):
-                    project_checked.append((digest, revision, status, detail))
+                    project_checked.append((digest, revision, status, detail, owned['status']))
             # Validate the entire batch before accepting any report or heartbeat.
             checked = []
             for report in reports:
@@ -767,9 +783,25 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 if execution and execution["stopped_confirmed"] and state not in TERMINAL:
                     raise APIError(400, "A live execution cannot confirm it stopped")
                 checked.append((report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime, execution))
+            previous_catalog = self.db.execute("SELECT json_extract(snapshot,'$.catalog_digest') FROM nodes WHERE id=?",
+                                               (node_id,)).fetchone()[0]
             self.db.execute("UPDATE nodes SET last_seen=?,snapshot=? WHERE id=?", (now(), _json(snapshot), node_id))
-            for digest, revision, status, detail in project_checked:
-                self.db.execute("UPDATE project_deployments SET status=?,detail=?,updated=? WHERE digest=? AND node_id=? AND revision=?", (status, detail, now(), digest, node_id, revision))
+            if previous_catalog and previous_catalog != catalog:
+                self.db.execute("DELETE FROM node_catalogs WHERE node_id=? AND digest=?", (node_id, previous_catalog))
+            for digest, revision, status, detail, previous_status in project_checked:
+                timestamp = now()
+                if status == 'installed' and previous_status != 'installed':
+                    self.db.execute('UPDATE projects SET last_deployed=? WHERE digest=?', (timestamp, digest))
+                self.db.execute("UPDATE project_deployments SET status=?,detail=?,updated=? "
+                                "WHERE digest=? AND node_id=? AND revision=? AND (status!=? OR detail!=?)",
+                                (status, detail, timestamp, digest, node_id, revision, status, detail))
+            if catalog and not previous_catalog:
+                # Old workers leave these deliveries terminal. A worker using the
+                # new protocol can complete them from the verified local archive.
+                self.db.execute("UPDATE project_deployments SET revision=revision+1,status='queued',detail='',updated=? "
+                                "WHERE node_id=? AND status='failed' AND detail=? AND digest IN "
+                                "(SELECT digest FROM projects WHERE deleted_at IS NULL)",
+                                (now(), node_id, 'Too many saved templates; remove unused presets before installing'))
             ack = {}
             for report, seq, attempt, state, detail, metrics, command_ack, log_tail, timing, runtime, execution in checked:
                 row = self._owned(report["id"], node_id)
@@ -845,12 +877,16 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                 if seconds:
                     jobs[-1]["lease_granted"] = self._renew_lease(row, seconds, lease_requests.get(row["id"]))
             mode = self.db.execute("SELECT mode FROM nodes WHERE id=?", (node_id,)).fetchone()[0]
-            deployments = [dict(row) for row in self.db.execute(
-                "SELECT d.digest,p.size,p.project_id,p.bundle_id,d.revision,CASE WHEN p.deleted_at IS NULL THEN 'install' ELSE 'delete' END AS action FROM project_deployments d JOIN projects p ON p.digest=d.digest WHERE d.node_id=? AND d.status NOT IN ('installed','failed','deleted','delete_failed') ORDER BY d.updated LIMIT 100", (node_id,))]
             capabilities = snapshot.get("capabilities", [])
-            deployments = [item for item in deployments if
-                ("project-delete-v1" if item["action"] == "delete" else "project-bundle-v1") in capabilities]
-            response = {"jobs": jobs, "mode": mode, "ack": ack,
+            deployments = [dict(row) for row in self.db.execute("""
+                SELECT d.digest,p.size,p.project_id,p.bundle_id,d.revision,
+                       CASE WHEN p.deleted_at IS NULL THEN 'install' ELSE 'delete' END AS action
+                FROM project_deployments d JOIN projects p ON p.digest=d.digest
+                WHERE d.node_id=? AND d.status NOT IN ('installed','failed','deleted','delete_failed')
+                  AND (CASE WHEN p.deleted_at IS NULL THEN ? ELSE ? END)
+                ORDER BY p.deleted_at IS NULL,d.updated LIMIT 100
+            """, (node_id, 'project-bundle-v1' in capabilities, 'project-delete-v1' in capabilities))]
+            response = {"jobs": jobs, "mode": mode, "ack": ack, "catalog_protocol": 1,
                         "project_deployments": deployments, 'hub_urls': self.center_addresses()}
             response["controller_agent"] = self.autonomy.summary()
             if NODE_POLICY_CAPABILITY in capabilities:
@@ -949,7 +985,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                     if pending:
                         partial.unlink(missing_ok=True)
                         raise APIError(409, "Wait for all workers to finish deleting this project before importing the identical bundle again")
-                    self.db.execute("UPDATE projects SET deleted_at=NULL,cleanup_error='',created=? WHERE digest=?", (now(), digest))
+                    self.db.execute("UPDATE projects SET deleted_at=NULL,cleanup_error='',auto_archived=0,created=? WHERE digest=?", (now(), digest))
                 os.replace(partial, final)
                 self.db.execute("INSERT OR IGNORE INTO projects(digest,project_id,name,size,created,bundle_id) VALUES (?,?,?,?,?,?)", (digest, manifest["project_id"], manifest["name"], size, now(), manifest.get("bundle_id", "")))
                 self.db.execute("UPDATE project_uploads SET completed_digest=? WHERE id=?", (digest, upload_id))
@@ -970,9 +1006,27 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
                     raise APIError(404, "Unknown worker " + node_id)
                 if "project-bundle-v1" not in json.loads(row["snapshot"]).get("capabilities", []):
                     raise APIError(409, "Worker " + node_id + " must be upgraded and connected once before automatic project delivery")
+            timestamp = now()
+            self.db.execute('UPDATE projects SET last_deployed=? WHERE digest=?', (timestamp, digest))
             for node_id in set(node_ids):
-                self.db.execute("INSERT INTO project_deployments VALUES (?,?,1,'queued','',?) ON CONFLICT(digest,node_id) DO UPDATE SET revision=revision+1,status='queued',detail='',updated=excluded.updated", (digest, node_id, now()))
+                self.db.execute("INSERT INTO project_deployments VALUES (?,?,1,'queued','',?) ON CONFLICT(digest,node_id) DO UPDATE SET revision=revision+1,status='queued',detail='',updated=excluded.updated", (digest, node_id, timestamp))
         return {"digest": digest, "node_ids": sorted(set(node_ids)), "status": "queued"}
+
+    def project_restore(self, payload):
+        digest = self._project_digest(payload.get('digest'))
+        with self.transaction():
+            project = self.db.execute('SELECT * FROM projects WHERE digest=?', (digest,)).fetchone()
+            if project is None or not project['auto_archived']:
+                raise APIError(404, 'Unknown archived project')
+            if self.db.execute("SELECT 1 FROM project_deployments d JOIN projects p ON p.digest=d.digest "
+                               "WHERE p.bundle_id=? AND p.deleted_at IS NOT NULL AND d.status!='deleted'",
+                               (project['bundle_id'],)).fetchone():
+                raise APIError(409, '请等待所有节点完成旧部署清理后再恢复项目')
+            if archive_signature(self.root, digest)[2] != project['size']:
+                raise APIError(409, '项目归档文件大小已变化')
+            self.db.execute("UPDATE projects SET deleted_at=NULL,cleanup_error='',auto_archived=0,created=? WHERE digest=?",
+                            (now(), digest))
+        return {'digest': digest, 'status': 'restored'}
 
     def _project_is_deleted(self, spec):
         bundle_id = spec.get("project_bundle_id")
@@ -981,7 +1035,7 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             "AND NOT EXISTS (SELECT 1 FROM projects WHERE bundle_id=? AND deleted_at IS NULL)",
             (bundle_id, bundle_id)).fetchone())
 
-    def project_delete(self, payload):
+    def project_delete(self, payload, *, retire=None):
         """Hide immediately and retain a durable per-worker cleanup tombstone."""
         digest = self._project_digest(payload.get("digest"))
         if not isinstance(payload.get("retry", False), bool):
@@ -998,13 +1052,22 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
             # Different ZIP encodings may name the same installed snapshot. Its
             # packages share a lifecycle, so no alias can redeploy a deleted copy.
             aliases = [row[0] for row in self.db.execute("SELECT digest FROM projects WHERE bundle_id=? AND (? IS NULL OR deleted_at IS NOT NULL)", (bundle_id, project['deleted_at']))]
-            for row in self.db.execute("SELECT id,spec,state,command_id,command_ack FROM jobs"):
-                if project["deleted_at"] is None and json.loads(row["spec"]).get("project_bundle_id") == bundle_id and (
-                        row["state"] not in TERMINAL or row["command_id"] > row["command_ack"]):
+            if retire is not None:
+                cutoff, archives = retire
+                active_aliases = {row[0] for row in self.db.execute(
+                    "SELECT digest FROM projects WHERE bundle_id=? AND deleted_at IS NULL", (bundle_id,))}
+                if (project['deleted_at'] is not None or active_aliases != archives.keys()
+                        or not eligible_bundles(self.db, cutoff, bundle_id=bundle_id)
+                        or any(archive_signature(self.root, key) != signature for key, signature in archives.items())):
+                    raise APIError(409, "Project usage or archive changed during maintenance; retry next pass")
+            elif project['deleted_at'] is None:
+                for row in self.db.execute(f"SELECT id FROM job_summaries WHERE {PENDING_SQL} "
+                                           "AND json_extract(spec,'$.project_bundle_id')=? LIMIT 1", (bundle_id,)):
                     raise APIError(409, "Stop or cancel this project's active experiments and wait for worker acknowledgement before deleting: " + row["id"])
             timestamp = now()
             for alias in aliases:
-                changed = self.db.execute("UPDATE projects SET deleted_at=? WHERE digest=? AND deleted_at IS NULL", (timestamp, alias)).rowcount
+                changed = self.db.execute("UPDATE projects SET deleted_at=?,auto_archived=? WHERE digest=? AND deleted_at IS NULL",
+                                          (timestamp, int(retire is not None), alias)).rowcount
                 if changed:
                     self.db.execute("UPDATE project_deployments SET revision=revision+1,status='delete_pending',detail='Waiting for worker cleanup; offline workers retry on reconnect. Older workers need an upgrade.',updated=? WHERE digest=?", (timestamp, alias))
                 elif payload.get("retry"):
@@ -1021,14 +1084,15 @@ class Hub(ExecutionControlHubMixin, ComputePolicyHubMixin, ResultHubMixin, Matri
 
     def _cleanup_project_archives(self, digests=None):
         with self.lock:
-            rows = list(self.db.execute("SELECT digest FROM projects WHERE deleted_at IS NOT NULL"))
+            rows = list(self.db.execute("SELECT digest,auto_archived FROM projects WHERE deleted_at IS NOT NULL"))
             for row in rows:
                 digest = row["digest"]
                 if digests is not None and digest not in digests:
                     continue
                 error = ""
                 try:
-                    safe_child(self.root, f"projects/{digest}.zip").unlink(missing_ok=True)
+                    if not row['auto_archived']:
+                        owned_path(self.root, f"projects/{digest}.zip").unlink(missing_ok=True)
                     # Local import ZIPs are owned build products; source paths
                     # and editable import drafts are never deletion targets.
                     for state_file in (self.root / "imports").glob("*/state.json"):
@@ -1384,7 +1448,7 @@ def make_server(hub, host="127.0.0.1", port=8765, *, max_request_threads=64):
                                                  payload, identities[0] if identities else None, query))
                 return
             role, node_id = hub.authenticate(self.headers.get("Authorization"))
-            required_role = "node" if path in ("/api/sync", "/api/host/sync", "/api/upload", "/api/node-info", "/api/projects/download",
+            required_role = "node" if path in ("/api/sync", "/api/node-catalog", "/api/host/sync", "/api/upload", "/api/node-info", "/api/projects/download",
                 "/api/results", "/api/delivery/poll", "/api/delivery/report", "/api/evidence/upload",
                 "/api/execution/checkpoints", "/api/execution/checkpoints/download") else "admin"
             center_routes = ('/api/centers/identity', '/api/centers/snapshot', '/api/centers/file',
@@ -1430,7 +1494,7 @@ def make_server(hub, host="127.0.0.1", port=8765, *, max_request_threads=64):
                     self._send(hub.ai_settings())
                 elif path == "/api/node-info":
                     self._send({"node_id": node_id, "paired": True, "hub_version": __version__,
-                        "capabilities": [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY]})
+                        "capabilities": [result_protocol.CAPABILITY, result_protocol.EVIDENCE_CAPABILITY, result_protocol.MIGRATION_CAPABILITY, "node-catalog-v1"]})
                 elif path == "/api/projects/download":
                     offset = parameter("offset")
                     if not offset.isdigit():
@@ -1509,14 +1573,15 @@ def make_server(hub, host="127.0.0.1", port=8765, *, max_request_threads=64):
                           "/api/enroll": hub.enroll,
                           "/api/ai/settings": hub.ai_settings, "/api/ai/test": hub.ai_test,
                           "/api/projects/upload": hub.project_upload, "/api/projects/deploy": hub.project_deploy,
-                          "/api/projects/delete": hub.project_delete,
+                          "/api/projects/delete": hub.project_delete, "/api/projects/restore": hub.project_restore,
                           "/api/results/verification": hub.verify_result, "/api/evidence/request": hub.request_evidence,
                           "/api/transfers/migrate": hub.migrate_uploads,
                           "/api/results": lambda p: hub.receive_result(node_id, p),
                           "/api/delivery/poll": lambda p: hub.delivery_poll(node_id, p),
                           "/api/delivery/report": lambda p: hub.delivery_report(node_id, p),
                           "/api/evidence/upload": lambda p: hub.upload_evidence(node_id, p),
-                          "/api/sync": lambda p: hub.sync(node_id, p), "/api/upload": lambda p: hub.upload(node_id, p)}
+                          "/api/sync": lambda p: hub.sync(node_id, p), "/api/node-catalog": lambda p: node_catalog.receive(hub, node_id, p),
+                          "/api/upload": lambda p: hub.upload(node_id, p)}
                 if path.startswith("/api/local/imports/"):
                     imports = hub.project_imports()
                     routes.update({"/api/local/imports/start": imports.start,

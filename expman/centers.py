@@ -215,7 +215,7 @@ class CenterHubMixin:
                         self.db.backup(target)
                     configuration = {key: copy.deepcopy(self.config[key]) for key in ('nodes', 'centers', 'workspace_id')}
                     manifest = {}
-                    for row in self.db.execute('SELECT digest,size FROM projects WHERE deleted_at IS NULL'):
+                    for row in self.db.execute('SELECT digest,size FROM projects WHERE deleted_at IS NULL OR auto_archived=1'):
                         key = f'projects/{row["digest"]}.zip'
                         if safe_child(self.root, key).is_file():
                             manifest[key] = dict(sha256=row['digest'], size=row['size'])

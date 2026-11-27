@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -239,3 +240,35 @@ class StorageTests(unittest.TestCase):
             thread.return_value.start.assert_called_once()
         maintenance.thread = None
         maintenance.cleaning = False
+
+    def test_low_disk_reclaims_only_managed_caches_while_an_experiment_is_running(self):
+        self.agent._save(self.record, state='running')
+        downloads = self.root / 'project-downloads'
+        downloads.mkdir()
+        obsolete, active, recent, legacy, installed = [downloads / (letter * 64 + suffix) for letter, suffix in
+            (('a', '.part'), ('b', '.part'), ('c', '.part'), ('d', '.zip'), ('e', '.zip'))]
+        stale_archive = self.root / 'code_archive' / ('a' * 32 + '.tmp')
+        stale_archive.parent.mkdir()
+        for path in (obsolete, active, recent, legacy, installed, stale_archive):
+            path.write_bytes(b'cached')
+            if path != recent:
+                old = common.now() - storage.CACHE_AGE - 60
+                os.utime(path, (old, old))
+        bundle = 'a' * 64
+        snapshot = self.root / 'distributed-projects' / 'example' / bundle
+        repo = snapshot / 'repository'
+        repo.mkdir(parents=True)
+        common.atomic_json(snapshot / '.expman-install.json', {'schema': 1, 'project_id': 'example', 'bundle_id': bundle})
+        common.atomic_json(self.config, dict(self.agent.config, task_templates=[{'project_bundle_id': bundle, 'source': {'repo': str(repo)}}]))
+        self.agent._set_meta('project_deliveries', {
+            active.stem: {'status': 'downloading'},
+            installed.stem: {'status': 'installed', 'project_id': 'example', 'bundle_id': bundle, 'size': 6},
+        })
+        maintenance = self.agent.maintenance
+        with patch.object(storage.shutil, 'disk_usage', return_value=Mock(total=100 * 1024**3, free=1024**2)):
+            maintenance.tick()
+            maintenance.thread.join(5)
+        self.assertEqual(common.read_json(self.root / 'storage-status.json')['completed_items'], 3)
+        self.assertTrue(all(path.is_file() for path in (active, recent, legacy)))
+        self.assertFalse(any(path.exists() for path in (obsolete, installed, stale_archive)))
+        self.assertEqual(self.agent.records()[0]['state'], 'running')

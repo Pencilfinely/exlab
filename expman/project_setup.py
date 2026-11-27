@@ -1,6 +1,5 @@
 """Register an existing local Git project and generate a task without editing config."""
 import argparse
-import json
 from pathlib import Path
 import re
 import shlex
@@ -54,8 +53,6 @@ def register(root, name, repository, command, data=None):
         config['allowed_repos'].append(str(repo))
     templates = config.get('task_templates', [])
     config['task_templates'] = [t for t in templates if t.get('name') != name] + [task]
-    if len(json.dumps(config['task_templates']).encode()) > 128 * 1024:
-        raise ValueError('Too many saved templates; export older templates before adding more')
     with InstanceLock(root / 'setup.lock'), InstanceLock(Path(config['root']) / 'agent.lock'):
         # All validation succeeded before the configuration is replaced.
         if config_path.read_bytes() != original:

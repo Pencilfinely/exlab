@@ -58,10 +58,12 @@ def read_json(path, default=None):
             time.sleep(0.0125 * 2**attempt)
 
 
-def sha256_file(path):
+def sha256_file(path, *, cancelled=None):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
+            if cancelled is not None and cancelled():
+                raise InterruptedError('File verification interrupted')
             digest.update(block)
     return digest.hexdigest()
 

@@ -421,8 +421,6 @@ def install_bundle(bundle, storage_root, node_config, *, docker_endpoint=None):
                 'resume_supported': manifest['harness'].get('resume', {}).get('supported', False)}))
         config['task_templates'] = [t for t in config.get('task_templates', [])
                                     if t.get('project_bundle_id') != manifest['bundle_id']] + templates
-        if len(config['task_templates']) > 100 or len(_encoded(config['task_templates'])) > 128 * 1024:
-            raise ValueError('Too many saved templates; remove unused presets before installing')
         return {'config': config, 'templates': templates, 'project': {
             'project_id': manifest['project_id'], 'name': manifest['name'],
             'bundle_id': manifest['bundle_id'], 'root': str(root)}}

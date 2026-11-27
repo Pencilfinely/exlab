@@ -12,6 +12,7 @@ import subprocess
 import sys
 import statistics
 
+from . import node_catalog
 from .common import now
 
 CAPABILITY = "dynamic-compute-v1"
@@ -271,7 +272,7 @@ class ComputePolicyHubMixin:
         nodes = []
         for row in self.db.execute("SELECT * FROM nodes"):
             node = dict(row)
-            node["snapshot"] = json.loads(node["snapshot"])
+            node["snapshot"] = node_catalog.hydrate(self.db, node["id"], json.loads(node["snapshot"]))
             policy = self._compute_policy(node["id"])
             if policy:
                 apply(node["snapshot"], policy)

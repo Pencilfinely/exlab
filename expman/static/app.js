@@ -528,10 +528,16 @@ function renderProjectCleanups(){
   const items=state.project_deletions||[];$('project-cleanups').hidden=!items.length;$('project-cleanup-list').replaceChildren();
   const labels={delete_pending:'等待节点连接并清理',deleting:'正在清理部署副本',deleted:'已清理',delete_failed:'清理失败'};
   for(const project of items){const row=node('div',undefined,'cleanup-row');row.append(node('strong',project.name));
+    if(project.auto_archived){
+      row.append(node('p','项目包已自动归档。恢复后可重新部署。','muted'));
+      const restore=smallButton('恢复项目',async()=>{restore.disabled=true;try{await api('/api/projects/restore',{digest:project.digest});await refresh();notify('项目已恢复，可以重新部署。');}catch(error){notify(error.message);}finally{restore.disabled=false;}});
+      restore.disabled=items.some(item=>item.bundle_id===project.bundle_id&&item.deployments?.some(deployment=>deployment.status!=='deleted'));
+      row.append(restore);
+    }
     for(const deployment of project.deployments||[])row.append(node('p',`${deployment.node_id} · ${labels[deployment.status]||deployment.status}${deployment.detail?' · '+deployment.detail:''}`,'muted'));
     const cleanupError=project.controller_cleanup_error||project.cleanup_error;
     if(cleanupError)row.append(node('p','管理端清理失败：'+cleanupError,'inline-feedback error'));
-    else if(!(project.deployments||[]).length)row.append(node('p','管理端项目包已清理，无节点部署。','muted'));
+    else if(!project.auto_archived&&!(project.deployments||[]).length)row.append(node('p','管理端项目包已清理，无节点部署。','muted'));
     if(cleanupError||project.deployments?.some(item=>item.status==='delete_failed'))row.append(smallButton('重试清理',async()=>{try{await api('/api/projects/delete',{digest:project.digest,retry:true});await refresh();}catch(error){notify(error.message);}}));
     $('project-cleanup-list').append(row);
   }

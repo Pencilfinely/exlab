@@ -158,6 +158,16 @@ class HarnessProjectTests(unittest.TestCase):
         self.assertEqual(self.source_hashes(), before)
         self.assertFalse((self.root / "escape.py").exists())
 
+    def test_install_preserves_large_existing_template_catalog(self):
+        self.draft()
+        bundle = self.bundle()
+        old = common.validate_task({"backend": "demo", "params": {"samples": list(range(2000))}})
+        config = dict(self.config, task_templates=[old] * 105)
+        self.assertGreater(len(json.dumps(config["task_templates"])), 128 * 1024)
+        result = install_bundle(bundle, self.storage, config)
+        self.assertEqual(result["config"]["task_templates"][:105], config["task_templates"])
+        self.assertEqual(result["config"]["task_templates"][105:], result["templates"])
+
     def test_install_is_idempotent_and_later_code_version_preserves_previous_registrations(self):
         self.draft()
         before = self.source_hashes()

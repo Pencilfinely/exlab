@@ -11,7 +11,7 @@ import urllib.error
 import zipfile
 from unittest.mock import patch
 
-from expman import common
+from expman import common, node_catalog
 from expman.agent import Agent
 from expman.hub import APIError, Hub, make_server
 from tests.support import temporary_directory
@@ -107,11 +107,58 @@ class ProjectDeliveryTests(unittest.TestCase):
         deployment = self.hub.state()["projects"][0]["deployments"][0]
         self.assertEqual((deployment["status"], deployment["revision"]), ("queued", 2))
 
+    def test_catalog_retry_is_node_scoped_atomic_and_requeues_legacy_install_failure(self):
+        self.upload()
+        self.deploy()
+        failure = {"digest": self.digest, "revision": 1, "status": "failed",
+                   "detail": "Too many saved templates; remove unused presets before installing"}
+        payload = {"node_id": "worker", "snapshot": self.snapshot, "project_reports": [failure]}
+        self.hub.sync("worker", payload)
+        template = common.validate_task({"backend": "demo", "params": {"padding": "a" * 5000}})
+        summary, data = node_catalog.split(dict(self.snapshot, task_templates=[template] * 80))
+        digest = summary["catalog_digest"]
+        payload["snapshot"] = summary
+        self.assertEqual(self.hub.sync("worker", payload), {"catalog_needed": digest})
+        def page(offset):
+            return dict(digest=digest, size=len(data), offset=offset,
+                        data=base64.b64encode(data[offset:offset + node_catalog.CHUNK]).decode())
+        first = node_catalog.receive(self.hub, "worker", page(0))
+        self.assertEqual(node_catalog.receive(self.hub, "worker", page(0)), first)
+        self.assertNotIn("catalog_digest", self.hub.state()["nodes"][-1]["snapshot"])
+        self.assertEqual(node_catalog.receive(self.hub, "worker", page(first["offset"])), {"offset": len(data)})
+        self.assertEqual(self.hub.sync("other", {"node_id": "other", "snapshot": summary}), {"catalog_needed": digest})
+        declarations = self.hub.sync("worker", payload)["project_deployments"]
+        self.assertEqual([(d["digest"], d["revision"]) for d in declarations], [(self.digest, 2)])
+        self.assertEqual(self.hub.sync("worker", payload)["project_deployments"], declarations)
+
     def test_bad_digest_never_publishes_project(self):
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.chunk(0, self.body, sha256="0" * 64)
         self.assertEqual(error.exception.code, 422)
         self.assertEqual(self.hub.state()["projects"], [])
+
+    def test_first_heartbeat_syncs_catalog_larger_than_legacy_count_and_body_limits(self):
+        agent = self.create_agent()
+        templates = [common.validate_task({'backend': 'demo', 'name': f'Preset {index}', 'params': {'padding': 'a' * 20000}})
+                     for index in range(105)]
+        environment = {'profile': 'cuda', 'image': 'test@sha256:' + 'a' * 64}
+        repo = 'https://example.test/train.git'
+        project = common.validate_task({'backend': 'docker', 'project_bundle_id': 'a' * 64,
+            'experiment_id': 'render', 'source': {'repo': repo, 'commit': 'b' * 40},
+            'environments': [environment], 'command': ['python', 'train.py'], 'result_delivery': {'mode': 'legacy'}})
+        templates.append(project)
+        snapshot = dict(self.snapshot, task_templates=templates, allowed_repos=[repo],
+                        profiles={'cuda': environment['image']},
+                        gpus=[{'uuid': 'GPU-test', 'total_mb': 16384, 'free_mb': 16384, 'profiles': ['cuda']}])
+        agent._sync(snapshot)
+        self.assertTrue(agent.online, agent.last_error)
+        worker = next(row for row in self.hub.state()['nodes'] if row['id'] == 'worker')
+        self.assertEqual(worker['snapshot']['task_templates'], templates)
+        submitted = self.hub.submit({'spec': project, 'request_id': 'large-catalog-docker'})['ids'][0]
+        self.assertEqual(self.hub.job(submitted)['node_id'], 'worker')
+        agent._sync(dict(snapshot, task_templates=templates[1:]))
+        self.assertTrue(agent.online, agent.last_error)
+        self.assertEqual(self.hub.db.execute('SELECT COUNT(*) FROM node_catalogs WHERE node_id=?', ('worker',)).fetchone()[0], 1)
 
     def test_archive_validation_does_not_block_heartbeats_or_unrelated_uploads(self):
         entered, release = threading.Event(), threading.Event()

@@ -30,6 +30,9 @@ GROUPS = {'runs': '实验输出', 'retained_evidence': '权重与证据档案',
           'code_archive': '代码归档', 'distributed-projects': '项目与数据集',
           'project-downloads': '项目下载'}
 WEIGHTS = {'.pt', '.pth', '.ckpt', '.safetensors', '.bin', '.npz', '.npy', '.h5', '.hdf5', '.onnx'}
+CACHE_AGE = 7 * 86400
+PRESSURE_RETRY = 300
+FINISHED_REQUESTS = ('ready', 'completed', 'failed', 'cancelled')
 
 
 def _records(db):
@@ -90,6 +93,54 @@ def command(config_path):
     return execute
 
 
+def _project_deliveries(db):
+    row = db.execute("SELECT value FROM metadata WHERE key='project_deliveries'").fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def _cache_candidates(root, config, db, cutoff, warnings):
+    deliveries = _project_deliveries(db)
+    for folder, pattern in (('project-downloads', r'[0-9a-f]{64}\.(?:zip|part)'),
+                            ('code_archive', r'[0-9a-f]{32}\.tmp')):
+        try:
+            directory = owned_path(root, folder)
+            for entry in directory.iterdir() if directory.is_dir() else ():
+                if not re.fullmatch(pattern, entry.name):
+                    continue
+                relative = f'{folder}/{entry.name}'
+                try:
+                    path = owned_path(root, relative)
+                    if path.is_file() and _cache_is_reclaimable(root, config, deliveries, path, cutoff):
+                        yield {'kind': 'cache', 'job_id': relative, 'bytes': _size(path), 'cutoff': cutoff}
+                except (OSError, ValueError) as error:
+                    warnings.append(str(error)[:250])
+        except (OSError, ValueError) as error:
+            warnings.append(str(error)[:250])
+
+
+def _cache_is_reclaimable(root, config, deliveries, path, cutoff):
+    folder, name = path.parent.name, path.name
+    if folder == 'code_archive' and re.fullmatch(r'[0-9a-f]{32}\.tmp', name):
+        return path.stat().st_mtime <= cutoff
+    if folder != 'project-downloads' or not re.fullmatch(r'[0-9a-f]{64}\.(?:zip|part)', name):
+        return False
+    item = deliveries.get(path.stem, {})
+    if path.suffix == '.part':
+        return (item.get('status') in (None, 'installed', 'failed', 'deleted')
+                and path.stat().st_mtime <= cutoff)
+    project, bundle = item.get('project_id'), item.get('bundle_id')
+    if (item.get('status') != 'installed' or path.stat().st_size != item.get('size')
+            or not isinstance(project, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', project)
+            or not isinstance(bundle, str) or not re.fullmatch(r'[0-9a-f]{64}', bundle)):
+        return False
+    snapshot = f'distributed-projects/{project}/{bundle}'
+    receipt = common.read_json(owned_path(root, f'{snapshot}/.expman-install.json'), {})
+    repo = str(owned_path(root, f'{snapshot}/repository'))
+    return (receipt.get('schema') == 1 and receipt.get('project_id') == project and receipt.get('bundle_id') == bundle
+            and any(spec.get('project_bundle_id') == bundle and spec.get('source', {}).get('repo') == repo
+                    for spec in config.get('task_templates', [])))
+
+
 def inspect(root, config, db, execute):
     root = Path(root).resolve()
     seen, groups, items, warnings = set(), [], [], []
@@ -100,6 +151,7 @@ def inspect(root, config, db, execute):
         except (OSError, ValueError) as error:
             warnings.append(label + '：' + str(error)[:200])
     records = _records(db)
+    items.extend(_cache_candidates(root, config, db, common.now() - CACHE_AGE, warnings))
     for identity, record in records.items():
         if not _finished(record) or not re.fullmatch('[a-f0-9]{32}', identity):
             continue
@@ -198,6 +250,17 @@ def reclaim(root, config, db, execute, plan, report=None, cancelled=lambda: Fals
             break
         try:
             identity = item['job_id']
+            if item['kind'] == 'cache':
+                path = owned_path(root, identity)
+                deliveries = _project_deliveries(db)
+                if not path.is_file() or not _cache_is_reclaimable(root, config, deliveries, path, item['cutoff']):
+                    raise ValueError('缓存状态已变化，已保留')
+                path.unlink()
+                result['completed_items'] += 1
+                result['removed_bytes'] += item['bytes']
+                if report:
+                    report(dict(result, status='running'))
+                continue
             if not re.fullmatch('[a-f0-9]{32}', identity):
                 raise ValueError('实验标识无效')
             row = db.execute('SELECT record FROM tasks WHERE id=?', (identity,)).fetchone()
@@ -259,14 +322,18 @@ def run_request(config_path, request, report, cancelled=lambda: False):
     execute = command(config_path)
     db = worker_database.connect(root / 'node.sqlite3')
     try:
-        plan = inspect(root, config, db, execute)
+        if request.get('pressure'):
+            warnings = []
+            plan = {'items': list(_cache_candidates(root, config, db, common.now() - CACHE_AGE, warnings)), 'warnings': warnings}
+        else:
+            plan = inspect(root, config, db, execute)
         if cancelled():
             return {'status': 'cancelled', 'detail': '已取消，现有文件保留。'}
         if request['action'] == 'scan':
             return plan
         if request['action'] != 'clean':
             raise ValueError('未知存储操作')
-        return reclaim(root, config, db, execute, plan, report, cancelled)
+        return dict(reclaim(root, config, db, execute, plan, report, cancelled), warnings=plan['warnings'])
     finally:
         db.close()
 
@@ -279,6 +346,8 @@ class Maintenance:
         self.cleaning = False
         self.last_id = None
         self.next_auto = time.monotonic() + 300
+        self.next_pressure_check = 0
+        self.next_pressure_cleanup = 0
 
     def tick(self):
         if self.thread and self.thread.is_alive():
@@ -286,23 +355,37 @@ class Maintenance:
         root = self.agent.root
         request = common.read_json(root / 'storage-request.json', {})
         policy = common.read_json(root / 'storage-policy.json', {})
-        active = self.agent.db.execute("SELECT 1 FROM tasks WHERE json_extract(record,'$.state') IN ('assigned','preparing','ready','starting','running') LIMIT 1").fetchone()
-        if not active and time.monotonic() >= self.next_auto and policy.get('automatic', True):
+        now = time.monotonic()
+        pressure = False
+        periodic = False
+        if policy.get('automatic', True):
+            if now >= self.next_pressure_check:
+                self.next_pressure_check = now + 60
+                usage = shutil.disk_usage(root)
+                threshold = max(1024**3, min(5 * 1024**3, usage.total // 20))
+                pressure = usage.free < threshold and now >= self.next_pressure_cleanup
+            if now >= self.next_auto:
+                periodic = not self.agent.db.execute("SELECT 1 FROM tasks WHERE json_extract(record,'$.state') IN ('assigned','preparing','ready','starting','running') LIMIT 1").fetchone()
+        if periodic or pressure:
             try:
                 with InstanceLock(root / 'storage-request.lock'):
                     request = common.read_json(root / 'storage-request.json', {})
                     previous = common.read_json(root / 'storage-status.json', {})
-                    if not request or previous.get('id') == request.get('id') and previous.get('status') in ('ready', 'completed', 'failed', 'cancelled'):
+                    if not request or previous.get('id') == request.get('id') and previous.get('status') in FINISHED_REQUESTS:
                         request = {'id': uuid.uuid4().hex, 'action': 'clean', 'automatic': True}
+                        if not periodic:
+                            request['pressure'] = True
                         common.atomic_json(root / 'storage-request.json', request)
-                        self.next_auto = time.monotonic() + 6 * 3600
+                        if periodic:
+                            self.next_auto = now + 6 * 3600
+                        self.next_pressure_cleanup = now + PRESSURE_RETRY
             except RuntimeError:
                 return
         identity = request.get('id')
         if not isinstance(identity, str) or not re.fullmatch('[a-f0-9]{32}', identity) or identity == self.last_id:
             return
         previous = common.read_json(root / 'storage-status.json', {})
-        if previous.get('id') == identity and previous.get('status') in ('ready', 'completed', 'failed', 'cancelled'):
+        if previous.get('id') == identity and previous.get('status') in FINISHED_REQUESTS:
             self.last_id = identity
             return
         self.cleaning = request.get('action') == 'clean'

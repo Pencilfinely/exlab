@@ -170,8 +170,6 @@ def import_project(root, project, config_path='config/video_games_full.json', na
         config['allowed_repos'] = list(dict.fromkeys(config['allowed_repos'] + [str(repo)]))
         config['task_templates'] = [t for t in config.get('task_templates', [])
                                     if t.get('name') not in {short['name'], formal['name']}] + templates
-        if len(config['task_templates']) > 100 or len(encoded(config['task_templates'])) > 128 * 1024:
-            raise ValueError('Too many saved templates')
         receipt = {'source_files': source_manifest, 'data_files': data_manifest,
                    'research_config': research, 'tasks': [t['name'] for t in templates],
                    'source_commit': commit, 'original_project_modified': False,
