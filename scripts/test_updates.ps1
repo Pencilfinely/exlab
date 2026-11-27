@@ -450,7 +450,12 @@ static class InstallProbeTests {
             Assert(child.ExitCode==38,"Boot task failed to follow the installed version ("+child.ExitCode+"): "+child.StandardError.ReadToEnd());
         }
     }
-    static void BootUpdateHandoff() {
+    static void BootUpdateHandoff(string folder) {
+        string presence=Path.Combine(folder,"worker-desktop.lock");
+        Assert(!WorkerBoot.DesktopPresent(presence),"An inactive desktop held the boot updater.");
+        using(new FileStream(presence,FileMode.Open,FileAccess.ReadWrite,FileShare.Read))
+            Assert(WorkerBoot.DesktopPresent(presence),"Boot updater would replace settings owned by a desktop session.");
+        Assert(!WorkerBoot.DesktopPresent(presence),"Boot updater did not resume after the desktop closed.");
         var trace=new List<string>();
         WorkerBootUpdater.Handoff(action=>{
             trace.Add(action);
@@ -998,7 +1003,7 @@ static class InstallProbeTests {
             return WorkerBoot.StartInstalledVersion;
         }
         try {
-            BootLauncher(args[0]);BootUpdateHandoff();assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
+            BootLauncher(args[0]);BootUpdateHandoff(args[0]);assertions+=WorkerMoveTests.Run(args[0]);WorkerCompletion();InstallerWiring();ComputeActivation(args[0]);DockerRecovery(args[0]);ComputeControlReceipts();UnifiedWorkerRelease();MemoryRelease();RegistryAndContainerRelease();HostControl(args[0]);WorkerRestoreReadiness(args[0]);HostHeartbeatDuringRestore().GetAwaiter().GetResult();
             Assert(DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop","docker-desktop-data"}),"Idle ExLab runtime should allow full WSL shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","Debian"}),"Another WSL distribution must prevent full shutdown.");
             Assert(!DesktopRuntime.CanShutdownAll("Ubuntu",new[]{"Ubuntu","docker-desktop-project"}),"A Docker-like name is not authority to shut down a user distribution.");

@@ -330,6 +330,7 @@ namespace ExperimentManagerDesktop {
                 using(var mutex=new Mutex(true,key,out created)) using(var show=new EventWaitHandle(false,EventResetMode.AutoReset,key+"-Open"))
                 using(var preferences=new EventWaitHandle(false,EventResetMode.AutoReset,key+"-Settings")) {
                     if(!created) { if(Has(args,"--settings"))preferences.Set();else show.Set(); return; }
+                    using(var desktop=Worker?WorkerBoot.OpenDesktopPresence():null)
                     using(var form=new ClientForm(args)) {
                         ClientTrace("client_started");
                         var handle=form.Handle;

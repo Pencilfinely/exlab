@@ -25,8 +25,20 @@ namespace ExperimentManagerDesktop {
         internal static string StatusPath {get{return Path.Combine(App.SettingsRoot,"boot-status.json");}}
         internal static string TaskName {get{return "ExLab-Worker-Boot-"+WindowsIdentity.GetCurrent().User.Value;}}
         internal static string SuspendPath {get{return Path.Combine(App.SettingsRoot,"boot-suspend");}}
+        internal static string DesktopPresencePath {get{return Path.Combine(App.SettingsRoot,"worker-desktop.lock");}}
         internal static FileStream AcquireUpdateLock() {
+            Directory.CreateDirectory(App.SettingsRoot);
             return new FileStream(Path.Combine(App.SettingsRoot,"boot-update.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None);
+        }
+        internal static FileStream OpenDesktopPresence() {
+            // Register before the desktop reads settings. The boot updater
+            // checks for this owner while holding the same handoff lock.
+            using(AcquireUpdateLock())
+                return new FileStream(DesktopPresencePath,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.Read);
+        }
+        internal static bool DesktopPresent(string path) {
+            try {using(new FileStream(path,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None))return false;}
+            catch(IOException){return true;}
         }
         static string PowerShell {get{return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"WindowsPowerShell","v1.0","powershell.exe");}}
         static string LauncherArguments(string launcher) {
@@ -255,7 +267,8 @@ namespace ExperimentManagerDesktop {
         static bool Enabled() {
             if(!App.Flag(App.ReadSettings(),"auto_update")||WorkerMigration.Pending||File.Exists(WorkerBoot.SuspendPath)||
                 App.Text(App.Read(Path.Combine(App.SettingsRoot,"boot-request.json")),"mode")=="release")return false;
-            // A desktop client in this session uses its existing update queue.
+            // A desktop client can share settings from another login session.
+            if(WorkerBoot.DesktopPresent(WorkerBoot.DesktopPresencePath))return false;
             Mutex client;
             if(!Mutex.TryOpenExisting(App.InstanceKey,out client))return true;
             client.Dispose();return false;
